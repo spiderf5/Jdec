@@ -1,0 +1,14 @@
+{
+  "mappings": {
+    "demo/mixin/RenderHooks": {
+      "runTick": "method_9012"
+    },
+    "demo/mixin/PlayerHooks": {
+      "tick": "method_1111",
+      "jump": "method_2222"
+    }
+  },
+  "data": {
+    "searge": {}
+  }
+}

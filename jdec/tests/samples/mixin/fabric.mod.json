@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-cheat",
+  "version": "0.1.0",
+  "name": "Demo Cheat",
+  "description": "Fixture: a Fabric-style mod with mixins, used by jdec tests.",
+  "authors": ["jdec"],
+  "entrypoints": {
+    "client": ["demo.mixin.ClientEntry::onInitializeClient"]
+  },
+  "mixins": ["demo.mixins.json"]
+}

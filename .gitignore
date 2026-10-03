@@ -1,0 +1,28 @@
+# agent workspace state (session memory, not project code)
+.workbuddy/
+
+# python
+__pycache__/
+*.py[cod]
+
+# jdec: downloaded engines and build artifacts, restorable via
+#   python jdec.py engines          (engine jars)
+#   python tests/build_fixtures.py  (sample/mixin/flow/collide jars)
+jdec/engines/*.jar
+jdec/engines/bridge/*.class
+jdec/engines/tap/*.jar
+jdec/engines/tap/*.class
+jdec/engines/tap/classes/
+jdec/engines/tests/
+jdec/tests/build/
+jdec/tests/*.jar
+
+# jdec: transient run/debug outputs (decompiled trees, analysis dumps,
+# downloaded MC jars/mappings under tests/mc)
+jdec/tests/dbg*/
+jdec/tests/mc/
+jdec/tests/mcfull*/
+jdec/tests/mcout/
+jdec/tests/out*/
+jdec/tests/demo_analysis/
+jdec/tests/demo_flow/

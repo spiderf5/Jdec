@@ -1,0 +1,457 @@
+"""Minecraft mod metadata and Mixin hook extraction.
+
+A Minecraft client with a cheat client bolted on is almost always a mod:
+Fabric/Quilt with `fabric.mod.json`, or Forge/NeoForge with `META-INF/mods.toml`.
+Its own classes are renamed by the vendor's obfuscator, but the *hooks* into
+the game are not - they are annotation values, and annotation values are
+constant-pool constants rather than identifiers. `@Mixin(PlayerEntity.class)`
+still names the game class after every other name in the jar has been mangled.
+
+So the most useful thing jdec can tell you about such a jar is a list of
+"this is what it changes in the game", which is what this module produces.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import annotations as AN
+from . import classfile as CF
+
+# annotation simple names that mark a mixin and its injection points.
+# Anything not in this table is ignored; plenty of mods carry bespoke
+# annotations and we do not want to guess at their meaning.
+_MIXIN_KINDS = (
+    "Inject", "Overwrite", "Redirect", "ModifyVariable", "ModifyArg",
+    "ModifyConstant", "ModifyExpressionValue", "ModifyReturnValue",
+    "Accessor", "Invoker", "Surrogate",
+)
+
+
+@dataclass
+class ModMeta:
+    loader: str | None = None           # fabric / forge / neoforge / quilt
+    mod_id: str | None = None
+    name: str | None = None
+    version: str | None = None
+    authors: list[str] = field(default_factory=list)
+    description: str | None = None
+    entrypoints: list[str] = field(default_factory=list)
+    mixin_configs: list[str] = field(default_factory=list)
+    source_file: str | None = None
+
+    def summary(self) -> str:
+        bits = []
+        if self.mod_id:
+            bits.append(f"id={self.mod_id}")
+        if self.name and self.name != self.mod_id:
+            bits.append(f"name={self.name}")
+        if self.version:
+            bits.append(f"version={self.version}")
+        if self.loader:
+            bits.append(f"loader={self.loader}")
+        if self.entrypoints:
+            bits.append(f"entries={','.join(self.entrypoints[:3])}")
+        if self.mixin_configs:
+            bits.append(f"mixin configs={','.join(self.mixin_configs[:3])}")
+        return " ".join(bits) or "no mod metadata found"
+
+
+@dataclass
+class MixinHook:
+    """One place where the jar reaches into another class."""
+
+    mixin_class: str                    # internal name of the class doing it
+    kind: str                           # Mixin / Inject / Overwrite / ...
+    target_class: str | None = None     # as written in the annotation
+    target_method: str | None = None    # as written in the annotation
+    named_class: str | None = None      # after mapping, if we had one
+    named_method: str | None = None
+    at: str | None = None               # @At value, e.g. HEAD / TAIL / RETURN
+    entry: str | None = None            # jar entry, handy when names are mangled
+    raw_method: str | None = None       # name as written before refmap lookup
+
+    @property
+    def resolved_class(self) -> str | None:
+        return self.named_class or self.target_class
+
+    @property
+    def resolved_method(self) -> str | None:
+        return self.named_method or self.target_method
+
+
+@dataclass
+class Refmap:
+    """Fabric's refmap: intermediary name -> real (obfuscated) name.
+
+    When a mod is built, every `@Inject(method = "...")` is rewritten to the
+    intermediary name (`method_1234`) and the original name is parked in a
+    refmap shipped alongside the mixin. Repositories that strip or mangle the
+    mixin config usually forget the refmap, and it is the only remaining clue
+    to what those opaque method names actually are.
+    """
+
+    mappings: dict[str, dict[str, str]] = field(default_factory=dict)
+    sources: list[str] = field(default_factory=list)
+
+    def method_name(self, mixin_class: str, name: str) -> str | None:
+        return self.mappings.get(mixin_class, {}).get(name)
+
+    def __len__(self) -> int:
+        return sum(len(v) for v in self.mappings.values())
+
+
+def load_refmap(jar: Path) -> Refmap:
+    rep = Refmap()
+    with zipfile.ZipFile(jar) as z:
+        names = [n for n in z.namelist() if n.endswith(".json")]
+        # a file called *refmap*.json is the intended one; the rest is a
+        # fallback because the name is not guaranteed to survive repacking
+        ordered = ([n for n in names if "refmap" in n.lower()]
+                   + [n for n in names if "refmap" not in n.lower()])
+        for n in ordered:
+            try:
+                doc = json.loads(z.read(n).decode("utf-8", "replace"))
+            except Exception:
+                continue
+            if not isinstance(doc, dict):
+                continue
+            m = doc.get("mappings")
+            if not isinstance(m, dict) or not m:
+                continue
+            found = False
+            for cls, entries in m.items():
+                if not isinstance(entries, dict):
+                    continue
+                table = rep.mappings.setdefault(cls.replace(".", "/"), {})
+                for real, inter in entries.items():
+                    if isinstance(inter, str):
+                        # stored obf -> intermediary, we need the reverse
+                        table[inter] = real
+                        found = True
+            if found:
+                rep.sources.append(n)
+    return rep
+
+
+def apply_refmap(hooks: list[MixinHook], refmap: Refmap | None) -> int:
+    """Rewrite intermediary method names back. Returns how many were mapped.
+
+    The original name is kept in `raw_method` so a later mapping pass can still
+    fall back to it, and so the report can show both spellings.
+    """
+    if refmap is None or not refmap.mappings:
+        return 0
+    changed = 0
+    for h in hooks:
+        if not h.target_method:
+            continue
+        real = refmap.method_name(h.mixin_class, h.target_method)
+        if real and real != h.target_method:
+            h.raw_method = h.target_method
+            h.target_method = real
+            changed += 1
+    return changed
+
+
+# --------------------------------------------------------------------------
+# mod metadata
+# --------------------------------------------------------------------------
+
+def _first_dict(node) -> dict:
+    if isinstance(node, dict):
+        return node
+    if isinstance(node, list) and node and isinstance(node[0], dict):
+        return node[0]
+    return {}
+
+
+def read_mod_meta(jar: Path) -> ModMeta:
+    meta = ModMeta()
+    with zipfile.ZipFile(jar) as z:
+        names = set(z.namelist())
+
+        if "fabric.mod.json" in names:
+            try:
+                doc = json.loads(z.read("fabric.mod.json").decode("utf-8", "replace"))
+            except Exception:
+                doc = {}
+            meta.loader = "fabric"
+            meta.source_file = "fabric.mod.json"
+            meta.mod_id = doc.get("id")
+            meta.version = doc.get("version")
+            meta.name = (doc.get("name") if isinstance(doc.get("name"), str)
+                         else doc.get("name"))
+            if isinstance(doc.get("name"), dict):
+                meta.name = str(doc["name"])
+            meta.description = doc.get("description") if isinstance(
+                doc.get("description"), str) else None
+            authors = doc.get("authors")
+            if isinstance(authors, list):
+                meta.authors = [str(a) for a in authors if not isinstance(a, dict)]
+            for group in ("main", "client", "server"):
+                for e in (doc.get("entrypoints") or {}).get(group) or []:
+                    if isinstance(e, str):
+                        meta.entrypoints.append(e)
+                    elif isinstance(e, dict) and e.get("value"):
+                        meta.entrypoints.append(str(e["value"]))
+            mix = doc.get("mixins")
+            if isinstance(mix, str):
+                meta.mixin_configs.append(mix)
+            elif isinstance(mix, list):
+                meta.mixin_configs += [str(m) for m in mix]
+            return meta
+
+        if "META-INF/mods.toml" in names or "META-INF/neoforge.mods.toml" in names:
+            key = ("META-INF/neoforge.mods.toml"
+                   if "META-INF/neoforge.mods.toml" in names else "META-INF/mods.toml")
+            text = z.read(key).decode("utf-8", "replace")
+            meta.loader = "neoforge" if "neoforge" in key else "forge"
+            meta.source_file = key
+            m = re.search(r'^\s*modId\s*=\s*"([^"]+)"', text, re.M)
+            if m:
+                meta.mod_id = m.group(1)
+            m = re.search(r'^\s*displayName\s*=\s*"([^"]+)"', text, re.M)
+            if m:
+                meta.name = m.group(1)
+            m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.M)
+            if m:
+                meta.version = m.group(1)
+            m = re.search(r'^\s*authors\s*=\s*"([^"]+)"', text, re.M)
+            if m:
+                meta.authors = [a.strip() for a in m.group(1).split(",") if a.strip()]
+            m = re.search(r'^\s*description\s*=\s*["]{0,3}([^"\n]+)', text, re.M)
+            if m:
+                meta.description = m.group(1)
+            # Forge declares mixin configs in [[mixins]] blocks
+            meta.mixin_configs = re.findall(r'^\s*config\s*=\s*"([^"]+\.json)"', text, re.M)
+            return meta
+
+        if "mcmod.info" in names:
+            try:
+                doc = json.loads(z.read("mcmod.info").decode("utf-8", "replace"))
+            except Exception:
+                doc = {}
+            d = _first_dict(doc)
+            meta.loader = "forge (1.7-1.12)"
+            meta.source_file = "mcmod.info"
+            meta.mod_id = d.get("modid")
+            meta.name = d.get("name")
+            meta.version = d.get("version")
+            meta.authors = d.get("authorList") or []
+            meta.description = d.get("description")
+            return meta
+
+    return meta
+
+
+def mixin_class_names(jar: Path, meta: ModMeta,
+                      limit: int = 0) -> tuple[list[str], int]:
+    """Class internal names declared by the mod's mixin configs.
+
+    Returns (names, configs_read). An empty list means 'scan everything' -
+    plenty of repacked clients drop or rename the config while leaving the
+    annotations intact.
+    """
+    names: list[str] = []
+    read = 0
+    if not meta.mixin_configs:
+        return names, 0
+    with zipfile.ZipFile(jar) as z:
+        for cfg in meta.mixin_configs:
+            try:
+                doc = json.loads(z.read(cfg).decode("utf-8", "replace"))
+            except Exception:
+                continue
+            read += 1
+            pkg = (doc.get("package") or "").replace(".", "/")
+            for group in ("mixins", "client", "server"):
+                for short in doc.get(group) or []:
+                    if not isinstance(short, str):
+                        continue
+                    names.append(f"{pkg}/{short}" if pkg else short)
+            if limit and len(names) >= limit:
+                break
+    return names, read
+
+
+# --------------------------------------------------------------------------
+# hook extraction
+# --------------------------------------------------------------------------
+
+def _normalize_class(raw: str) -> str:
+    """Mixin targets are written either dotted or slashed; we store slashed."""
+    return raw.replace(".", "/").strip()
+
+
+def _class_annotation_values(cf, ann: AN.Annotation) -> list[str]:
+    """Class targets out of a @Mixin annotation: value() or targets()."""
+    out: list[str] = []
+    for key in ("value", "targets", "target"):
+        v = ann.values.get(key)
+        if v is None:
+            continue
+        items = v if isinstance(v, list) else [v]
+        for it in items:
+            if isinstance(it, str) and it:
+                out.append(_normalize_class(it))
+    return out
+
+
+def hooks_from_class(cf, entry: str | None = None) -> list[MixinHook]:
+    """Every mixin annotation on one parsed class.
+
+    An `@Inject` names only a method; the class it belongs to comes from the
+    `@Mixin` on the type. Without inheriting it the hook list would be a pile
+    of bare method names with nothing to attach them to.
+    """
+    hooks: list[MixinHook] = []
+    self_name = cf.name
+
+    class_targets: list[str] = []
+    for ann in AN.class_annotations(cf):
+        if ann.simple_type != "Mixin":
+            continue
+        targets = _class_annotation_values(cf, ann)
+        if not targets:
+            hooks.append(MixinHook(mixin_class=self_name, kind="Mixin", entry=entry))
+            continue
+        for t in targets:
+            hooks.append(MixinHook(mixin_class=self_name, kind="Mixin",
+                                   target_class=t, entry=entry))
+        class_targets += targets
+
+    for m in cf.methods:
+        for ann in AN.member_annotations(cf, m):
+            kind = ann.simple_type
+            if kind not in _MIXIN_KINDS:
+                continue
+            at = None
+            atv = ann.values.get("at")
+            if isinstance(atv, list):           # @At is repeatable in source
+                atv = next((x for x in atv if isinstance(x, AN.Annotation)), None)
+            if isinstance(atv, AN.Annotation):
+                vals = atv.strings("value")
+                at = vals[0] if vals else atv.simple_type
+            methods = ann.strings("method")
+            owners = class_targets or [None]
+            for owner in owners:
+                if not methods:
+                    hooks.append(MixinHook(mixin_class=self_name, kind=kind,
+                                           target_class=owner, at=at, entry=entry))
+                    continue
+                for mn in methods:
+                    hooks.append(MixinHook(mixin_class=self_name, kind=kind,
+                                           target_class=owner, target_method=mn,
+                                           at=at, entry=entry))
+    return hooks
+
+
+def collect_hooks(jar: Path, meta: ModMeta | None = None,
+                  declared: list[str] | None = None,
+                  scan_all: bool = True) -> tuple[list[MixinHook], dict]:
+    """Walk the jar and pull out every mixin hook.
+
+    Declared mixin classes are checked first because the config is cheap and
+    exact; the full sweep is the fallback that still finds hooks in jars whose
+    metadata was stripped.
+    """
+    meta = meta or ModMeta()
+    stats = {"declared": 0, "scanned": 0, "with_hooks": 0, "unreadable": 0}
+    hooks: list[MixinHook] = []
+    entry_of: dict[str, str] = {}
+
+    with zipfile.ZipFile(jar) as z:
+        entries = [n for n in z.namelist()
+                   if n.endswith(".class") and not n.startswith("META-INF/")]
+        by_name: dict[str, str] = {}
+        # index by path first: declared names come from the config and are
+        # authoritative, but the entry may live under a mangled path
+        data: dict[str, bytes] = {}
+        for n in entries:
+            try:
+                data[n] = z.read(n)
+            except Exception:
+                continue
+        for n, raw in list(data.items()):
+            try:
+                cf = CF.parse(raw)
+            except Exception:
+                stats["unreadable"] += 1
+                continue
+            by_name[cf.name] = n
+            entry_of[cf.name] = n
+
+        todo: list[str] = []
+        if declared:
+            todo = [d for d in declared if d in by_name]
+            stats["declared"] = len(todo)
+        if not todo and scan_all:
+            todo = list(by_name)
+
+        for name in todo:
+            raw = data.get(by_name.get(name, ""))
+            if raw is None:
+                continue
+            try:
+                cf = CF.parse(raw)
+            except Exception:
+                stats["unreadable"] += 1
+                continue
+            stats["scanned"] += 1
+            found = hooks_from_class(cf, entry=entry_of.get(name))
+            if found:
+                stats["with_hooks"] += 1
+            hooks += found
+
+    return hooks, stats
+
+
+# --------------------------------------------------------------------------
+# translating obfuscated targets into readable names
+# --------------------------------------------------------------------------
+
+def _dot_variants(name: str) -> list[str]:
+    """Try both separators; mappings are keyed on internal (slashed) names."""
+    out = [name]
+    alt = name.replace("/", ".") if "/" in name else name.replace(".", "/")
+    if alt != name:
+        out.append(alt)
+    return out
+
+
+def translate_hooks(hooks: list[MixinHook], mapping) -> int:
+    """Fill in named_class / named_method using a Minecraft mapping.
+
+    Returns how many got at least one resolved name. Methods are looked up
+    under the target class both as written and under its deobfuscated name,
+    because a mixin may reference the game class by either.
+    """
+    if mapping is None:
+        return 0
+    resolved = 0
+    for h in hooks:
+        if h.target_class:
+            for cand in _dot_variants(h.target_class):
+                new = mapping.lookup_class(cand)
+                if new:
+                    h.named_class = new
+                    break
+        owners: list[str] = []
+        if h.target_class:
+            owners += _dot_variants(h.target_class)
+        if h.named_class:
+            owners.append(h.named_class)
+        if h.target_method:
+            for owner in owners:
+                new = mapping.lookup_member(owner, h.target_method, None)
+                if new:
+                    h.named_method = new
+                    break
+        if h.named_class or h.named_method:
+            resolved += 1
+    return resolved
