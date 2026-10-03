@@ -83,7 +83,8 @@ python jdec.py decompile client.jar -o out
 out/
   src/         反编译后的源码，按包组织
   report.md    人类可读报告（哪些类没还原干净）
-  report.json  机器可读，含每个类的状态与分数
+  report.json  机器可读，含每个类的状态、分数与输出路径 rel
+               （冲突类的 rel 经百分号编码，不等于类名，外部工具从这里反查）
 ```
 
 ## 分析：它改了游戏哪里

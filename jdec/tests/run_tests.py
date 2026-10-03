@@ -14,6 +14,7 @@ These assert the things that are easy to break and hard to notice:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -37,7 +38,7 @@ from jdec import mappings as MP       # noqa: E402
 from jdec import mcmod as MM          # noqa: E402
 from jdec import obf as OB            # noqa: E402
 from jdec import strings as ST        # noqa: E402
-from jdec.decompile import decompile  # noqa: E402
+from jdec.decompile import decompile, write_report  # noqa: E402
 from jdec.probe import profile_jar    # noqa: E402
 from jdec.score import evaluate       # noqa: E402
 
@@ -231,6 +232,17 @@ def test_case_colliding_class_names() -> None:
     check("neither class is reported failed",
           all(o.status != "failed" for o in rep.outcomes.values()),
           str({n: o.status for n, o in rep.outcomes.items()}))
+
+    # The report must carry each class' own output path. Colliding classes are
+    # written to percent-encoded paths, so the path is NOT derivable from the
+    # class name -- an external tool has to read it from here.
+    write_report(rep, out)
+    payload = json.loads((out / "report.json").read_text("utf-8"))
+    rels = {n: payload["classes"][n].get("rel") for n in sorted(names)}
+    check("report.json records an output path per class",
+          all(rels.values()), str(rels))
+    check("the two case-twins record different output paths",
+          rels["demo/collide/Widget"] != rels["demo/collide/widget"], str(rels))
 
 
 def test_weak_engine_is_rescued() -> None:

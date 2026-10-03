@@ -677,6 +677,7 @@ def write_report(rep: Report, out_dir: Path) -> None:
         "improved": rep.improved, "coverage_avg": rep.coverage_avg,
         "native_methods": rep.native_methods, "native_classes": rep.native_classes,
         "classes": {k: {"status": v.status, "engine": v.engine, "variant": v.variant,
+                        "rel": v.rel,
                         "native_methods": v.native_methods,
                         "score": v.quality.score if v.quality else None,
                         "issues": v.quality.issues if v.quality else []}
