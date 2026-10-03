@@ -1,7 +1,7 @@
 ---
 name: java-deobf
 
-description: 面向混淆 Java（含 Minecraft 客户端与模组）的反编译、反混淆与行为分析工作流，主力工具是本工作区的 jdec（多引擎反编译驱动）。覆盖：混淆度探测与混淆器识别（ZKM / Allatori / Stringer / DashO / superblaubeere27 / JObf / JNIC 等）、Mojang / Yarn / MCP 映射反混淆、Mixin hook 提取与 refmap 还原、indy 调用目标解码、字符串情报导出、native / 虚拟化保护判定、运行时捕获（agent 桩化 / dump）。凡用户提到反编译、反混淆、deobf、混淆的 jar / class / 字节码、MC 客户端或模组分析、外挂 / 作弊客户端分析、还原类名方法名、字符串解密、jdec，或丢来一个 jar 问"这里面是什么 / 它想干什么"，都使用本 skill；也覆盖 jdec 本身的开发、测试与 bug 修复。普通后端业务代码的编写与调试不在此列。
+description: 面向混淆 Java（含 Minecraft 客户端与 Forge / Fabric 模组）的反编译、反混淆与行为分析工作流，主力工具是 jdec（多引擎反编译驱动，位于 D:\MC\Workbuddy\deobf\jdec）。覆盖：混淆度探测与混淆器识别（ZKM / Allatori / Stringer / DashO / superblaubeere27 / JObf / JNIC 等）、Mojang / Yarn / MCP 映射反混淆、Mixin hook 提取与 refmap 还原、indy 调用目标解码、字符串情报导出、native / 虚拟化保护判定、运行时捕获（agent 桩化 / dump）。凡用户提到反编译 / decompile、反混淆 / deobfuscate / deobf、逆向工程 / reverse engineering、混淆的 jar / class / 字节码、还原类名方法名、字符串解密、MC 客户端或模组分析、外挂 / 作弊客户端 / 可疑 jar 分析，或丢来一个 jar 问"这里面是什么 / 它想干什么"，都使用本 skill；也覆盖 jdec 本身的开发、测试与 bug 修复。普通后端业务代码的编写与调试不在此列。
 ---
 
 # java-deobf
@@ -10,10 +10,18 @@ description: 面向混淆 Java（含 Minecraft 客户端与模组）的反编译
 
 把混淆过的 Java 还原到**读得懂、可验证**的形态，并回答"它想干什么"。
 
-主力工具是本工作区的 `jdec/`（多引擎反编译驱动）：多引擎择优、MC 反混淆、
-混淆器归因、Mixin 分析、字符串导出、native 判定都已做成代码。本 skill 负责
+主力工具是 jdec（多引擎反编译驱动，位于 `D:\MC\Workbuddy\deobf\jdec\`）：
+多引擎择优、MC 反混淆、混淆器归因、Mixin 分析、字符串导出、native 判定
+都已做成代码。本 skill 负责
 **流程编排、判定纪律，以及 jdec 覆盖不了的部分**（无 jdec 环境的降级路径、
-运行时捕获、知识沉淀）。工具用法细节读 `jdec/README.md`，不在这里重复。
+运行时捕获、知识沉淀）。工具用法细节读
+`D:\MC\Workbuddy\deobf\jdec\README.md`，不在这里重复。
+
+本 skill 是用户级安装，任何工作区都可能触发。runbook 里的命令默认在
+`D:\MC\Workbuddy\deobf` 下执行，其他工作区先 `cd` 过去再用；jdec 不可用时
+（别的机器、路径被移走）才走降级路径。本文中的 `scripts/`、`references/`、
+`assets/` 一律指本 skill 目录下的文件（加载本 skill 时会给出 base
+directory），不是当前工作区的。
 
 ## 铁律
 
