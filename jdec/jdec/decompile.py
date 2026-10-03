@@ -218,25 +218,27 @@ def _run_chunks(
     label: str,
 ) -> list[EN.RunResult]:
     engine = EN.ENGINES[engine_key]
-    results: list[EN.RunResult] = []
+    # results[i] belongs to inputs[i]: completion order would silently mispair
+    # callers that zip the two lists (the isolation buckets did exactly that)
+    results: list[EN.RunResult | None] = [None] * len(inputs)
 
-    def one(i: int) -> EN.RunResult:
+    def one(i: int) -> tuple[int, EN.RunResult]:
         cp = [] if engine.needs_jar_input else classpath
-        return EN.run_engine(engine, engines_dir, inputs[i], out_dirs[i],
-                             variant=variant, timeout=timeout, memory=memory,
-                             extra_cp=cp)
+        return i, EN.run_engine(engine, engines_dir, inputs[i], out_dirs[i],
+                                variant=variant, timeout=timeout, memory=memory,
+                                extra_cp=cp)
 
     with cf.ThreadPoolExecutor(max_workers=jobs) as pool:
         futs = [pool.submit(one, i) for i in range(len(inputs))]
         done = 0
         for f in cf.as_completed(futs):
-            r = f.result()
-            results.append(r)
+            i, r = f.result()
+            results[i] = r
             done += 1
             err = f"  ({r.error})" if r.error else ""
             print(f"    {label} chunk {done}/{len(futs)}: {len(r.files)} files "
                   f"in {r.seconds:.1f}s{err}", flush=True)
-    return results
+    return [r for r in results if r is not None]
 
 
 def decompile(
