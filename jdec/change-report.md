@@ -238,3 +238,80 @@ tap 工具链四层全走通：纯解密器重放 13144 条 → NoExit agent 破
 
 - `tap/` 下新增文件均为独立工具/数据，直接删除即可回滚，不影响 jdec 主流程。
 - 文档三件套按本报告表格逐节还原；MEMORY.md 与日志为追加式，可按批次段删除。
+
+---
+
+# 变更报告 3：遗留事项清理（git 基线 + rel 路径映射 + 冲突类分桶批量化）
+
+- 日期：2026-10-03（同日第三批）
+- 模式：backend-code-writer / Mode A + Mode B（回归修复）
+- 范围：git 仓库初始化、`jdec/decompile.py`、`tests/run_tests.py`、`README.md`；未触碰 tap 与其余主流程模块
+
+## 任务目标
+
+对既有遗留事项逐项评估（哪些值得做、哪些明确不做）后，执行用户批准的四项：
+git 基线、report.json 补 rel、冲突类 JVM 批量化、大小写敏感目录回归（最后一项
+本机不可行，见遗留）。
+
+## 文件级变更
+
+| 文件 | 改动 | 理由 |
+|---|---|---|
+| `.gitignore`（新增） | 忽略 pycache、引擎/fixture jar、tests 下历史运行输出（`dbg*`/`mc*`/`mcout`/`out*`/`demo_*`）、`.workbuddy` | 首次 `git add` 曾达 21009 个文件，控制后 82 个 |
+| `jdec/decompile.py` | payload 序列化 `rel`；新增 `_iso_buckets()`；隔离循环改为分桶批跑；`_run_chunks` 按提交顺序返回 | 分别见提交 baf7460 / 027d8ae / 14d94c9 |
+| `jdec/tests/run_tests.py` | +2 条 report.json 断言、+`test_iso_buckets`（5 条断言）、相应导入 | 覆盖新行为与分桶不变式 |
+| `jdec/README.md` | 分桶描述、report.json 输出说明 | 文档同步 |
+| `change-report.md` / `MEMORY.md` | 本报告 + 分桶后约定更新 | 沉淀 |
+
+git 提交序列：`0b43ad7` 基线（82 文件 / 13946 行）→ `baf7460` rel →
+`027d8ae` 分桶 → `14d94c9` 顺序修复。
+
+## 执行的命令与结果
+
+| 命令 | 结果 |
+|---|---|
+| `python tests/run_tests.py` | 100 → **107 passed, 0 failed** |
+| `python tests/run_tests.py --with-mc` | 116 → **123 passed, 0 failed** |
+| `python jdec.py decompile Myau0729-obf.jar --verify-all -j 4` | **723 clean / 0 partial / 0 failed，成员覆盖 100%，89.2s**（逐类隔离基线 174.6s，**-49%**） |
+| 独立核验（不依赖 jdec 评分） | 磁盘 723 个 .java；report.json 723 条 rel 全非空且互不相同；`myau/%41.java` 等编码路径在盘 |
+| `fsutil file setCaseSensitiveInfo` | **0x5 拒绝访问（需管理员特权），沙箱内外各试一次** —— 本机无法做大小写敏感目录回归 |
+
+## 修复轮次
+
+| 轮 | 内容 |
+|---|---|
+| 1 | 分桶实现后真实样本回归：**553 clean / 170 failed**。根因：`_run_chunks` 用 `as_completed` 按完成顺序返回，合并代码按提交顺序 `zip`，桶与引擎输出错位，类名查找全部落空 |
+| 2 | `_run_chunks` 改为 `results[i] ↔ inputs[i]`（pass 1 的合并是集合式、与顺序无关，行为不变）→ **723 / 0 / 0** |
+
+经验：单类桶的 fixture 碰上完成顺序一致而漏过——「位置配对」类竞态只能靠
+多样本回归或确定性配对抓；真实样本回归（MEMORY 铁律）再次证明不可省。
+
+## 自查发现的问题
+
+- 说明：collide fixture 测试对完成顺序竞态不敏感（两桶各 1 类），分桶的
+  纯函数不变式（桶数/桶内互异/全覆盖）由 `test_iso_buckets` 独立覆盖；
+  端到端由真实样本回归兜底。
+- 分桶后真实样本出现 3 桶（84 组中含 2 个三成员组），`_iso_buckets` 的
+  "桶数跟随最大组"断言正好覆盖该形态。
+
+## 遗留风险与未做的事
+
+1. **macOS/Linux 实机回归仍未做**。NTFS 目录级大小写敏感需要管理员特权，
+   本机 shell 无法提权。替代证据：Windows 大小写不敏感（更严苛——合并真实
+   发生）下 123 项测试 + 真实样本 723/0/0 + 路径逻辑审计无大小写折叠。
+   建议将来在 WSL 或 macOS 各跑一次 `python tests/run_tests.py`（一条命令）。
+2. 分桶依赖「不同组之间不撞名」；若未来出现桶内仍撞名的新混淆形态，
+   `test_iso_buckets` 的不变式会先红。
+3. git 提交身份是仓库级临时配置（`33503 / 33503@local`，本机无全局 git 身份），
+   推送远端前应改成真实身份：`git config user.name/user.email` 后
+   `git commit --amend --reset-author`。
+4. 评估后**明确不做**（长期视角）：控制流去混淆静态还原（与 round-trip
+   硬约束冲突 + ZKM 逐版本变形的无底洞维护 + 反编译器已容忍 goto 链）；
+   字符串加密静态还原（tap 已证明运行时出口是正解）；ESP 补名与
+   dumpagent halt 修复（真实 Forge 环境成本 > 边际信息）。
+
+## 回滚方式
+
+- `git revert` 对应提交即可；基线提交 `0b43ad7` 是完整还原点。
+- `.gitignore` 为纯新增文件，删除即回到无版本控制状态（连 `.git/` 一起删亦可）。
+- `_iso_buckets` / 分桶循环 / `_run_chunks` 顺序语义各自独立成提交，可单独回退。
