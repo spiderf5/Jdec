@@ -38,7 +38,7 @@ from jdec import mappings as MP       # noqa: E402
 from jdec import mcmod as MM          # noqa: E402
 from jdec import obf as OB            # noqa: E402
 from jdec import strings as ST        # noqa: E402
-from jdec.decompile import decompile, write_report  # noqa: E402
+from jdec.decompile import _iso_buckets, decompile, write_report  # noqa: E402
 from jdec.probe import profile_jar    # noqa: E402
 from jdec.score import evaluate       # noqa: E402
 
@@ -243,6 +243,26 @@ def test_case_colliding_class_names() -> None:
           all(rels.values()), str(rels))
     check("the two case-twins record different output paths",
           rels["demo/collide/Widget"] != rels["demo/collide/widget"], str(rels))
+
+
+def test_iso_buckets() -> None:
+    """Bucketing must never put two same-lowercase names in one engine run."""
+    print("pipeline: case-collision buckets never mix same-lowercase names")
+    collisions = {
+        "myau/a": ["myau/A", "myau/a"],
+        "myau/b$c": ["myau/B$C", "myau/b$C"],
+        "demo/ab": ["demo/AB", "demo/Ab", "demo/aB"],   # a 3-way group
+    }
+    buckets = _iso_buckets(collisions)
+    check("bucket count follows the largest group",
+          len(buckets) == 3, str(len(buckets)))
+    for i, b in enumerate(buckets):
+        keys = [n.lower() for n in b]
+        check(f"bucket {i} holds distinct lowercase names",
+              len(keys) == len(set(keys)), str(keys))
+    flat = sorted(n for b in buckets for n in b)
+    check("every colliding class lands in exactly one bucket",
+          flat == sorted(n for g in collisions.values() for n in g), str(flat))
 
 
 def test_weak_engine_is_rescued() -> None:
@@ -776,6 +796,7 @@ def main() -> int:
     test_unbalanced_braces_are_proportional()
     test_end_to_end_sample()
     test_case_colliding_class_names()
+    test_iso_buckets()
     test_weak_engine_is_rescued()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "

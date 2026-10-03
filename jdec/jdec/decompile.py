@@ -173,6 +173,23 @@ def _safe_rel(name: str) -> str:
     return "/".join(out) + ".java"
 
 
+def _iso_buckets(collisions: dict[str, list[str]]) -> list[list[str]]:
+    """Partition case-colliding classes into engine-run-sized buckets.
+
+    Members of one group all fold to the same lowercase name, so no two of
+    them may share an output directory. Classes from *different* groups never
+    collide, so bucket i can safely hold the i-th member of every group: the
+    isolation pass then costs one engine run per bucket instead of one JVM
+    per class (the real ZKM sample: 170 colliding classes -> 2 runs).
+    """
+    count = max(len(grp) for grp in collisions.values())
+    buckets: list[list[str]] = [[] for _ in range(count)]
+    for grp in collisions.values():
+        for i, name in enumerate(sorted(grp)):
+            buckets[i].append(name)
+    return [sorted(b) for b in buckets]
+
+
 def _produced_set(out_dir: Path) -> set[str]:
     return {p.relative_to(out_dir).as_posix()[:-5] for p in out_dir.rglob("*.java")}
 
@@ -288,9 +305,10 @@ def decompile(
     # Classes whose names differ only by case cannot share an output directory:
     # one engine run would have the second file overwrite the first, and the
     # victim could not be told apart from the survivor afterwards. They are
-    # excluded from the batched passes and given one output directory each, so
-    # the mapping from class to file is carried explicitly instead of being
-    # guessed back out of a path.
+    # excluded from the batched passes and decompiled in buckets that never
+    # place two same-lowercase names in one directory, so the mapping from
+    # class to file is carried explicitly instead of being guessed back out
+    # of a path.
     collisions = _case_collisions(good)
     colliding = {n for grp in collisions.values() for n in grp}
     batched = [n for n in good if n not in colliding]
@@ -335,42 +353,48 @@ def decompile(
         else:
             o.status = "missing"
 
-    # ---- case-colliding classes: one output directory each -----------------
+    # ---- case-colliding classes: one output directory per bucket -----------
     # `rel` is derived from the class name rather than from whatever path the
     # engine happened to write, so the two members of `A`/`a` cannot be
     # confused even though the filesystem merged them.
     isolated = 0
     if colliding:
-        for name in sorted(colliding):
-            o = outcomes[name]
-            odir = work / ("iso_" + _safe_rel(name)[:-5].replace("/", "_"))
-            if odir.exists():
-                shutil.rmtree(odir, ignore_errors=True)
-            odir.mkdir(parents=True, exist_ok=True)
-            ijar = work / ("iso_" + _safe_rel(name)[:-5].replace("/", "_") + ".jar")
-            _pack_names(input_path, [name], ijar, entries,
+        buckets = _iso_buckets(collisions)
+        iso_inputs, iso_dirs = [], []
+        for i, names in enumerate(buckets):
+            bdir = work / f"iso_{i}"
+            if bdir.exists():
+                shutil.rmtree(bdir, ignore_errors=True)
+            bdir.mkdir(parents=True, exist_ok=True)
+            bjar = work / f"iso_{i}.jar"
+            _pack_names(input_path, names, bjar, entries,
                         extra_jar=input_path if lead_needs_all else None)
-            r = EN.run_engine(EN.ENGINES[lead], engines_dir, ijar, odir,
-                              variant="default", timeout=timeout, memory=memory,
-                              extra_cp=[] if lead_needs_all else classpath)
-            src_file = r.files.get(name + ".java")
-            if src_file is None:
-                # an engine may inline a nested class under its outer type
-                outer = name.split("$", 1)[0] + ".java"
-                src_file = r.files.get(outer)
-            if src_file is None:
-                o.status = "missing"
+            iso_inputs.append(bjar)
+            iso_dirs.append(bdir)
+        iso_results = _run_chunks(lead, "default", jobs, iso_inputs, iso_dirs,
+                                  engines_dir, classpath, timeout, memory,
+                                  f"{EN.ENGINES[lead].label}:isolated")
+        for names, r in zip(buckets, iso_results):
+            for name in names:
+                o = outcomes[name]
+                src_file = r.files.get(name + ".java")
+                if src_file is None:
+                    # an engine may inline a nested class under its outer type
+                    outer = name.split("$", 1)[0] + ".java"
+                    src_file = r.files.get(outer)
+                if src_file is None:
+                    o.status = "missing"
+                    o.attempts.append(f"{lead}:isolated")
+                    continue
+                rel = _safe_rel(name)
+                dest = src_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dest)
+                o.rel = rel
+                o.status = "ok"
+                o.engine = lead
                 o.attempts.append(f"{lead}:isolated")
-                continue
-            rel = _safe_rel(name)
-            dest = src_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_file, dest)
-            o.rel = rel
-            o.status = "ok"
-            o.engine = lead
-            o.attempts.append(f"{lead}:isolated")
-            isolated += 1
+                isolated += 1
         if isolated:
             print(f"  recovered {isolated} case-colliding class(es) into "
                   f"separately-named files")
