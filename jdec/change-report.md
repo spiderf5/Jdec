@@ -315,3 +315,52 @@ git 提交序列：`0b43ad7` 基线（82 文件 / 13946 行）→ `baf7460` rel 
 - `git revert` 对应提交即可；基线提交 `0b43ad7` 是完整还原点。
 - `.gitignore` 为纯新增文件，删除即回到无版本控制状态（连 `.git/` 一起删亦可）。
 - `_iso_buckets` / 分桶循环 / `_run_chunks` 顺序语义各自独立成提交，可单独回退。
+
+---
+
+# 变更报告 4：skill 改名重构（backend-code-writer → java-deobf）
+
+- 日期：2026-10-04
+- 范围：skill 目录改名、SKILL.md 重写、死重删除、junction 与用户级拷贝同步；jdec 主流程零改动
+
+## 任务目标
+
+skill 的实际工作形态是混淆 Java 分析而非后端编码：探测/校验脚本对本项目
+天然失灵、Mode A/B 仪式过重、Mode C 通用建议被 jdec 取代、触发描述与正文
+长期错位（deobf 关键词堆在描述末尾，触发了却帮不上忙）。按用户决定：
+改名、以 Mode C 为主线、删 A/B 死重、有用部分并入统一流程、不再分 mode。
+
+## 文件级变更
+
+| 变更 | 内容 |
+|---|---|
+| 目录改名 | `backend-code-writer/` → `java-deobf/`（git mv，保留历史） |
+| SKILL.md 重写 | 450 行 → 139 行；frontmatter name/description 以反混淆为主、显式排除普通后端编码；正文 = 定位 + 铁律 8 条 + 实战 runbook（probe → strings → analyze → decompile → 深挖 → 沉淀）+ 降级路径 + 修 jdec 规约 + 变更报告 |
+| 删除（9 个） | `detect_project.py`、`run_checks.py`、`backend-stacks.md`、`testing-playbook.md`、`debug-playbook.md`、`review-checklist.md`、`security-checklist.md`、`plan-template.md`、`pr-description-template.md` |
+| 保留 | `deobf_scan.py`、`fingerprints.json`（33 混淆器）、`self_test.py`、`diff_summary.py`；`java-deobf/control-flow/string-encryption/dynamic-analysis/git-workflow.md`；`change-report-template.md` |
+| junction | 旧联接已删，新建 `C:\Users\33503\.zcode\skills\java-deobf` → 项目目录 |
+| 用户级拷贝 | `C:/Users/33503/.workbuddy/skills/`：旧目录删除、新结构已同步（双写约定照旧） |
+
+A/B 中被删内容的理由与去向：变更报告纪律与证据先行进铁律 4/8 与报告节；
+敏感信息处理进铁律 7（分析中发现的凭据只定性不外传）；安全/评审清单的
+去混淆对应物是铁律 6 的交付标准（可重编译 + 行为一致）。
+
+## 验证
+
+- `self_test.py`：33 个混淆器指纹、9 项阈值加载正常
+- `deobf_scan.py` 冒烟（flow.jar）：正确报出 6 条 indy 编码串、无指纹误报
+- junction 经新路径读 SKILL.md：UTF-8 正常、frontmatter name 正确
+- diff 比对确认用户级旧拷贝与改前项目一致后才替换（无独有内容丢失）
+
+## 遗留风险
+
+1. 触发效果未实测：skill-creator 建议的 2-3 条真实 test prompt 需要新会话验证
+   （本会话加载的仍是旧内容）；首次实战时留意它是否在该触发时触发。
+2. 依赖旧 skill 名的外部引用（如有）会失效；项目内历史文档提到旧名属
+   历史记录，不回改。
+3. `git-workflow.md` 暂留——若今后确认 deobf 流程用不上可再删。
+
+## 回滚方式
+
+`git revert` 本次提交恢复目录与文件；junction 用两条命令重建：
+`rmdir` 旧联接 + `mklink /J` 指回原目录名。用户级拷贝重新 cp 一份即可。
