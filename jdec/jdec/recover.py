@@ -103,6 +103,28 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
                 break
             classes.append((cf, bsm, sites))
 
+    # 形态分型（EdNaven 2026-10-04 实证）：
+    # - REF 型（成员引用隐藏）：同一个三参 BSM 被**多种返回类型**的站点共用
+    #   （字段 getter/setter、方法引用全部走它），站点 desc 尾部固定两个 long
+    #   = 加密成员引用。driver 对它**不能执行**目标方法，只能解引用。
+    # - STR 型（字符串解密）：BSM 只服务单一返回类型（通常 (IJ)String），
+    #   类内有私有 DES 解密器，调 bootstrap 才是正解。
+    BSM3 = ("(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
+            "Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;")
+    ret_by_bsm: dict = {}
+    for cf, bsm, sites in classes:
+        for s in sites:
+            if s.bsm is not None:
+                ret_by_bsm.setdefault((cf.name, s.bsm.index), set()).add(
+                    s.desc.split(")")[-1])
+
+    def _kind(cf_name: str, e, desc: str) -> str:
+        rets = ret_by_bsm.get((cf_name, e.index), set())
+        tail_jj = desc.split(")")[0].endswith("JJ")
+        if e.desc == BSM3 and len(rets) >= 3 and tail_jj:
+            return "REF"
+        return "STR"
+
     spec = []
     n_sites = n_skip = 0
     for cf, bsm, sites in classes:
@@ -125,8 +147,11 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
                 n_skip += 1
                 continue
             idx = s.bsm.index if s.bsm else -1
+            kind = (_kind(cf.name, s.bsm, s.desc)
+                    if s.bsm is not None else "STR")
             spec.append("	".join(
-                ["S", str(idx), s.name, s.desc, str(len(stacks))] + stacks))
+                ["S", str(idx), s.name, s.desc, str(len(stacks)), kind]
+                + stacks))
             n_sites += 1
     spec_path = out_dir / "recover_spec.tsv"
     spec_path.write_text("\n".join(spec) + "\n", encoding="utf-8")
@@ -170,21 +195,32 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
                        text=True, errors="replace", timeout=1800)
     (out_dir / "driver.log").write_text(r.stderr[-4000:], encoding="utf-8")
 
-    ok, fail, skip = 0, 0, 0
+    ok, fail, skip, ref = 0, 0, 0, 0
     values = []
     for line in r.stdout.splitlines():
         q = line.split("\t", 4)
         if q[0] == "OK":
             ok += 1
             values.append(line)
+        elif q[0] == "REF":
+            ref += 1
         elif q[0] == "FAIL":
             fail += 1
         elif q[0] == "SKIP":
             skip += 1
     (out_dir / "recovered.tsv").write_text(r.stdout, encoding="utf-8")
-    uniq = {v.split("\t", 4)[-1] for v in values if len(v.split("\t", 4)) == 5}
-    print(f"recovered : {ok} sites ({len(uniq)} unique plaintexts), "
-          f"{fail} failed, {skip} skipped")
+    # 文本值去重：剔除数组/对象 toString（"[Lxxx;@hash"、"xxx@hash"）
+    uniq = set()
+    for v in values:
+        parts = v.split("\t")
+        if len(parts) < 4:
+            continue
+        s = parts[-1]
+        if s.startswith("[L") or re.search(r"@[0-9a-f]{4,}$", s):
+            continue
+        uniq.add(s)
+    print(f"recovered : {ok} str-sites ({len(uniq)} unique plaintexts), "
+          f"{ref} ref-sites resolved, {fail} failed, {skip} skipped")
     print(f"output    : {out_dir / 'recovered.tsv'}")
     tail = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
     if tail:

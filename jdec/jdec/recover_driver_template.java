@@ -11,14 +11,51 @@ public class RecoverDriver {
     static Map<String, Long> fields = new HashMap<>();
     static Map<String, Method> bsmCache = new HashMap<>();
     static Map<String, Object[]> bsmStatics = new HashMap<>();
+    static Map<Class<?>, Method[]> refCache = new HashMap<>();
     static ClassLoader cl;
+
+    /** 在引导类里找引用解密器：(long,long)->Field 与 (long,long)->Method 的
+     *  静态方法（ZKM 系惯例）。找不到返回 [null,null]，调用方如实报告。 */
+    static String decodeRef(Class<?> c, long l, long l2) throws Exception {
+        Method[] dm = refCache.get(c);
+        if (dm == null) {
+            Method f = null, m = null;
+            for (Method x : c.getMethods()) {
+                Class<?>[] pt = x.getParameterTypes();
+                if (pt.length == 2 && pt[0] == long.class && pt[1] == long.class) {
+                    if (x.getReturnType() == Field.class && f == null) f = x;
+                    if (x.getReturnType() == Method.class && m == null) m = x;
+                }
+            }
+            dm = new Method[]{f, m};
+            refCache.put(c, dm);
+        }
+        if (dm[0] != null) {
+            Field fl = (Field) dm[0].invoke(null, l, l2);
+            return "field " + fl.getDeclaringClass().getName()
+                    + "." + fl.getName() + " : " + fl.getType().getName();
+        }
+        if (dm[1] != null) {
+            Method me = (Method) dm[1].invoke(null, l, l2);
+            StringBuilder sb = new StringBuilder("method ")
+                    .append(me.getDeclaringClass().getName())
+                    .append(".").append(me.getName()).append('(');
+            Class<?>[] pt = me.getParameterTypes();
+            for (int i = 0; i < pt.length; i++) {
+                if (i > 0) sb.append(',');
+                sb.append(pt[i].getName());
+            }
+            return sb.append(") : ").append(me.getReturnType().getName()).toString();
+        }
+        return "no-ref-decoder";
+    }
 
     public static void main(String[] args) throws Exception {
         List<String> lines = Files.readAllLines(Paths.get(args[0]));
         cl = RecoverDriver.class.getClassLoader();
         String fqcn = null;
         Method[] bsms = new Method[64];
-        int ok = 0, fail = 0, skip = 0;
+        int ok = 0, fail = 0, skip = 0, ref = 0;
         for (String line : lines) {
             if (line.isBlank()) continue;
             try {
@@ -55,6 +92,7 @@ public class RecoverDriver {
                     String siteName = p[2];
                     String siteDesc = p[3];
                     int na = Integer.parseInt(p[4]);
+                    String kind = p[5];            // REF = 成员引用隐藏 / STR = 字符串解密
                     Method bsm = bsmIdx < bsms.length ? bsms[bsmIdx] : null;
                     if (bsm == null) {
                         System.out.println("SKIP\t" + fqcn + "\t" + siteName + "\tno-bsm");
@@ -63,13 +101,28 @@ public class RecoverDriver {
                     Object[] dyn = new Object[na];
                     boolean bad = false;
                     for (int i = 0; i < na; i++) {
-                        Object v = eval(p[5 + i]);
+                        Object v = eval(p[6 + i]);
                         if (v == null) { bad = true; break; }
                         dyn[i] = (v == NULL) ? null : box((Long) v, argKind(siteDesc, i));
                     }
                     if (bad) {
                         System.out.println("SKIP\t" + fqcn + "\t" + siteName + "\tunevaluable");
                         skip++; continue;
+                    }
+                    if (kind.equals("REF")) {
+                        // 成员引用站点：尾部两个 long 是加密引用。**不执行目标方法**
+                        //（setter/void 有副作用），只调目标类自带的引用解密器
+                        //（(long,long)->Field/Method 的静态方法）拿 owner.name。
+                        Object l = dyn[na - 2], l2 = dyn[na - 1];
+                        if (!(l instanceof Long) || !(l2 instanceof Long)) {
+                            System.out.println("SKIP\t" + fqcn + "\t" + siteName + "\tref-tail-not-long");
+                            skip++; continue;
+                        }
+                        String info = decodeRef(bsm.getDeclaringClass(),
+                                (Long) l, (Long) l2);
+                        System.out.println("REF\t" + fqcn + "\t" + siteName + "\t" + esc(info));
+                        ref++;
+                        continue;
                     }
                     // 静态参数（BootstrapMethods 属性里的）传给 bootstrap；
                     // 动态参数属于 bootstrap 安装的 target，不能混进来
@@ -108,7 +161,8 @@ public class RecoverDriver {
                 fail++;
             }
         }
-        System.err.println("driver: ok=" + ok + " fail=" + fail + " skip=" + skip);
+        System.err.println("driver: ok=" + ok + " ref=" + ref
+                + " fail=" + fail + " skip=" + skip);
     }
 
     static String bsmKey(Method m) {

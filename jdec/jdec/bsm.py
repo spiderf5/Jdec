@@ -86,11 +86,16 @@ def _const(cf, idx):
 
 
 def _arity(desc: str) -> int:
-    """描述符的参数个数（顶层）。"""
+    """描述符的参数个数（顶层）。
+
+    D/J 在执行模型里占 2 槽，但在描述符**文本**里仍是 1 个字符——
+    这里数的是参数个数，J 后只前进 1 字符。写成 i+=2 会把 ')' 甚至
+    返回类型一起吃掉：'(IJ)String' 被数成 3（EdNaven 1213 个字符串
+    站点的 idx 槽被 null 顶掉的根因，2026-10-04 实证）。"""
     n, i = 0, 1
     while i < len(desc) and desc[i] != ")":
         if desc[i] in "DJ":
-            i += 2
+            i += 1
         elif desc[i] == "L":
             i = desc.index(";", i) + 1
         elif desc[i] == "[":
