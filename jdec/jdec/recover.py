@@ -20,12 +20,118 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 import zipfile
 
 from . import bsm as BM
 
 DRIVER_JAVA = (Path(__file__).parent / "recover_driver_template.java").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# 失败归因。lf21 双管线对标（2026-10-04）的教训：failed 清单禁止用一句统一
+# 叙事（如"结构性边界"）解释掉一批失败——11 个失败类里 4 个只是 classpath
+# 少了一罐 lwjgl 常量 jar。按根因自动分桶，每桶给可执行的处置建议。
+# --------------------------------------------------------------------------
+
+@dataclass
+class FailBucket:
+    key: str
+    title: str
+    remediation: str
+    entries: list[tuple[str, str, str]] = field(default_factory=list)  # (fqcn, tag, cause)
+
+
+_FAIL_BUCKETS: list[tuple[str, str, str, str]] = [
+    # (key, 根因正则 re.I|re.S, 标题, 处置建议)；顺序即优先级，首中即停
+    ("native", r"UnsatisfiedLinkError",
+     "缺真实 native 库",
+     "该类 clinit 真调了 native 方法：单独认输，或补真实 native 后重跑。"
+     "不要因此把整个依赖族剔出 classpath——lf21 实测：全剔 lwjgl 错杀 4 个只摸常量的类"),
+    ("lwjgl-constants", r"(?:NoClassDefFoundError|ClassNotFoundException):\s*org[./]lwjgl",
+     "缺 lwjgl 常量类",
+     "GLFW/GL 系**常量类加载是安全的**（加载 ≠ 调 native）：把 lwjgl-api jar 加回 "
+     "classpath 重跑；只有 clinit 真调 native 的类才需要认输"),
+    ("missing-class", r"NoClassDefFoundError|ClassNotFoundException",
+     "缺依赖类",
+     "按目标版本 version json 的 libraries 清单补齐 classpath 后重跑"),
+    ("needs-instance", r"(NullPointerException|IllegalStateException).{0,300}(minecraft|getInstance)",
+     "需要真实游戏实例",
+     "Minecraft.getInstance() 等运行时解引用：结构性失败，除非真机或注入实例桩"),
+    ("needs-bootstrap", r"(IllegalStateException|ExceptionInInitializerError|RuntimeException)"
+                       r".{0,300}(bootstrap|registry)",
+     "注册表/引导未完成",
+     "试无头引导：SharedConstants 版本探测 + Bootstrap 静态布尔置位，或注册表 stub；"
+     "真 bootStrap() 深处可能藏 System.exit，别直接调"),
+    ("signature", r"NoSuchMethodException|WrongMethodTypeException|IllegalAccessException",
+     "签名/访问不符",
+     "站点签名与解密器不一致：查 spec 提取的参数形状（int/long 装箱、重载），"
+     "或对 seed 空间做暴力枚举"),
+    ("clinit-chain", r"ExceptionInInitializerError",
+     "clinit 深链失败",
+     "cause 已取最深一层；仍解不动就人工看初始化链里引用了什么"),
+    ("other", r"", "未归类", "逐条人工看根因；新形态命中多了就升级成独立的桶"),
+]
+
+
+def _exc_of(cause: str) -> str:
+    m = re.search(r"([A-Za-z][A-Za-z0-9]*(?:Error|Exception))", cause)
+    return m.group(1) if m else "?"
+
+
+def triage_failures(fail_lines: list[str]) -> list[FailBucket]:
+    """把 driver 的 FAIL 行按根因分桶。纯函数，便于单测。"""
+    buckets = [FailBucket(key=key, title=title, remediation=rem)
+               for key, _rx, title, rem in _FAIL_BUCKETS]
+    by_key = {b.key: b for b in buckets}
+    for line in fail_lines:
+        q = line.split("\t", 3)
+        if len(q) < 4:
+            continue
+        fqcn, tag, cause = q[1], q[2], q[3]
+        for key, rx, _t, _r in _FAIL_BUCKETS:
+            if not rx or re.search(rx, cause, re.I | re.S):
+                by_key[key].entries.append((fqcn, tag, cause))
+                break
+    return [b for b in buckets if b.entries]
+
+
+def write_failed_triage(out_dir: Path, buckets: list[FailBucket],
+                        n_skip: int) -> Path | None:
+    """失败归因报告（硬输出）：分桶统计 + 每桶处置建议 + 类清单。"""
+    if not buckets:
+        return None
+    n_sites = sum(len(b.entries) for b in buckets)
+    n_cls = len({e[0] for b in buckets for e in b.entries})
+    L = ["# recover 失败归因（自动分桶）", ""]
+    L.append(f"FAIL 站点 {n_sites} 个，涉及 {n_cls} 个类；另有 {n_skip} 个 SKIP"
+             f"（多为类级失败的连带 no-bsm）。**每桶先看处置建议，"
+             f"不要用统一叙事解释一批失败。**")
+    L.append("")
+    L.append("| 桶 | 站点 | 类数 | 典型异常 |")
+    L.append("|---|---|---|---|")
+    for b in buckets:
+        excs = sorted({_exc_of(e[2]) for e in b.entries})
+        L.append(f"| {b.key} | {len(b.entries)} | "
+                 f"{len({e[0] for e in b.entries})} | {', '.join(excs[:3])} |")
+    L.append("")
+    for b in buckets:
+        cls = sorted({e[0] for e in b.entries})
+        L.append(f"## {b.key} — {b.title}")
+        L.append("")
+        L.append(f"处置：{b.remediation}")
+        L.append("")
+        for c in cls[:15]:
+            n_i = sum(1 for e in b.entries if e[0] == c)
+            cause0 = next(e[2] for e in b.entries if e[0] == c)
+            L.append(f"- `{c}` ×{n_i} — {cause0[:120]}")
+        if len(cls) > 15:
+            L.append(f"- ... {len(cls) - 15} more classes")
+        L.append("")
+    p = out_dir / "failed_triage.md"
+    p.write_text("\n".join(L) + "\n", encoding="utf-8")
+    return p
 
 
 def _esc(s: str) -> str:
@@ -298,6 +404,7 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
 
     ok, fail, skip, ref = 0, 0, 0, 0
     values = []
+    fail_lines = []
     for line in r.stdout.splitlines():
         q = line.split("\t", 4)
         if q[0] == "OK":
@@ -307,9 +414,13 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             ref += 1
         elif q[0] == "FAIL":
             fail += 1
+            fail_lines.append(line)
         elif q[0] == "SKIP":
             skip += 1
     (out_dir / "recovered.tsv").write_text(r.stdout, encoding="utf-8")
+    # 失败归因（硬输出）：分桶 + 每桶处置建议，见 failed_triage.md
+    buckets = triage_failures(fail_lines)
+    triage_path = write_failed_triage(out_dir, buckets, skip)
     # 文本值去重：剔除数组/对象 toString（"[Lxxx;@hash"、"xxx@hash"）
     uniq = set()
     for v in values:
@@ -322,6 +433,10 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         uniq.add(s)
     print(f"recovered : {ok} str-sites ({len(uniq)} unique plaintexts), "
           f"{ref} ref-sites resolved, {fail} failed, {skip} skipped")
+    if buckets:
+        print("fail triage: " + " ".join(f"{b.key}={len(b.entries)}"
+                                         for b in buckets)
+              + (f" -> {triage_path.name}" if triage_path else ""))
     print(f"output    : {out_dir / 'recovered.tsv'}")
     tail = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
     if tail:

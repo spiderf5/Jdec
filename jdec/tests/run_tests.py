@@ -817,6 +817,80 @@ def test_rewrite_sources() -> None:
         check("unmatched site untouched", "TWlz=" in txt)
 
 
+def test_recover_triage() -> None:
+    print("recover: failure lines auto-triaged into buckets with remediation")
+    from jdec import recover as RC
+    lines = [
+        "FAIL\tcom/x/A\tcom/x/A\tjava.lang.NoClassDefFoundError: org/lwjgl/glfw/GLFW",
+        "FAIL\tcom/x/B\t11\tjava.lang.NullPointerException: Cannot invoke "
+        "\"net.minecraft.client.Minecraft.getInstance()\" because \"mc\" is null",
+        "FAIL\tcom/x/C\t3\tjava.lang.NoSuchMethodException: com.x.C.b(int,int)->String",
+        "FAIL\tcom/x/D\tcom/x/D\tjava.lang.UnsatisfiedLinkError: "
+        "org.lwjgl.opengl.GL11C.nglBegin(Native Method)",
+        "FAIL\tcom/x/E\tcom/x/E\tjava.lang.NoClassDefFoundError: com/netease/mc/Foo",
+        "FAIL\tcom/x/F\tcom/x/F\tjava.lang.IllegalStateException: Not bootstrapped",
+        "FAIL\tcom/x/G\tcom/x/G\tjava.lang.SomeWeirdError: ???",
+    ]
+    buckets = {b.key: b for b in RC.triage_failures(lines)}
+
+    def has(key, cls):
+        return any(e[0] == cls for e in buckets[key].entries)
+
+    check("lwjgl constants bucket", has("lwjgl-constants", "com/x/A"))
+    check("needs-instance bucket", has("needs-instance", "com/x/B"))
+    check("signature bucket", has("signature", "com/x/C"))
+    check("native bucket", has("native", "com/x/D"))
+    check("missing-class bucket", has("missing-class", "com/x/E"))
+    check("needs-bootstrap bucket", has("needs-bootstrap", "com/x/F"))
+    check("other bucket", has("other", "com/x/G"))
+    check("all sites classified",
+          sum(len(b.entries) for b in buckets.values()) == len(lines))
+    with tempfile.TemporaryDirectory() as td:
+        p = RC.write_failed_triage(Path(td), list(buckets.values()), 3)
+        txt = p.read_text(encoding="utf-8")
+        check("triage md written", p is not None and p.exists())
+        check("triage md has remediation", "lwjgl-api" in txt
+              and "处置" in txt)
+
+
+def test_manifest_and_resources() -> None:
+    print("mcmod: MANIFEST.MF parsed (agent attrs) + resource inventory")
+    with tempfile.TemporaryDirectory() as td:
+        jar = Path(td) / "m.jar"
+        man = ("Manifest-Version: 1.0\r\n"
+               "Implementation-Title: fake\r\n"
+               "Implementation-Vendor: VendorX\r\n"
+               "Implementation-Description: line1\r\n"
+               " continuation\r\n"
+               "Premain-Class: com.x.Agent\r\n"
+               "Can-Retransform-Classes: true\r\n"
+               "\r\n"
+               "Name: com/x/Foo.class\r\n"
+               "SHA-256-Digest: abc\r\n")
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("META-INF/MANIFEST.MF", man)
+            z.writestr("fabric.mod.json", json.dumps({"id": "fake", "version": "1"}))
+            z.writestr("assets/fake/icon.png", b"\x89PNG")
+            z.writestr("com/x/Foo.class", b"\xca\xfe\xba\xbe")
+        info = MM.read_manifest(jar)
+        check("manifest main parsed", info is not None
+              and info.main.get("Implementation-Vendor") == "VendorX")
+        check("manifest continuation", "continuation"
+              in info.main.get("Implementation-Description", ""))
+        check("manifest agent attrs", info.agent_attrs().get("Premain-Class")
+              == "com.x.Agent")
+        check("manifest per-entry section", "com/x/Foo.class" in info.sections)
+        meta = MM.read_mod_meta(jar)
+        check("meta attaches manifest", meta.manifest is not None
+              and meta.loader == "fabric")
+        check("meta summary shows vendor+agent", "vendor=VendorX" in meta.summary()
+              and "java-agent" in meta.summary())
+        inv = MM.resource_inventory(jar)
+        check("resources counted", inv["non_class"] == 3, str(inv))
+        check("resources top dirs", any(k == "assets" for k, _ in inv["top_dirs"]),
+              str(inv["top_dirs"]))
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -897,6 +971,8 @@ def main() -> int:
     test_auto_mapping_set_flavor()
     test_java_escape()
     test_rewrite_sources()
+    test_recover_triage()
+    test_manifest_and_resources()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

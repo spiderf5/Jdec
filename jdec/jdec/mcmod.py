@@ -43,6 +43,7 @@ class ModMeta:
     entrypoints: list[str] = field(default_factory=list)
     mixin_configs: list[str] = field(default_factory=list)
     source_file: str | None = None
+    manifest: "ManifestInfo | None" = None
 
     def summary(self) -> str:
         bits = []
@@ -54,11 +55,106 @@ class ModMeta:
             bits.append(f"version={self.version}")
         if self.loader:
             bits.append(f"loader={self.loader}")
+        if self.manifest:
+            for k in ("Implementation-Vendor", "Specification-Vendor"):
+                if self.manifest.main.get(k):
+                    bits.append(f"vendor={self.manifest.main[k]}")
+                    break
+            ag = self.manifest.agent_attrs()
+            if ag.get("Premain-Class") or ag.get("Agent-Class"):
+                bits.append("java-agent")
         if self.entrypoints:
             bits.append(f"entries={','.join(self.entrypoints[:3])}")
         if self.mixin_configs:
             bits.append(f"mixin configs={','.join(self.mixin_configs[:3])}")
         return " ".join(bits) or "no mod metadata found"
+
+
+# --------------------------------------------------------------------------
+# MANIFEST.MF。lf21 教训（2026-10-04 对标）：Vendor、Premain/Agent-Class 声明
+# 是最硬的身份情报，但只在 manifest 里——漏读它 = 漏掉"双模式 Java Agent"
+# 这种定性级结论。所以 manifest 是固定采集项，不是可选加餐。
+# --------------------------------------------------------------------------
+
+_AGENT_ATTRS = ("Premain-Class", "Agent-Class", "Launcher-Agent-Class",
+                "Can-Retransform-Classes", "Can-Redefine-Classes")
+
+
+@dataclass
+class ManifestInfo:
+    main: dict[str, str] = field(default_factory=dict)
+    sections: dict[str, dict[str, str]] = field(default_factory=dict)
+    raw: str | None = None
+
+    def agent_attrs(self) -> dict[str, str]:
+        """Java Instrumentation agent 的能力声明（Premain/Agent-Class 等）。"""
+        return {k: v for k, v in self.main.items() if k in _AGENT_ATTRS}
+
+
+def parse_manifest(text: str) -> ManifestInfo:
+    """JAR manifest 纯文本解析。行首空格 = 续行（去掉那一个空格接回上值）；
+    空行分 section；首个 section 是 main attributes，其余按 Name: 头归档。"""
+    info = ManifestInfo(raw=text)
+    sections: list[dict[str, str]] = [{}]
+    last_key: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\r")
+        if not line.strip():
+            if sections[-1]:
+                sections.append({})
+                last_key = None
+            continue
+        if line.startswith(" ") and last_key:
+            sections[-1][last_key] += line[1:]
+            continue
+        if ":" in line:
+            k, v = line.split(":", 1)
+            last_key = k.strip()
+            sections[-1][last_key] = v.strip()
+    info.main = dict(sections[0])
+    rest: dict[str, dict[str, str]] = {}
+    for sec in sections[1:]:
+        if not sec:
+            continue
+        name = sec.pop("Name", None)
+        rest[name if name else "(unnamed)"] = sec
+    info.sections = rest
+    return info
+
+
+def read_manifest(jar: Path) -> ManifestInfo | None:
+    try:
+        with zipfile.ZipFile(jar) as z:
+            if "META-INF/MANIFEST.MF" not in z.namelist():
+                return None
+            return parse_manifest(
+                z.read("META-INF/MANIFEST.MF").decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def resource_inventory(jar: Path, limit: int = 10) -> dict:
+    """非 class 条目粗分类：总数、顶层目录、扩展名分布。
+
+    资源本身就是情报（assets/ 品牌、着色器、字体、配置模板），而且
+    ZKM 会改写资源内容（lf21 的 mods.toml 注释里全词 mod 被替换）——
+    数量与分布先摆出来，人再去看内容。"""
+    dirs: dict[str, int] = {}
+    exts: dict[str, int] = {}
+    n = 0
+    with zipfile.ZipFile(jar) as z:
+        for name in z.namelist():
+            if name.endswith("/") or name.endswith(".class"):
+                continue
+            n += 1
+            top = name.split("/", 1)[0] if "/" in name else "(root)"
+            dirs[top] = dirs.get(top, 0) + 1
+            base = name.rsplit("/", 1)[-1]
+            ext = base.rsplit(".", 1)[-1].lower() if "." in base else "(none)"
+            exts[ext] = exts.get(ext, 0) + 1
+    return {"non_class": n,
+            "top_dirs": sorted(dirs.items(), key=lambda kv: -kv[1])[:limit],
+            "by_ext": sorted(exts.items(), key=lambda kv: -kv[1])[:limit]}
 
 
 @dataclass
@@ -171,6 +267,15 @@ def _first_dict(node) -> dict:
 
 
 def read_mod_meta(jar: Path) -> ModMeta:
+    """loader 元数据（fabric.mod.json / mods.toml / mcmod.info）+ manifest。
+
+    manifest 是固定采集项：不管 loader 是什么，身份/agent 声明都在那里。"""
+    meta = _read_loader_meta(jar)
+    meta.manifest = read_manifest(jar)
+    return meta
+
+
+def _read_loader_meta(jar: Path) -> ModMeta:
     meta = ModMeta()
     with zipfile.ZipFile(jar) as z:
         names = set(z.namelist())

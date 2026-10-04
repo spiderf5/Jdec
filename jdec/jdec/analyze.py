@@ -156,6 +156,7 @@ class Analysis:
     indy: INDY.IndyReport | None = None
     native: NativeReport | None = None
     mapping_desc: str | None = None
+    resources: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -343,6 +344,17 @@ def analyze(jar: Path, mapping=None, mapping_desc: str | None = None,
     resolved = MM.translate_hooks(scan.hooks, mapping)
 
     notes: list[str] = []
+    ag = meta.manifest.agent_attrs() if meta.manifest else {}
+    if ag.get("Premain-Class") or ag.get("Agent-Class"):
+        which = ", ".join(f"{k}={ag[k]}" for k in ("Premain-Class", "Agent-Class")
+                          if ag.get(k))
+        notes.append(f"java agent declared: {which} - attach/instrument capable, "
+                     f"expect self-injection and runtime patching")
+    vendors = [meta.manifest.main[k] for k in ("Implementation-Vendor",
+                                               "Specification-Vendor")
+               if meta.manifest and meta.manifest.main.get(k)]
+    if vendors:
+        notes.append(f"manifest vendor: {vendors[0]}")
     if refmapped:
         notes.append(f"refmap: {refmapped} hook method name(s) restored from "
                      + ", ".join(refmap.sources[:2]))
@@ -379,7 +391,8 @@ def analyze(jar: Path, mapping=None, mapping_desc: str | None = None,
     return Analysis(
         jar=jar, profile=prof, meta=meta, hooks=scan.hooks, hook_stats=stats,
         classes=scan.signals, obf=scan.obf, obf_classes=scan.obf_classes,
-        indy=indy, native=native, mapping_desc=mapping_desc, notes=notes,
+        indy=indy, native=native, mapping_desc=mapping_desc,
+        resources=MM.resource_inventory(jar), notes=notes,
     )
 
 
@@ -397,6 +410,27 @@ def render_markdown(a: Analysis) -> str:
         L.append(f"- minecraft: {' '.join(filter(None, [a.profile.mc_version, a.profile.mc_flavor]))}")
     L.append(f"- mod: {a.meta.summary()}")
     L.append("")
+
+    if a.meta.manifest and a.meta.manifest.main:
+        L += ["## jar metadata", ""]
+        L.append("| manifest attribute | value |")
+        L.append("|---|---|")
+        for k, v in sorted(a.meta.manifest.main.items()):
+            L.append(f"| {k} | {v} |")
+        L.append("")
+        if a.meta.manifest.sections:
+            L.append(f"- {len(a.meta.manifest.sections)} named per-entry "
+                     f"section(s)")
+        if a.resources:
+            inv = a.resources
+            L.append(f"- non-class entries: {inv['non_class']}")
+            if inv["top_dirs"]:
+                L.append("- top dirs: " + ", ".join(
+                    f"{k} ({v})" for k, v in inv["top_dirs"][:8]))
+            if inv["by_ext"]:
+                L.append("- file types: " + ", ".join(
+                    f"{k} ({v})" for k, v in inv["by_ext"][:8]))
+        L.append("")
 
     if a.notes:
         L += ["## notes", ""] + [f"- {n}" for n in a.notes] + [""]
@@ -537,6 +571,12 @@ def render_json(a: Analysis) -> str:
             "loader": a.meta.loader, "entrypoints": a.meta.entrypoints,
             "mixin_configs": a.meta.mixin_configs,
         },
+        "manifest": (None if a.meta.manifest is None else {
+            "main": a.meta.manifest.main,
+            "agent": a.meta.manifest.agent_attrs(),
+            "sections": len(a.meta.manifest.sections),
+        }),
+        "resources": a.resources,
         "mapping": a.mapping_desc,
         "hooks": [
             {

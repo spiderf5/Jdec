@@ -190,3 +190,86 @@ BootstrapMethods 条目携带**各自的** `(cipher, seed)`。driver 若按
 用独立实现交叉验证：硬抄算法的 Python 解密器（哪怕只覆盖部分变体）
 按 `(fqcn, seed)` 与 recovered.tsv 对齐比对 plain。纯函数家族两边必须
 完全一致；不一致 = driver 还有键位 bug。
+
+## 路线分岔：ZKM 字符串池（无 indy）→ JVM replay
+
+recover 的 bootstrap 重放只覆盖 indy 形态。ZKM 还有一种**无 indy 的字符串池**
+形态（lf21 1.20.1 实战），识别特征与打法完全不同：
+
+### 形态识别
+
+- 反编译源里大量 `Cls.a(<int>, <int>)` 单字母双 int 参调用（一个池类
+  动辄几百个调用点，散布全库）；池类本体有
+  `private static String a(int n, int n2)` + `static String[] b/e` + `static {}`。
+- clinit：一条**packed 载体串**（长串字面量），按"长度前缀"切片 +
+  7 项小 key 表 XOR → 密文池 `b[]`（每类条目数不同，`new String[N]` 可见）。
+- 访问器：`idx ^ 常数 & 0xFFFF` 定址；**按密文首字节查 256 项 key 表**
+  取 base key；seed（调用点第二参）派生奇偶双滚动 key，滚动更新**喂明文**
+  (`k = (ror3(k) ^ plain) & 0xFF`)。**逐类常数/key 表全不同**——静态移植
+  每类一套，不现实。
+- 另有少量**内联单串**形态：clinit 里 `"密文".toCharArray()` + `i % N`
+  小表 XOR + intern，直接赋 static final String（模块名等短串）。这个可以
+  纯静态解：声明↔intern 按**块内顺序配对**（CFR 会把数组变量改名，
+  别按变量名配）。
+
+### replay 路线（真类加载替代算法移植）
+
+1. **spec**：扫反编译源，收集 `(池类, 访问器名, idx, seed)` 全部调用点
+   （类限定 + 池类文件内裸调用两种都要；idx/seed 注意 0x 十六进制字面量）。
+2. **driver**：`Class.forName(init=true)` 触发 clinit（池数组就位）→
+   `getDeclaredMethods` 按"名字+2参+返回String"找访问器 → `invoke` 逐站点
+   收明文 → TSV（明文 base64，避免编码问题）。类初始化失败缓存进 failed
+   集合快速跳过；**结束时 System.exit(0)**。
+3. **classpath 是成败关键**（见下节）。回填 = 源码里把调用表达式替换成
+   Java 字面量（json.dumps 的 \uXXXX 转义直接可用）。
+
+### replay 的环境工程三件套（lf21 实测坑）
+
+- **自造匹配命名系的 MC jar**：mod 字节码引用"官方类名+SRG成员"（FG dev
+  命名）。FG 缓存的 minecraft_repo client.jar 是 `net/minecraft/src/C_NNNN_`
+  中间态，**不能直接用**；要下原始 client.jar（version.json 里有 URL+sha1），
+  用 jdec mappings **组合映射**：成员名取 mcp_config joined.tsrg
+  （m_/f_），类名取 Mojang ProGuard client.txt（官方名）——两个 Mapping
+  拼 classes+members 即可。7436 类重映射约 9 秒。
+- **lwjgl 全家要不要剔——按失败归因逐类取舍，别一刀切**（lf21 对标实测：
+  全剔错杀 4 个只摸常量的池类；带上 lwjgl-api 仅 1 类真崩）。规则修订版：
+  **加载 ≠ 调 native**——GLFW/GL 系**常量类**（纯 static final 常量）
+  加载是安全的；clinit 里真调 native 函数的类才会 `EXCEPTION_ACCESS_VIOLATION`
+  崩 JVM（hs_err: lwjgl_opengl.dll）。打法：classpath **带上 lwjgl-api**
+  （纯常量 jar，无 natives），真崩的类进 failed 集合单独认输——recover 的
+  failed_triage.md 会把 NCDFE/CNFE 且 `:\s*org[./]lwjgl` 的归进
+  lwjgl-constants 桶给出处置。宁可多崩一两个类，不要错杀一片。
+  `-Xverify:none` 另可救"被动签名引用卡验证器"的类。
+- **MSYS/Git Bash 五坑**（全部实测踩过）：
+  ① 长多 jar classpath 里 `/c/...` 混 `;` 会被路径转换搅坏——用
+  `cygpath -w` 转 Windows 路径 + `MSYS2_ARG_CONV_EXCL="*"`；
+  ② 但 EXCL="*" 会把 **TSV 参数**的转换也禁掉——java 收到 `/d/...`
+  找不到文件**静默崩**（输出文件根本没被重写，数字看着像跑过了）——
+  参数一律写 `D:/...` 风格；
+  ③ cwd 不持久，命令链里相对路径读文件读空气——工具文件一律绝对路径；
+  ④ **grep 把含裸控制字节的文件判成 binary**，`-o` 模式静默不输出——
+  统计（数 m_ 调用、数残留站点）凭空少一大截（lf21 实测 6902 被算成
+  3221）。一律 `grep -a`（--binary-files=text）；回填写盘统一 `\uXXXX`
+  转义，不落裸字节，从根上消灭 binary 判定；
+  ⑤ `awk -F:` 吃掉 Windows 盘符冒号（`D:/...` 被切成 `D` 和 `/...`），
+  求和/计数全变 0——用 `$NF` 取末字段或进树内用相对路径。
+  另：对单行 classpath 文件做 `grep -iv lwjgl` 会把整行删掉，先 `tr ";" "\n"`
+  分行再过滤再 paste 回去。
+
+### 收益与边界
+
+lf21: 4567 唯一键恢复 4434（97.2%）+ 内联 31 处全解。残留 = 池类 clinit
+真调 MC 运行时（`Minecraft.getInstance()` 解引用、authlib API 版本差、
+forge eventbus 缺包）——没有真游戏进程就到头了，属结构性边界。
+
+**失败清单必须逐类归因，禁止统一叙事**（lf21 对标实测教训：把 11 个失败
+类一句"结构性边界"带过，实际其中 4 个是 lwjgl 常量类错杀、可修——另 7 个
+才是真边界）。每批失败都要问：是同一根因吗？有哪几个换个环境/换个小补丁
+就能救？recover 已内置自动归因：跑完输出 `failed_triage.md`（native /
+lwjgl-constants / missing-class / needs-instance / needs-bootstrap /
+signature / clinit-chain / other 八桶，各带处置建议）——拿到失败清单先读
+它，别先写结论。
+
+**回填的编码卫生**：替换字面量统一 `\uXXXX` 转义（json.dumps 默认行为），
+不要把原始字符或 surrogateescape 裸字节写进源码——裸控制字节会让下游所有
+grep/diff 把文件判成 binary，静默漏统计、对不上账（见上面 MSYS 第④坑）。
