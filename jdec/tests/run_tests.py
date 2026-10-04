@@ -774,6 +774,49 @@ def test_auto_mapping_set_flavor() -> None:
           CL._mapping_set_for("auto", SimpleNamespace()) == "auto")
 
 
+def test_java_escape() -> None:
+    print("recover: java_escape escapes backslash/quote/newline/tab")
+    from jdec.recover import java_escape
+    bs = chr(92)
+    src = "a" + bs + 'b"c' + chr(10) + chr(9) + chr(13)
+    out = java_escape(src)
+    want = ("a" + bs + bs + "b" + bs + '"c' + bs + "n"
+            + bs + "t" + bs + "r")
+    check("escape is java-literal-safe", out == want, repr(out))
+
+
+def test_rewrite_sources() -> None:
+    print("recover: rewrite_sources backfills plaintexts, keeps misses")
+    from jdec.recover import rewrite_sources
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        # 三个站点：一个单行、一个跨行折行（其他引擎形态）、一个无解
+        (d / "A.java").write_text(
+            'class A {\n'
+            '    String s = Enc.d("n1", "Q2ZnbA==", 42);\n'
+            '    String t = Enc.d(\n'
+            '            "n2",\n'
+            '            "TG9uZw==",\n'
+            '            -7);\n'
+            '    String u = Enc.d("n3", "TWlz=", 9);\n'
+            "}\n", encoding="utf-8")
+        tsv = d / "recovered.tsv"
+        rows = [
+            "OK\tpkg.C\tn1\tQ2ZnbA==\t42\tsecret",
+            "OK\tpkg.C\tn2\tTG9uZw==\t-7\tlonger",
+            "FAIL\tpkg.C\tn3\t?\t?\tboom",
+        ]
+        tsv.write_text(chr(10).join(rows) + chr(10), encoding="utf-8")
+        st = rewrite_sources(d, tsv)
+        check("two sites replaced", st["replaced"] == 2, str(st))
+        check("unrecoverable site missed", st["missed"] == 1, str(st))
+        check("residual counts the miss", st["residual"] == 1, str(st))
+        check("no key conflicts", st["conflicts"] == 0, str(st))
+        txt = (d / "A.java").read_text(encoding="utf-8")
+        check("plaintexts written back", '"secret"' in txt and '"longer"' in txt)
+        check("unmatched site untouched", "TWlz=" in txt)
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -852,6 +895,8 @@ def main() -> int:
     test_weak_engine_is_rescued()
     test_yarn_compose()
     test_auto_mapping_set_flavor()
+    test_java_escape()
+    test_rewrite_sources()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

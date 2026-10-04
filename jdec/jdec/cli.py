@@ -18,6 +18,7 @@ from . import strings as ST
 from .decompile import decompile, write_report
 from .probe import profile_jar
 from .recover import recover as do_recover
+from .recover import rewrite_sources as do_rewrite_sources
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_ENGINES_DIR = HERE.parent / "engines"
@@ -291,9 +292,23 @@ def cmd_recover(args: argparse.Namespace) -> int:
         print(f"no such file: {raw}")
         return 2
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_recovered")
-    return do_recover(raw, out_dir, cp=args.cp, java=args.java,
-                      limit=args.limit, stop_on_error=args.stop_on_error,
-                      cp_file=args.cp_file)
+    rc = do_recover(raw, out_dir, cp=args.cp, java=args.java,
+                    limit=args.limit, stop_on_error=args.stop_on_error,
+                    cp_file=args.cp_file, timeout=args.timeout)
+    tsv = out_dir / "recovered.tsv"
+    if args.rewrite_src:
+        if not Path(args.rewrite_src).is_dir():
+            print(f"rewrite-src: no such dir: {args.rewrite_src}")
+            return 2
+        if not tsv.exists():
+            print("rewrite-src: no recovered.tsv produced; nothing to rewrite")
+            return 1
+        st = do_rewrite_sources(Path(args.rewrite_src), tsv)
+        print(f"rewrite   : {st['replaced']} call(s) replaced in {st['files']} "
+              f"file(s), {st['missed']} missed, {st['residual']} residual, "
+              f"map={st['map_size']} conflicts={st['conflicts']}")
+        print(f"rewritten : {args.rewrite_src}")
+    return rc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -406,6 +421,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only recover the first N classes with sites")
     sr.add_argument("--stop-on-error", action="store_true",
                     help="abort the replay JVM on first failure (debug)")
+    sr.add_argument("--timeout", type=int, default=1800,
+                    help="kill the replay JVM after N seconds (default 1800); "
+                         "every site runs its own decryption for real, so "
+                         "big samples can need well over 30 minutes")
+    sr.add_argument("--rewrite-src", metavar="DIR", default=None,
+                    help="rewrite recovered plaintexts into decompiled "
+                         ".java sources under DIR (matches the BSM call "
+                         "form Cls.method(\"site\", \"cipher\", seed)); "
+                         "pair with decompile output src/")
     sr.set_defaults(func=cmd_recover)
     return p
 

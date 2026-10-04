@@ -63,6 +63,9 @@ public class RecoverDriver {
                     fqcn = line.substring(2);
                     fields.clear();
                     bsms = new Method[64];
+                    // bsmStatics 按 B 行条目 idx 键存（idx 类内有效），换类必须清——
+                    // 否则上个类的残留会喂给本类同 idx 的站点
+                    bsmStatics.clear();
                     Class<?> c = Class.forName(fqcn, true, cl);
                     for (Field f : c.getDeclaredFields())
                         if (f.getType() == long.class
@@ -85,7 +88,11 @@ public class RecoverDriver {
                     Object[] stat = new Object[Math.max(0, nstatic)];
                     for (int i = 0; i < nstatic; i++)
                         stat[i] = decodeStatic(p[5 + i], bpt[3 + i]);
-                    bsmStatics.put(bsmKey(m), stat);
+                    // 静态参数按条目 idx 存取（不是按方法签名！）：同一解密器
+                    // 方法会被同类的多个条目共用，而每个条目携带各自的
+                    // (cipher, seed)——按签名做键会互相覆盖，全部站点都拿到
+                    // 最后一个条目的参数（JadeOffline 实测坑掉 2730/6516 站点）。
+                    bsmStatics.put("B" + idx, stat);
                 } else if (line.startsWith("S\t")) {
                     String[] p = line.split("\t", -1);
                     int bsmIdx = Integer.parseInt(p[1]);
@@ -126,12 +133,12 @@ public class RecoverDriver {
                     }
                     // 静态参数（BootstrapMethods 属性里的）传给 bootstrap；
                     // 动态参数属于 bootstrap 安装的 target，不能混进来
+                    Object[] stat = bsmStatics.getOrDefault("B" + bsmIdx, new Object[0]);
                     List<Object> call = new ArrayList<>();
                     call.add(lookupFor(bsm.getDeclaringClass()));
                     call.add(siteName);
                     call.add(MethodType.fromMethodDescriptorString(siteDesc, cl));
-                    call.addAll(Arrays.asList(
-                            bsmStatics.getOrDefault(bsmKey(bsm), new Object[0])));
+                    call.addAll(Arrays.asList(stat));
                     Object result = bsm.invoke(null, call.toArray());
                     Object unwrapped = (result instanceof CallSite)
                             ? ((CallSite) result).getTarget() : result;
@@ -148,7 +155,15 @@ public class RecoverDriver {
                         out = mh.invokeWithArguments(pass);
                     } else
                         out = unwrapped;
-                    System.out.println("OK\t" + fqcn + "\t" + siteName + "\t" + esc(String.valueOf(out)));
+                    // OK 行携带本条目的 (cipher, seed)：回填源码时的匹配键。
+                    // 第一个 String 型静态参数视为 cipher，第一个数值型视为 seed。
+                    String cipher = "-", seed = "-";
+                    for (Object st : stat) {
+                        if (cipher.equals("-") && st instanceof String s) cipher = s;
+                        else if (seed.equals("-") && st instanceof Number n) seed = n.toString();
+                    }
+                    System.out.println("OK\t" + fqcn + "\t" + siteName + "\t"
+                            + esc(cipher) + "\t" + seed + "\t" + esc(String.valueOf(out)));
                     ok++;
                 }
             } catch (Throwable t) {
@@ -163,10 +178,6 @@ public class RecoverDriver {
         }
         System.err.println("driver: ok=" + ok + " ref=" + ref
                 + " fail=" + fail + " skip=" + skip);
-    }
-
-    static String bsmKey(Method m) {
-        return m.getDeclaringClass().getName() + "." + m.getName() + ":" + m;
     }
 
     static Method resolveBsm(String owner, String name, String bsmDesc) throws Exception {

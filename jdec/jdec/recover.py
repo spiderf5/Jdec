@@ -158,9 +158,97 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
     return spec_path, n_sites, n_skip
 
 
+def java_escape(s: str) -> str:
+    """把明文转成 Java 字符串字面量的内容（不含首尾引号）。
+
+    反斜杠一律用 chr(92) 构造——实证某些传输链路会把手写的反斜杠
+    改写成斜杠，chr() 拼接免疫。
+    """
+    bs = chr(92)
+    out = []
+    for ch in s:
+        if ch == bs:
+            out.append(bs + bs)
+        elif ch == '"':
+            out.append(bs + '"')
+        elif ch == "\n":
+            out.append(bs + "n")
+        elif ch == "\r":
+            out.append(bs + "r")
+        elif ch == "\t":
+            out.append(bs + "t")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
+    """把 recovered.tsv 的解密明文回填进反编译源码（CFR/其他引擎的 .java）。
+
+    匹配源码里 indy 被还原成的 BSM 调用形态:
+        Cls.method("siteName", "cipher", seed)
+    匹配键 = (cipher, seed)——driver 的 OK 行已携带这两个静态参数。
+    适用条件: BSM 静态参数为 (String cipher, 整数 seed) 的字符串解密家族；
+    REF 型（成员引用）与其他参数布局不在范围内。
+
+    正则用零反斜杠的字符类写法（[.] [(] 等）——传输链路会改写反斜杠，
+    字符类写法免疫。返回统计 dict。
+    """
+    plain_map: dict = {}
+    conflicts = 0
+    for line in tsv_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 6 or parts[0] != "OK":
+            continue
+        cipher, seed, plain = parts[3], parts[4], parts[-1]
+        if cipher == "-" or seed == "-":
+            continue
+        if plain.startswith("[L") or re.search(r"@[0-9a-f]{4,}$", plain):
+            continue
+        key = (cipher, seed)
+        if key in plain_map:
+            if plain_map[key] != plain:
+                conflicts += 1
+            continue
+        plain_map[key] = plain
+
+    # 空白类含 CR/LF：CFR 之外的引擎（vineflower/procyon）会把长参数折行
+    WS = "[ \t\r\n]*"
+    pat = re.compile(
+        "[A-Za-z0-9_]+[.][A-Za-z0-9_]+[(]" + WS
+        + '"([A-Za-z0-9+/=]{1,60})"' + WS + "," + WS
+        + '"([A-Za-z0-9+/=]{1,8192})"' + WS + "," + WS
+        + "(-?[0-9]+)" + WS + "[)]")
+
+    n_files = replaced = missed = residual = 0
+    for path in sorted(src_dir.rglob("*.java")):
+        txt = path.read_text(encoding="utf-8", errors="ignore")
+        if not pat.search(txt):
+            continue
+        n_files += 1
+
+        def sub(m: "re.Match") -> str:
+            nonlocal replaced, missed
+            key = (m.group(2), m.group(3))
+            if key in plain_map:
+                replaced += 1
+                return '"' + java_escape(plain_map[key]) + '"'
+            missed += 1
+            return m.group(0)
+
+        new = pat.sub(sub, txt)
+        residual += sum(1 for m in pat.finditer(new)
+                        if (m.group(2), m.group(3)) not in plain_map)
+        if new != txt:
+            path.write_text(new, encoding="utf-8")
+    return {"files": n_files, "replaced": replaced, "missed": missed,
+            "residual": residual, "conflicts": conflicts,
+            "map_size": len(plain_map)}
+
+
 def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             limit: int = 0, stop_on_error: bool = False,
-            cp_file: Path | None = None) -> int:
+            cp_file: Path | None = None, timeout: int = 1800) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
@@ -191,8 +279,21 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
     argsfile.write_text(
         head + f'-Xverify:none\n-cp "{cp_line}"\nRecoverDriver\n"{spec_path.as_posix()}"\n',
         encoding="utf-8")
-    r = subprocess.run([java, "@" + str(argsfile)], capture_output=True,
-                       text=True, errors="replace", timeout=1800)
+    try:
+        r = subprocess.run([java, "@" + str(argsfile)], capture_output=True,
+                           text=True, errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        # 每站点真解密的代价可能远超默认 30 分钟（6516 站点实测 ~35min）。
+        # 超时不扔掉已产出：kill 后把部分输出照常收割，调用方按需加大 --timeout。
+        print(f"WARNING  : driver killed at {timeout}s timeout "
+              f"(partial output kept; rerun with --timeout N)")
+        r = subprocess.CompletedProcess(e.cmd, 1,
+                                        stdout=e.stdout or "",
+                                        stderr=e.stderr or "")
+        if isinstance(r.stdout, bytes):
+            r.stdout = r.stdout.decode("utf-8", "replace")
+        if isinstance(r.stderr, bytes):
+            r.stderr = r.stderr.decode("utf-8", "replace")
     (out_dir / "driver.log").write_text(r.stderr[-4000:], encoding="utf-8")
 
     ok, fail, skip, ref = 0, 0, 0, 0
