@@ -214,6 +214,14 @@ recover 的 bootstrap 重放只覆盖 indy 形态。ZKM 还有一种**无 indy �
 
 ### replay 路线（真类加载替代算法移植）
 
+**已工具化（2026-10-04，lf21 池形态实战沉淀）**：
+`python jdec.py pool scan <src> -o spec.tsv` → `pool harvest spec.tsv -o
+harvest.tsv --cp-file libs.txt` → `pool apply <src> --harvest harvest.tsv
+-o src_pool` 三步覆盖本节全部流程：访问器/调用点扫描（int/long 形状自适应、
+0x/八进制/L 后缀）、PoolDriver 反射重放（类初始化失败缓存、四种参数组合、
+E 行带最深 cause）、回填（\u 转义 + 字面量 round-trip 校验 + 可解站点零
+残留 verify）+ E 行进失败八桶归因。手写脚本只剩环境组装（下面三件套）。
+
 1. **spec**：扫反编译源，收集 `(池类, 访问器名, idx, seed)` 全部调用点
    （类限定 + 池类文件内裸调用两种都要；idx/seed 注意 0x 十六进制字面量）。
 2. **driver**：`Class.forName(init=true)` 触发 clinit（池数组就位）→

@@ -107,13 +107,30 @@ python jdec.py decompile X.jar -o out --verify-all
 | 毒类（静默退出 / native 崩）、agent 桩化、运行时 dump | `references/dynamic-analysis.md` |
 | indy 编码调用图 / 字符串解密 | `python jdec.py indy X.jar` 普查站点；`references/string-encryption.md` 的自洽重放节 |
 | 字符串解密**回填源码**（零残留可读源码） | `python jdec.py recover X.jar --output out/recover --rewrite-src out/src --timeout 7200`；用法与两大坑见 `references/string-encryption.md` 回填节 |
+| 字符串加密是**池形态（无 indy）**：`Cls.a(idx, seed)` 访问器 | `python jdec.py pool scan|harvest|apply`：扫调用点 → JVM 反射重放（真类加载触发 clinit）→ \u 转义回填 + verify + 失败八桶归因；classpath 组装与 lwjgl 取舍见 `references/string-encryption.md` 池 replay 节 |
 | native 方法体在 DLL 里（native/virtualised） | `python jdec.py natives X.jar -o out`：提取库 + PE 导出表 + 给 Ghidra 分析师的任务清单 |
 
 运行时捕获的核心思路：**让混淆器自己解密，我们只盯着出口**。优先级是
 零环境的纯重放 → 字节码手术 agent → 真实环境倾倒；真环境里授权校验必须
 真过，桩化 agent 反而会坏事。
 
-### 6. 沉淀
+### 6. 收尾自查（六问，全过才算收工）
+
+1. **失败清单归因了吗**？recover/pool 跑完先读 `failed_triage.md` 八桶，
+   逐桶回答"能不能救、值不值得救"——禁止一句"结构性边界"带过（铁律 9）。
+2. **MANIFEST / mods.toml 元数据收进报告了吗**？analyze 已自动采集
+   manifest 与资源清单，但 vendor、Premain 双声明、标识符异常这类
+   硬情报要人工写进定性结论。
+3. **回填字面量全转义了吗**？产出树里裸控制字节应为 0（统计与 grep
+   一律加 `-a`），否则对账数字会静默漏计。
+4. **scorecard 出了吗**？`python jdec.py scorecard <样本目录> -o
+   out/sc.json --compare out/上一次.json`——答不出"比上次好多少"就
+   不算完成一轮迭代。
+5. **新结论沉淀了吗**（铁律 8）：指纹进 `fingerprints.json`、方法论进
+   `references/`，项目/用户级双写同步。
+6. **报告里对未解部分给的是分桶证据还是统一叙事**？收尾时自查一遍措辞。
+
+### 7. 沉淀
 
 按铁律 8 执行。识别到新混淆器：往 `scripts/fingerprints.json` 的
 `obfuscators` 加 `name` / `keywords` / `tool`，然后
@@ -136,7 +153,7 @@ Caesium 系）、Threadtear；Vineflower 出源码、CFR 交叉验证可疑段�
 
 ## 修 jdec 本身
 
-- 唯一校验命令：`python tests/run_tests.py`（2026-10-04 基线 123 项；
+- 唯一校验命令：`python tests/run_tests.py`（2026-10-04 深挖后基线 164 项；
   `--with-mc` 更全，真实样本外置于 `D:/MC/samples/`，缺失自动跳过）。
 - 自动探测工具识别不出这个项目（无标准标记文件），校验直接用上面的命令。
 - 修 bug 三步：先复现（失败测试或命令）→ 最小修复 → **真实样本回归**。

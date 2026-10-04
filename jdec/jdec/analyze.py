@@ -157,6 +157,7 @@ class Analysis:
     native: NativeReport | None = None
     mapping_desc: str | None = None
     resources: dict = field(default_factory=dict)
+    resource_anomaly: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -388,11 +389,19 @@ def analyze(jar: Path, mapping=None, mapping_desc: str | None = None,
 
     stats = {"declared": scan.declared_mixins, "scanned": scan.classes_scanned,
              "with_hooks": scan.classes_with_hooks, "unreadable": scan.unreadable}
+    anom = MM.resource_anomaly(jar)
+    if anom["suspects"]:
+        toks = ", ".join(f"{t}(x{n})" for t, n, _ in anom["suspects"])
+        notes.append("resource identifier anomaly: " + toks
+                     + " - high-frequency non-dictionary token(s) in text "
+                       "resources; possible identifier-level obfuscation, "
+                       "open the resource and verify by hand")
     return Analysis(
         jar=jar, profile=prof, meta=meta, hooks=scan.hooks, hook_stats=stats,
         classes=scan.signals, obf=scan.obf, obf_classes=scan.obf_classes,
         indy=indy, native=native, mapping_desc=mapping_desc,
-        resources=MM.resource_inventory(jar), notes=notes,
+        resources=MM.resource_inventory(jar), resource_anomaly=anom,
+        notes=notes,
     )
 
 
@@ -430,6 +439,10 @@ def render_markdown(a: Analysis) -> str:
             if inv["by_ext"]:
                 L.append("- file types: " + ", ".join(
                     f"{k} ({v})" for k, v in inv["by_ext"][:8]))
+        if a.resource_anomaly.get("suspects"):
+            L.append("- identifier anomalies: " + ", ".join(
+                f"`{t}` x{n}/{nf}files"
+                for t, n, nf in a.resource_anomaly["suspects"]))
         L.append("")
 
     if a.notes:
@@ -577,6 +590,7 @@ def render_json(a: Analysis) -> str:
             "sections": len(a.meta.manifest.sections),
         }),
         "resources": a.resources,
+        "resource_anomaly": a.resource_anomaly,
         "mapping": a.mapping_desc,
         "hooks": [
             {

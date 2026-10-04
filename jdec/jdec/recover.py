@@ -269,10 +269,14 @@ def java_escape(s: str) -> str:
 
     反斜杠一律用 chr(92) 构造——实证某些传输链路会把手写的反斜杠
     改写成斜杠，chr() 拼接免疫。
+    编码卫生（lf21 对标教训）：除 \t\n\r 外的所有控制字符与全部非 ASCII
+    一律转义成 uXXXX 形式——裸控制/高位字节会让下游 grep/diff 把文件判成
+    binary，静默漏统计（实测 6902 被少算成 3221）。
     """
     bs = chr(92)
     out = []
     for ch in s:
+        o = ord(ch)
         if ch == bs:
             out.append(bs + bs)
         elif ch == '"':
@@ -283,9 +287,48 @@ def java_escape(s: str) -> str:
             out.append(bs + "r")
         elif ch == "\t":
             out.append(bs + "t")
+        elif o < 0x20 or o > 0x7E:
+            out.append(bs + "u%04x" % o)
         else:
             out.append(ch)
     return "".join(out)
+
+
+def java_unescape(s: str) -> str:
+    """java_escape 的逆变换——verify 用：字面量反转义后须与明文一致。"""
+    bs = chr(92)
+    simple = {"n": chr(10), "r": chr(13), "t": chr(9),
+              "b": chr(8), "f": chr(12)}
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == bs and i + 1 < len(s):
+            n = s[i + 1]
+            if n == "u" and i + 5 < len(s):
+                try:
+                    out.append(chr(int(s[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(simple.get(n, n))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def norm_classpath(cp: str) -> str:
+    """归一化给 java 看的 classpath：反斜杠→正斜杠，MSYS 盘符 →D: 风格。
+
+    java @argfile 把反斜杠当转义符；MSYS 风格路径 java 也不认——
+    全部归一成 Windows 正斜杠形式（/d/x -> D:/x）。
+    """
+    cp = cp.replace(chr(92), "/")
+    return re.sub(r"(^|;)/([A-Za-z0-9_])/",
+                  chr(92) + r"1" + chr(92) + r"2:/", cp)
 
 
 def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
@@ -327,6 +370,7 @@ def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
         + "(-?[0-9]+)" + WS + "[)]")
 
     n_files = replaced = missed = residual = 0
+    lits_written: list[str] = []
     for path in sorted(src_dir.rglob("*.java")):
         txt = path.read_text(encoding="utf-8", errors="ignore")
         if not pat.search(txt):
@@ -338,7 +382,14 @@ def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
             key = (m.group(2), m.group(3))
             if key in plain_map:
                 replaced += 1
-                return '"' + java_escape(plain_map[key]) + '"'
+                plain = plain_map[key]
+                lit = java_escape(plain)
+                # verify：字面量转义必须可逆（抓 java_escape 的 bug）
+                if java_unescape(lit) != plain:
+                    raise RuntimeError("literal round-trip mismatch: "
+                                       + repr(lit[:60]))
+                lits_written.append(lit)
+                return '"' + lit + '"'
             missed += 1
             return m.group(0)
 
@@ -347,6 +398,15 @@ def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
                         if (m.group(2), m.group(3)) not in plain_map)
         if new != txt:
             path.write_text(new, encoding="utf-8")
+    # 可执行断言（编码卫生）：本次写入的字面量必须无裸控制字节——
+    # 裸字节会让下游 grep/diff 判 binary 静默漏统计（实测 6902→3221）
+    for lit in lits_written:
+        bad = [ch for ch in lit if ord(ch) < 0x20
+               and ch not in (chr(9), chr(10), chr(13))]
+        if bad:
+            raise RuntimeError(
+                f"rewritten literal has {len(bad)} raw control byte(s) - "
+                f"escaping broken, must be " + chr(92) + "uXXXX form")
     return {"files": n_files, "replaced": replaced, "missed": missed,
             "residual": residual, "conflicts": conflicts,
             "map_size": len(plain_map)}
@@ -374,10 +434,7 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
     sep = ";" if __import__("os").name == "nt" else ":"
     classpath = sep.join([str(out_dir), cp, str(jar)]) if cp else \
         sep.join([str(out_dir), str(jar)])
-    # java @argfile 把反斜杠当转义符；MSYS 风格路径 java 也不认——
-    # 全部归一成 Windows 正斜杠形式（/d/x -> D:/x）
-    classpath = classpath.replace("\\", "/")
-    classpath = re.sub(r"(^|;)/(\w)/", r"\1\2:/", classpath)
+    classpath = norm_classpath(classpath)
     # Windows 命令行 ~32K 上限装不下几百个库的 classpath，用 @argfile
     argsfile = out_dir / "java_args.txt"
     cp_line = classpath.replace('"', '\\"')
@@ -421,6 +478,14 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
     # 失败归因（硬输出）：分桶 + 每桶处置建议，见 failed_triage.md
     buckets = triage_failures(fail_lines)
     triage_path = write_failed_triage(out_dir, buckets, skip)
+    # 可执行断言：有 FAIL 就必须有归因产出——格式坏了要炸出来，不许静默
+    if fail_lines and not buckets:
+        raise RuntimeError(
+            f"{len(fail_lines)} FAIL line(s) parsed into zero triage buckets "
+            f"- driver FAIL 行格式变了，修 triage_failures 再跑")
+    if fail_lines:
+        assert triage_path is not None and triage_path.exists(), \
+            "fail_lines present but failed_triage.md missing"
     # 文本值去重：剔除数组/对象 toString（"[Lxxx;@hash"、"xxx@hash"）
     uniq = set()
     for v in values:

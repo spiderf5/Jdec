@@ -157,6 +157,75 @@ def resource_inventory(jar: Path, limit: int = 10) -> dict:
             "by_ext": sorted(exts.items(), key=lambda kv: -kv[1])[:limit]}
 
 
+# 标识符级混淆启发式的字典：MC/Fabric/Forge 生态高频词 + 通用编程词。
+# 检测的是"字典词被等长/近形随机串整体替换"的资源侧特征（lf21 实测：
+# mods.toml 里全词 mod → NS5Nc6，23 行命中——ZKM 资源处理物证）。
+_KNOWN_WORDS = frozenset("""
+mod mods name names version versions description authors author credits
+license contact displayurl logo logofile url issues repository homepage
+dependencies dependency required optional ordering side client server
+environment entrypoints entrypoint main mixins mixin accesswidener depends
+suggests breaks conflicts custom id icon sources contributors loader
+fabricloader minecraft forge neoforge java language file jar assets textures
+models blockstates lang sounds shaders pack packmeta format min max
+schemaversion schema group provider adapter value type key data index list
+set map string int bool float true false null title label text item block
+entity gui config settings path root base ref links event events state
+""".split())
+
+_TEXT_EXT = frozenset(
+    "json toml cfg properties txt lang yml yaml mcmeta".split())
+
+
+def resource_anomaly(jar: Path, limit: int = 5, min_count: int = 5) -> dict:
+    """文本资源里的疑似标识符替换（高频 + 非字典 + 拆不出字典词）。
+
+    启发式，只报嫌疑不定性——命中后人工打开对应资源确认。
+    返回 {"text_files": N, "tokens": M, "suspects": [(tok, count, files)]}.
+    """
+    import re
+    from collections import Counter, defaultdict
+    token = re.compile("[A-Za-z][A-Za-z0-9_$]{2,}")
+    counts: Counter = Counter()
+    where: defaultdict = defaultdict(set)
+    text_files = 0
+    with zipfile.ZipFile(jar) as z:
+        for name in z.namelist():
+            if name.endswith("/") or name.endswith(".class"):
+                continue
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext not in _TEXT_EXT:
+                continue
+            try:
+                info = z.getinfo(name)
+                if info.file_size > 1_000_000:
+                    continue
+                txt = z.read(name).decode("utf-8")
+            except Exception:  # noqa: BLE001
+                continue
+            text_files += 1
+            for m in token.finditer(txt):
+                tok = m.group(0)
+                counts[tok] += 1
+                where[tok].add(name)
+    suspects: list[tuple[str, int, int]] = []
+    for tok, n in counts.most_common():
+        if len(suspects) >= limit:
+            break
+        if n < min_count and len(where[tok]) < 2:
+            continue
+        if tok.lower() in _KNOWN_WORDS:
+            continue
+        # 驼峰/下划线复合词拆解：能拆出 >=3 字母字典词的不算嫌疑
+        # （ConfigManager、getVersionUrl 这类正常命名）
+        parts = re.split("[0-9_$]+|(?<=[a-z])(?=[A-Z])", tok)
+        if any(p.lower() in _KNOWN_WORDS and len(p) >= 3 for p in parts):
+            continue
+        suspects.append((tok, n, len(where[tok])))
+    return {"text_files": text_files, "tokens": len(counts),
+            "suspects": suspects}
+
+
 @dataclass
 class MixinHook:
     """One place where the jar reaches into another class."""

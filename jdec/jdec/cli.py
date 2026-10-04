@@ -14,6 +14,8 @@ from . import bsm as BM
 from . import engines as EN
 from . import mappings as MP
 from . import native_scan as NS
+from . import pool as PL
+from . import scorecard as SC
 from . import strings as ST
 from .decompile import decompile, write_report
 from .probe import profile_jar
@@ -311,6 +313,103 @@ def cmd_recover(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_pool(args: argparse.Namespace) -> int:
+    a = args.action
+    if a == "scan":
+        src = Path(args.input)
+        if not src.is_dir():
+            print(f"no such dir: {src}")
+            return 2
+        out = Path(args.output) if args.output else \
+            src.parent / "pool_work" / "pool_spec.tsv"
+        st = PL.scan_spec(src, out)
+        print(f"scanned   : {st['files']} files, {st['pool_classes']} pool "
+              f"classes, {st['accessors']} accessor(s), {st['sig_bad']} "
+              f"shape-mismatch candidate(s)")
+        print(f"call sites: {st['sites']} ({st['unique']} unique, in "
+              f"{st['files_with_sites']} files)")
+        if st["ambiguous_simple_names"]:
+            print(f"ambiguous : {', '.join(st['ambiguous_simple_names'])} "
+                  f"(same simple name in several packages - qualified sites "
+                  f"skipped)")
+        print(f"spec      : {out}")
+        return 0 if st["unique"] else 1
+    if a == "harvest":
+        spec = Path(args.input)
+        if not spec.is_file():
+            print(f"no such file: {spec}")
+            return 2
+        out_tsv = Path(args.output) if args.output else \
+            spec.parent / "pool_harvest.tsv"
+        st = PL.harvest(spec, out_tsv, spec.parent, cp=args.cp,
+                        cp_file=args.cp_file, java=args.java,
+                        timeout=args.timeout)
+        if st["timed_out"]:
+            print(f"WARNING   : driver killed at {args.timeout}s timeout "
+                  f"(partial output kept; rerun with --timeout N)")
+        print(f"harvest   : {st['ok']} ok, {st['err']} err -> {out_tsv}")
+        if st["buckets"]:
+            print("fail triage: " + " ".join(
+                f"{b.key}={len(b.entries)}" for b in st["buckets"])
+                + (f" -> {st['triage'].name}" if st["triage"] else ""))
+        return 0 if st["ok"] else 1
+    # apply
+    src = Path(args.input)
+    if not src.is_dir():
+        print(f"no such dir: {src}")
+        return 2
+    if not args.harvest:
+        print("apply needs --harvest <pool_harvest.tsv>")
+        return 2
+    hv = Path(args.harvest)
+    if not hv.is_file():
+        print(f"no such file: {hv}")
+        return 2
+    out = Path(args.output) if args.output else src.parent / (src.name + "_pool")
+    st = PL.apply(src, hv, out)
+    print(f"rewrite   : {st['replaced']} call(s) replaced "
+          f"({st['repl_q']} qualified + {st['repl_bare']} bare), "
+          f"{st['missed']} missed, {st['unique_plain']} unique plaintexts")
+    print(f"verify    : residual={st['residual']} (decodable sites left)")
+    if st["buckets"]:
+        print("fail triage: " + " ".join(
+            f"{b.key}={len(b.entries)}" for b in st["buckets"])
+            + (f" -> {st['triage'].name}" if st["triage"] else ""))
+    print(f"rewritten : {out}")
+    return 0 if st["replaced"] else 1
+
+
+def cmd_scorecard(args: argparse.Namespace) -> int:
+    jars = SC.collect_jars(args.input)
+    if not jars:
+        print("no jars found in input(s)")
+        return 2
+    flags = {"analyze": args.analyze, "decompile": args.decompile}
+    rows = []
+    for j in jars:
+        print(f"scoring: {j.name} ...")
+        rows.append(SC.score_jar(j, do_analyze=args.analyze,
+                                 do_decompile=args.decompile,
+                                 engines_dir=Path(args.engines_dir),
+                                 timeout=args.timeout))
+        r = rows[-1]
+        print(f"  classes={r['classes']} obf={r['obfuscation']} "
+              f"strings={r['strings']} susp={r['strings_suspicious']} "
+              f"({r['elapsed_s']}s)")
+    out = Path(args.output) if args.output else Path("scorecard.json")
+    compare = Path(args.compare) if args.compare else None
+    jp, deltas = SC.write_scorecard(rows, out, flags, compare)
+    md = jp.with_suffix(".md")
+    md.write_text(SC.render_markdown(rows, deltas, flags), encoding="utf-8")
+    print(f"scorecard : {jp}")
+    print(f"markdown  : {md}")
+    if deltas:
+        changed = sum(1 for d in deltas if d["status"] in ("changed", "new"))
+        print(f"compare   : {changed}/{len(deltas)} row(s) changed/new "
+              f"vs {compare.name}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jdec",
@@ -431,6 +530,53 @@ def build_parser() -> argparse.ArgumentParser:
                          "form Cls.method(\"site\", \"cipher\", seed)); "
                          "pair with decompile output src/")
     sr.set_defaults(func=cmd_recover)
+
+    sp = sub.add_parser("pool",
+                        help="string-pool (non-indy) decryption via JVM "
+                             "replay: scan call sites -> harvest via "
+                             "reflective driver -> rewrite sources")
+    sp.add_argument("action", choices=["scan", "harvest", "apply"])
+    sp.add_argument("input",
+                    help="scan: decompiled src dir; harvest: pool_spec.tsv; "
+                         "apply: decompiled src dir")
+    sp.add_argument("-o", "--output", default=None,
+                    help="scan: spec path; harvest: harvest.tsv path; "
+                         "apply: rewritten source tree (default <src>_pool)")
+    sp.add_argument("--harvest", default=None,
+                    help="apply: harvest.tsv from the harvest step")
+    sp.add_argument("--cp", default="", help="extra classpath entries for "
+                    "the replay JVM, ';'-separated on Windows (MC jars, "
+                    "lwjgl-api, libs, stubs)")
+    sp.add_argument("--cp-file", dest="cp_file", default=None,
+                    help="file containing classpath entries (one per line "
+                         "or ';'-joined) - use instead of --cp when long")
+    sp.add_argument("--java", default="java", help="java executable to run")
+    sp.add_argument("--timeout", type=int, default=3600,
+                    help="kill the replay JVM after N seconds (default "
+                         "3600); partial output is kept on timeout")
+    sp.set_defaults(func=cmd_pool)
+
+    ssc = sub.add_parser("scorecard",
+                         help="fixed-metric regression baseline over a set "
+                              "of jars (probe+strings, optional "
+                              "analyze/decompile); JSON+markdown out, "
+                              "--compare diffs against a previous run")
+    ssc.add_argument("input", nargs="+",
+                     help="jar paths and/or directories (dirs scanned for "
+                          "*.jar)")
+    ssc.add_argument("-o", "--output", default=None,
+                     help="output JSON path (default ./scorecard.json; "
+                          "a .md twin is written next to it)")
+    ssc.add_argument("--analyze", action="store_true",
+                     help="also run the analyze pass (hooks/notes counts)")
+    ssc.add_argument("--decompile", action="store_true",
+                     help="also decompile (slow; full clean/partial/failed "
+                          "counts)")
+    ssc.add_argument("--compare", default=None,
+                     help="previous scorecard.json - adds a delta section")
+    ssc.add_argument("--timeout", type=int, default=1800,
+                     help="per-jar decompile timeout (decompile mode only)")
+    ssc.set_defaults(func=cmd_scorecard)
     return p
 
 

@@ -891,6 +891,162 @@ def test_manifest_and_resources() -> None:
               str(inv["top_dirs"]))
 
 
+def test_rewrite_escapes() -> None:
+    print("recover: rewritten literals are ASCII-escaped (no raw ctrl bytes)")
+    from jdec.recover import java_unescape, rewrite_sources
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        BS = chr(92)
+        (d / "A.java").write_text(
+            'class A {' + chr(10)
+            + '    String s = Enc.d("n1", "Q2ZnbA==", 42);' + chr(10)
+            + "}" + chr(10), encoding="utf-8")
+        tsv = d / "recovered.tsv"
+        plain = "secret" + chr(1) + chr(0x4e2d)  # ctrl-A + CJK
+        tsv.write_text("OK" + chr(9) + "pkg.C" + chr(9) + "n1" + chr(9)
+                       + "Q2ZnbA==" + chr(9) + "42" + chr(9) + plain
+                       + chr(10), encoding="utf-8")
+        st = rewrite_sources(d, tsv)
+        check("escape site replaced", st["replaced"] == 1, str(st))
+        txt = (d / "A.java").read_text(encoding="utf-8")
+        want = '"secret' + BS + "u0001" + BS + "u4e2d" + '"'
+        check("literal is unicode-escaped", want in txt, repr(txt[-80:]))
+        check("no raw ctrl byte in file", chr(1) not in txt)
+        # round-trip: 反转义回明文
+        inner = want[1:-1]
+        check("escape is reversible", java_unescape(inner) == plain)
+
+
+def test_resource_anomaly() -> None:
+    print("mcmod: resource_anomaly flags identifier-level obfuscation tokens")
+    with tempfile.TemporaryDirectory() as td:
+        jar = Path(td) / "m.jar"
+        toml = (chr(10).join(
+            ['modId="NS5Nc6"', 'version="1.0.0"',
+             'displayName="NS5Nc6 client"', 'authors="someone"'] * 6)
+            + chr(10))
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("META-INF/mods.toml", toml)
+            z.writestr("assets/fake/lang/en_us.json",
+                       '{"item.ns5nc6.sword": "Sword"}')
+        anom = MM.resource_anomaly(jar)
+        toks = [t for t, _n, _f in anom["suspects"]]
+        check("anomaly text files scanned", anom["text_files"] == 2, str(anom))
+        check("replaced token flagged", "NS5Nc6" in toks, str(toks))
+        check("known words not flagged",
+              "version" not in toks and "modId" not in toks
+              and "displayName" not in toks, str(toks))
+        check("flag is repeatable", "NS5Nc6" in [
+            t for t, _n, _f in MM.resource_anomaly(jar)["suspects"]])
+
+
+def test_scorecard_smoke() -> None:
+    print("scorecard: fixed-metric row + JSON out + delta vs previous")
+    from jdec import scorecard as SC2
+    row = SC2.score_jar(SAMPLE)
+    check("probe fields present",
+          row["classes"] > 0 and "obfuscation" in row and "jar" in row,
+          str(row)[:200])
+    check("strings counted", row["strings"] >= 0
+          and row["strings_suspicious"] >= 0, str(row)[:200])
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "sc.json"
+        jp, _ = SC2.write_scorecard([row], out,
+                                    {"analyze": False, "decompile": False})
+        payload = json.loads(jp.read_text(encoding="utf-8"))
+        check("scorecard json written", jp.exists()
+              and payload["rows"][0]["jar"] == row["jar"])
+        # 伪造上一版：strings 变了 -> delta 应捕捉
+        old = json.loads(json.dumps(payload))
+        old["rows"][0]["strings"] = payload["rows"][0]["strings"] - 5
+        deltas = SC2.compare_rows(old["rows"], payload["rows"])
+        check("delta catches change",
+              deltas and deltas[0]["status"] == "changed"
+              and "strings" in deltas[0]["diffs"], str(deltas))
+        md = SC2.render_markdown(payload["rows"], deltas,
+                                 {"analyze": False, "decompile": False})
+        check("md has delta section", "vs previous" in md and "strings" in md)
+
+
+def test_pool_roundtrip() -> None:
+    print("pool: scan -> harvest (real JVM replay) -> apply, end to end")
+    import base64
+    import shutil as _sh
+    if not (_sh.which("javac") and _sh.which("java")):
+        print("skipping: javac/java not on PATH")
+        return
+    from jdec import pool as PL  # noqa: F401 - 触发模块加载即模板校验
+    from jdec.cli import main as cli_main
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        src = d / "src"
+        (src / "pkg").mkdir(parents=True)
+        BS = chr(92)
+        LF = chr(10)
+        # 访问器返回值含控制字符与 CJK -> 验证 \u 转义落盘
+        (src / "pkg" / "Sample.java").write_text(
+            "package pkg;" + LF
+            + "public class Sample {" + LF
+            + "    static String a(int idx, int seed) {" + LF
+            + '        return "V" + idx + ":" + seed + "' + BS + "u0007"
+            + BS + 'u4e2d";' + LF
+            + "    }" + LF
+            + "    String own() { return a(33, 44); }" + LF
+            + "}" + LF, encoding="utf-8")
+        (src / "pkg" / "User.java").write_text(
+            "package pkg;" + LF
+            + "public class User {" + LF
+            + "    String tag() { return Sample.a(11, 22); }" + LF
+            + "}" + LF, encoding="utf-8")
+        # 1. scan
+        spec = d / "pool_spec.tsv"
+        rc = cli_main(["pool", "scan", str(src), "-o", str(spec)])
+        check("pool scan rc", rc == 0)
+        lines = spec.read_text(encoding="utf-8").splitlines()
+        keys = {tuple(l.split(chr(9))[i] for i in (1, 3, 4)) for l in lines}
+        check("pool scan found both sites",
+              ("pkg.Sample", "11", "22") in keys
+              and ("pkg.Sample", "33", "44") in keys, str(lines))
+        # 2. 编译合成源作为 replay classpath，真 JVM 收割
+        cls_dir = d / "classes"
+        cls_dir.mkdir()
+        r = subprocess.run(["javac", "-d", str(cls_dir),
+                            str(src / "pkg" / "Sample.java"),
+                            str(src / "pkg" / "User.java")],
+                           capture_output=True, text=True)
+        check("fixture javac", r.returncode == 0, r.stderr[-300:])
+        hv = d / "pool_work" / "pool_harvest.tsv"
+        rc = cli_main(["pool", "harvest", str(spec), "-o", str(hv),
+                       "--cp", str(cls_dir)])
+        rows = ([l.split(chr(9)) for l in hv.read_text(encoding="utf-8",
+                                                       errors="replace")
+                 .splitlines()] if hv.exists() else [])
+        plains = {tuple(rr[i] for i in (1, 3, 4)):
+                  base64.b64decode(rr[5]).decode("utf-8")
+                  for rr in rows if rr and rr[0] == "R"}
+        check("pool harvest rc", rc == 0, str(plains))
+        check("pool harvest plaintexts",
+              plains.get(("pkg.Sample", "11", "22"))
+              == "V11:22" + chr(7) + chr(0x4e2d), str(plains))
+        # 3. apply（回填 + verify + 失败归因挂接）
+        out = d / "src_pool"
+        rc = cli_main(["pool", "apply", str(src), "--harvest", str(hv),
+                       "-o", str(out)])
+        check("pool apply rc", rc == 0)
+        utxt = (out / "pkg" / "User.java").read_text(encoding="utf-8")
+        stxt = (out / "pkg" / "Sample.java").read_text(encoding="utf-8")
+        lit = "V11:22" + BS + "u0007" + BS + "u4e2d"
+        lit_b = "V33:44" + BS + "u0007" + BS + "u4e2d"
+        check("apply replaced qualified call", ('"' + lit + '"') in utxt,
+              utxt[-160:])
+        check("apply replaced bare call", ('"' + lit_b + '"') in stxt,
+              stxt[-160:])
+        check("apply wrote no raw ctrl bytes",
+              chr(7) not in utxt and chr(7) not in stxt)
+        check("apply left no decodable residual",
+              "Sample.a(11, 22)" not in utxt and "a(33, 44)" not in stxt)
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -973,6 +1129,10 @@ def main() -> int:
     test_rewrite_sources()
     test_recover_triage()
     test_manifest_and_resources()
+    test_rewrite_escapes()
+    test_resource_anomaly()
+    test_scorecard_smoke()
+    test_pool_roundtrip()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")
