@@ -78,7 +78,11 @@ def check(errors):
 
 def scan_smoke(target):
     errors = []
-    classes = deobf_scan.collect_classes(Path(target), 50)
+    collected = deobf_scan.collect_classes(Path(target), 50)
+    if not collected:
+        errors.append("目标无法读取：%s" % target)
+        return errors
+    classes, cov = collected
     if not classes:
         errors.append("目标里没有可解析的 class：%s" % target)
         return errors
