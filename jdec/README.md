@@ -88,6 +88,23 @@ out/
                （冲突类的 rel 经百分号编码，不等于类名，外部工具从这里反查）
 ```
 
+深挖三条命令（字符串/native 保护撞墙时用）：
+
+```bash
+python jdec.py indy client.jar                 # indy 站点普查：4 万级站点、
+                                               # 每个站点的 bootstrap 与参数表达式
+python jdec.py natives client.jar -o nat/      # 提取 native 库 + PE 导出表 +
+                                               # 声明匹配 + 给 Ghidra 的任务清单
+python jdec.py recover client.jar -o rec/     --cp-file classpath.txt                    # 自洽重放：跑目标自己的解密
+                                               # 机器收明文（classpath 见下）
+```
+
+`recover` 的 classpath 要能把目标类真正加载起来：remap 到与目标编译期
+同命名空间的 MC + 依赖库 + 缺失类的 stub，`-Xverify:none` 必开。
+方法论与覆盖边界见 skill `references/string-encryption.md` 的
+「自洽重放」节——**解密器有跨类全局状态，静态重放求 key 必错，
+必须单 JVM 内初始化→读真值→现场求 key**。
+
 ## 分析：它改了游戏哪里
 
 反编译回答「代码长什么样」，分析回答「它想干什么」——后者往往更值钱，  
@@ -278,6 +295,19 @@ recover them:
 
 `decompile` 的报告也会单列 native 方法数，不计入还原失败。剩下的路是把 jar 里的  
 `.dll` / `.so`  dump 出来当原生代码分析——Java 侧只能给你签名和调用关系。
+
+撞上 native 墙后的三条路（按成本排序）：
+
+1. **静态侧榨干**：`recover` 把字节码层能解的字符串/常量全收掉（native
+   门控的除外）；`natives` 产出给 Ghidra 分析师的任务清单。成本最低。
+2. **真机运行时捕获**：真跑游戏 + agent 挂钩收出口明文，覆盖最全
+   （native 填的表、运行期解的密都能拿到）；前提是目标能激活、
+   授权校验必须真过，且捕获工具链要适配当前加载器/版本。
+3. **native 反汇编**：Ghidra/IDA 分析 DLL 本体——虚拟化保护下是按周
+   计的手工活，只在确需 native 内部算法时上。
+
+实测参照（EdNaven 3.4 / sayori_auth_native.dll）：0 导出 = 动态注册，
+从 `JNI_OnLoad` 找 `RegisterNatives` 恢复 方法↔函数 映射。
 
 ## 实测
 
