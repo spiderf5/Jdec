@@ -149,6 +149,22 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
         if m:
             prof.mc_version = m.group(1)
 
+    # a mod jar doesn't shade the loader, so the name-marker pass above
+    # misses it; fabric.mod.json is the reliable signal for both the loader
+    # and the game version the mod declares
+    if "fabric.mod.json" in names:
+        try:
+            fmj = json.loads(zf.read("fabric.mod.json"))
+        except Exception:
+            fmj = None
+        if fmj:
+            if not prof.mc_flavor:
+                prof.mc_flavor = "Fabric"
+            if not prof.mc_version:
+                dep = str((fmj.get("depends") or {}).get("minecraft") or "")
+                if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", dep):
+                    prof.mc_version = dep
+
     for marker, obf in _KNOWN_OBFUSCATORS.items():
         if marker in joined and obf:
             prof.obfuscator = obf

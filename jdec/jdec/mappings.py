@@ -449,6 +449,34 @@ def _latest_matching(meta_xml: str, prefix: str) -> str | None:
     return sorted(hits, key=key)[-1]
 
 
+def compose_yarn(inter: Mapping, yarn: Mapping, source: str) -> Mapping:
+    """Compose obf -> intermediary -> named, keeping every namespace findable.
+
+    Fabric mods ship in the intermediary namespace, so their mixin
+    annotations reference `net.minecraft.class_310` / `method_1234` — names
+    present in neither the official-name keys of the composed map nor any
+    Mojang mapping; the same translations are therefore indexed a second
+    time under the intermediary names. The Yarn member name is looked up
+    under the *intermediary* owner: passing the official owner here would
+    silently degrade every member value to its intermediary name.
+    """
+    i2n = yarn.classes
+    out = Mapping(source=source)
+    for obf, mid in inter.classes.items():
+        out.add_class(obf, i2n.get(mid, mid))
+    for owner, members in inter.members.items():
+        mid_owner = inter.classes.get(owner, owner)
+        for (name, desc), mid in members.items():
+            if desc is None:
+                continue
+            final = yarn.lookup_member(mid_owner, mid, desc) or mid
+            out.add_member(owner, name, desc, final)
+            out.add_member(mid_owner, mid, desc, final)
+    for obf, mid in inter.classes.items():
+        out.add_class(mid, i2n.get(mid, mid))
+    return out
+
+
 def fetch_yarn_mappings(version: str, cache: Path) -> Mapping:
     """Fabric intermediary (obf -> class_NNNN) overlaid with Yarn names."""
     cache.mkdir(parents=True, exist_ok=True)
@@ -481,19 +509,7 @@ def fetch_yarn_mappings(version: str, cache: Path) -> Mapping:
     yarn = parse_tiny(ytiny, source=f"yarn/{yarn_ver}",
                       from_ns="intermediary", to_ns="named")
 
-    # compose: obf -> intermediary -> named
-    i2n = yarn.classes
-    out = Mapping(source=f"yarn/{yarn_ver} via {inter.source}")
-    for obf, mid in inter.classes.items():
-        out.add_class(obf, i2n.get(mid, mid))
-    for owner, members in inter.members.items():
-        new_owner = out.classes.get(owner, owner)
-        for (name, desc), mid in members.items():
-            if desc is None:
-                continue
-            final = yarn.lookup_member(i2n.get(owner, owner), mid, desc) or mid
-            out.add_member(owner, name, desc, final)
-    return out
+    return compose_yarn(inter, yarn, f"yarn/{yarn_ver} via {inter.source}")
 
 
 def _mcp_config_version(version: str) -> str:

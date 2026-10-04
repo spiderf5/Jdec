@@ -107,7 +107,7 @@ def cmd_decompile(args: argparse.Namespace) -> int:
                     try:
                         print(f"[0/5] fetching {args.mapping_set} mappings for {version} ...")
                         cache = out_dir.parent / ".jdec_mappings"
-                        mapping = MP.auto_fetch(version, args.mapping_set, cache)
+                        mapping = MP.auto_fetch(version, _mapping_set_for(args.mapping_set, prof), cache)
                     except Exception as exc:  # noqa: BLE001
                         print(f"[0/5] ! mapping fetch failed: {exc}")
                         print("      continuing without deobfuscation "
@@ -147,6 +147,15 @@ def cmd_decompile(args: argparse.Namespace) -> int:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _mapping_set_for(kind: str, prof) -> str:
+    """Fabric/Quilt jars reference the game by Yarn intermediary names
+    (class_310 / method_1234), which no Mojang mapping knows — auto must
+    pick yarn there. Every other loader keeps auto's version-based pick."""
+    if kind == "auto" and getattr(prof, "mc_flavor", None) in ("Fabric", "Quilt"):
+        return "yarn"
+    return kind
+
+
 def _load_mapping(args, prof, out_dir: Path):
     """Mapping for translating hook targets. Returns (mapping, description)."""
     if args.mappings:
@@ -158,7 +167,7 @@ def _load_mapping(args, prof, out_dir: Path):
     cache = Path(args.output).parent / ".jdec_mappings" if args.output else \
         out_dir.parent / ".jdec_mappings"
     try:
-        m = MP.auto_fetch(version, args.mapping_set, cache)
+        m = MP.auto_fetch(version, _mapping_set_for(args.mapping_set, prof), cache)
         return m, m.describe()
     except Exception as exc:  # noqa: BLE001
         print(f"! mapping fetch failed: {exc}")

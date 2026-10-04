@@ -27,6 +27,8 @@ sys.path.insert(0, str(ROOT))
 
 import struct                         # noqa: E402
 
+from types import SimpleNamespace      # noqa: E402
+
 import build_fixtures                 # noqa: E402
 from build_fixtures import ensure_collide_jar  # noqa: E402
 from jdec import analyze as AZ        # noqa: E402
@@ -34,6 +36,7 @@ from jdec import annotations as AN    # noqa: E402
 from jdec import bytecode as BC       # noqa: E402
 from jdec import classfile as CF      # noqa: E402
 from jdec import indy as INDY        # noqa: E402
+from jdec import cli as CL           # noqa: E402
 from jdec import mappings as MP       # noqa: E402
 from jdec import mcmod as MM          # noqa: E402
 from jdec import obf as OB            # noqa: E402
@@ -722,6 +725,55 @@ def test_mojang_mapping_direction() -> None:
           f"{len(m.classes)} classes")
 
 
+def test_yarn_compose() -> None:
+    """The compose must resolve from every namespace a Fabric jar names:
+    mixin annotations carry intermediary names, vanilla remap uses official
+    ones, and both must land on the Yarn name."""
+    print("mappings: yarn compose keeps official and intermediary findable")
+    inter = MP.parse_tiny("\n".join([
+        "tiny\t2\t0\tofficial\tintermediary",
+        "c\tabc\tnet/minecraft/class_310",
+        "\tm\t(I)V\ta\tmethod_1481",
+    ]), source="inter-test", from_ns="official", to_ns="intermediary")
+    yarn = MP.parse_tiny("\n".join([
+        "tiny\t2\t0\tintermediary\tnamed",
+        "c\tnet/minecraft/class_310\tnet/minecraft/client/MinecraftClient",
+        "\tm\t(I)V\tmethod_1481\trun",
+    ]), source="yarn-test", from_ns="intermediary", to_ns="named")
+    m = MP.compose_yarn(inter, yarn, "compose-test")
+    check("official class reaches the yarn name",
+          m.classes.get("abc") == "net/minecraft/client/MinecraftClient",
+          repr(m.classes.get("abc")))
+    check("official member reaches the yarn name (owner namespace bug)",
+          m.lookup_member("abc", "a", "(I)V") == "run",
+          repr(m.lookup_member("abc", "a", "(I)V")))
+    check("intermediary class is a lookup key (mixin annotations use it)",
+          m.lookup_class("net/minecraft/class_310")
+          == "net/minecraft/client/MinecraftClient",
+          repr(m.lookup_class("net/minecraft/class_310")))
+    check("intermediary member resolves with and without descriptor",
+          m.lookup_member("net/minecraft/class_310", "method_1481", "(I)V")
+          == "run"
+          and m.lookup_member("net/minecraft/class_310", "method_1481", None)
+          == "run",
+          repr(m.lookup_member("net/minecraft/class_310", "method_1481", None)))
+
+
+def test_auto_mapping_set_flavor() -> None:
+    print("cli: auto picks yarn for Fabric/Quilt, version pick otherwise")
+    p = SimpleNamespace(mc_flavor="Fabric")
+    check("fabric jar gets yarn", CL._mapping_set_for("auto", p) == "yarn",
+          CL._mapping_set_for("auto", p))
+    p.mc_flavor = "Quilt"
+    check("quilt jar gets yarn too", CL._mapping_set_for("auto", p) == "yarn")
+    p.mc_flavor = "Forge"
+    check("forge jar keeps auto (mojang first)", CL._mapping_set_for("auto", p) == "auto")
+    check("explicit set is never overridden",
+          CL._mapping_set_for("mojang", p) == "mojang")
+    check("flavor-less profile keeps auto",
+          CL._mapping_set_for("auto", SimpleNamespace()) == "auto")
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -798,6 +850,8 @@ def main() -> int:
     test_case_colliding_class_names()
     test_iso_buckets()
     test_weak_engine_is_rescued()
+    test_yarn_compose()
+    test_auto_mapping_set_flavor()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")
