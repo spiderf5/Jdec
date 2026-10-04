@@ -33,8 +33,8 @@ directory），不是当前工作区的。
 4. **结论必须有证据**（真实命令输出）。"跑通不等于完成"：判定类逻辑改完必须用
    **真实样本回归**——fixture 会骗人，javac 会把你想造的特征优化掉（if 链折叠成
    switch，造不出 goto 洪水）。
-5. **最小 diff**。修 jdec 本身不顺手重构；还原命名按**行为**命名，拿不准的
-   保留原名加注释，批量重命名交给 AutoRenamer。
+5. **最小 diff**。修 jdec 本身不顺手重构；还原命名必须有证据（注解明文、
+   行为对应），拿不准的保留原名加注释，不造没有依据的名字。
 6. **交付标准**：可重新编译 + 行为与原始一致。**读得懂不等于还原正确**。
 7. **敏感信息只定性不外传**：分析中发现的 URL、凭据、机器码，报告里说明
    存在与用途即可，不原样扩散。
@@ -100,7 +100,8 @@ python jdec.py decompile X.jar -o out --verify-all
 | 控制流混淆（goto 洪水、不可归约循环）指标怎么读 | `references/control-flow.md` |
 | 字符串加密：静态还原三层不划算时改走运行时出口 | `references/string-encryption.md` |
 | 毒类（静默退出 / native 崩）、agent 桩化、运行时 dump | `references/dynamic-analysis.md` |
-| indy 编码调用图（superblaubeere27 / JObf 系） | `jdec/README.md` 对应节 |
+| indy 编码调用图 / 字符串解密 | `python jdec.py indy X.jar` 普查站点；`references/string-encryption.md` 的自洽重放节 |
+| native 方法体在 DLL 里（native/virtualised） | `python jdec.py natives X.jar -o out`：提取库 + PE 导出表 + 给 Ghidra 分析师的任务清单 |
 
 运行时捕获的核心思路：**让混淆器自己解密，我们只盯着出口**。优先级是
 零环境的纯重放 → 字节码手术 agent → 真实环境倾倒；真环境里授权校验必须

@@ -77,3 +77,49 @@ Recaf 不逐个解密，而是**模拟执行内联**：`Analysis > Deobfuscation
    「much more resistant」。**必须先解开外层混淆（flow、参数改写、hideaccess）再解字符串**
 5. **栈效应等价** —— 解密后删调用必须让 `LDC` 恰好抵消，否则要重建栈帧；
    大量字符串时注意 `-Xmx`、`--add-opens` 与 classpath 完整（缺 rt.jar 会大面积执行失败）
+
+## ZKM 27+ indy 表驱动形态：jdec recover 的自洽重放（EdNaven 实证）
+
+形态：每类内联一份 indy bootstrap `b(Lookup,String,MethodType)` +
+fallback `b(Lookup,MutableCallSite,String,Object[])` + 私有解密器
+`b(int idx, long key)`。站点字节码 = 动态参数 (idx, key)；
+`n2 = idx ^ (int)(key & 0x7FFF) ^ 0x15D2` 定位**每类**密文表 c[]，
+DES/CBC/PKCS5（key = 全 64 位 key，IV 全零）解出 UTF-8。
+MutableCallSite 首次调用后记忆化——**重放必须每站点新建 CallSite**。
+
+### 决定性结论：解密器有跨类全局状态
+
+同一 (seeds, lookupClass) 的长常量解密调用，静态重放的值 ≠ 任何运行时
+值（EdNaven 实测：重放 114073492997383 vs 运行时 54701035319862）。
+**"静态重放求 key → 再解密"的两段式必然全错**。唯一可行的是单 JVM 自洽：
+
+1. `Class.forName(目标类, true, cl)` 让 <clinit> 自己算出真字段值；
+2. 反射读静态 long 字段（本轮真值）；
+3. 按 key 表达式（lit ^ 字段）现场求 key；
+4. 调用目标类**自己的** bootstrap，取 CallSite target 用动态参数.invoke。
+
+jdec 命令：`python jdec.py recover X.jar -o out --cp-file <classpath文件>`
+（辅助：`indy` 子命令普查 indy 站点，`natives` 子命令提取 native 库）。
+
+### 自洽重放的 classpath 工程（Windows 实证）
+
+- MC 客户端：拿启动器实例的 vanilla jar（官方混淆名），用 jdec 自身
+  remap 到目标版本 intermediary（`--mapping-set` 逻辑或 parse_tiny 直用），
+  **必须剥 META-INF 签名**（*.SF/*.RSA）否则 SHA 校验炸。
+- 依赖库：启动器实例 version.json 的 libraries 全量；嵌套 fat-jar 的
+  META-INF/jars/*.jar 是 mod 自带精确版本，一并上 classpath。
+- 缺什么补什么：slf4j-api（MC 1.21.11 的 json 不带但类要）、
+  空 stub（gen 思路：扫 jar 常量池的外部类，emit 空类）垫底。
+- `-Xverify:none` 必开（stub 破坏类型层级，StackMap 校验必炸）。
+- java @argfile 传超长 classpath（Windows 命令行 ~32K 上限）；
+  **@argfile 里反斜杠是转义符**——所有路径统一正斜杠。
+- 库多版本同灶时按"构件名去重保最新"，否则旧 log4j-api 抢先加载。
+
+### 覆盖边界（诚实清单）
+
+- 引导参数里含运行时对象（this/新实例）的站点：驱动侧传 null 占位，
+  bootstrap 忽略该参数则解密成功，真读则失败——成败如实记录。
+- 解密 init 方法的参数来自 native 的（EdNaven dispatcher 6666 条）：
+  静态不可达，须真机 attach。
+- 混淆目标编译期 intermediary 与运行时版本不一致（跨版本 mod 常见）时，
+  classpath 需按"cheat 引用什么名字"准备对应版本的映射产物。
