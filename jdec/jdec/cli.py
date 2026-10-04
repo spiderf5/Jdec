@@ -10,11 +10,14 @@ import zipfile
 from pathlib import Path
 
 from . import analyze as AZ
+from . import bsm as BM
 from . import engines as EN
 from . import mappings as MP
+from . import native_scan as NS
 from . import strings as ST
 from .decompile import decompile, write_report
 from .probe import profile_jar
+from .recover import recover as do_recover
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_ENGINES_DIR = HERE.parent / "engines"
@@ -218,6 +221,81 @@ def cmd_strings(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_natives(args: argparse.Namespace) -> int:
+    raw = Path(args.input)
+    if not raw.exists():
+        print(f"no such file: {raw}")
+        return 2
+    out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_natives")
+    tri = NS.triage(raw, out_dir, collect_decl=not args.no_decl)
+    report = out_dir / "native-triage.md"
+    NS.write_report(tri, raw.name, report)
+    print(f"libs      : {len(tri.libs)} extracted -> {out_dir}")
+    for lib in tri.libs:
+        extra = f"  ({lib.error})" if lib.error else ""
+        print(f"  {lib.name}  {lib.size / 1048576:.1f} MB  {lib.format}"
+              f"  exports={len(lib.exports)} jni={len(lib.jni_exports)}{extra}")
+    print(f"declared  : {len(tri.native_decl)} native methods "
+          f"in {len({c for c, _ in tri.native_decl})} classes (java side)")
+    print(f"static    : {len(tri.matched_static())} JNI exports matched 1:1; "
+          f"the rest need RegisterNatives analysis (see report)")
+    print(f"report    : {report}")
+    return 0
+
+
+def cmd_indy(args: argparse.Namespace) -> int:
+    raw = Path(args.input)
+    if not raw.exists():
+        print(f"no such file: {raw}")
+        return 2
+    result = BM.scan_jar(raw, limit=args.sample)
+    st = result["stats"]
+    print(f"classes            : {st['classes']}")
+    print(f"with BootstrapMethods: {st['classes_with_bsm']} "
+          f"({st['bsm_total']} bootstrap entries)")
+    print(f"with indy sites    : {st['classes_with_sites']}")
+    print(f"indy sites         : {st['sites']}")
+    if result["per_owner"]:
+        print("bootstrap owners (top):")
+        for owner, n in sorted(result["per_owner"].items(),
+                               key=lambda kv: -kv[1])[:8]:
+            print(f"  {n:6d}  {owner}")
+    if result["per_name"]:
+        names = ", ".join(f"{k!r}x{n}" for k, n in
+                          sorted(result["per_name"].items(),
+                                 key=lambda kv: -kv[1])[:14])
+        print(f"site names: {names}")
+    if args.output:
+        out = Path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        payload = {"stats": st,
+                   "per_owner": result["per_owner"],
+                   "per_name": result["per_name"],
+                   "sample": [{"cls": c, "sites": [
+                       {"method": s.method, "name": s.name, "desc": s.desc,
+                        "bsm": ({"owner": s.bsm.owner, "name": s.bsm.name,
+                                 "kind": s.bsm.kind}
+                                if s.bsm else None),
+                        "dynargs": repr(s.dynargs)} for s in sites]}
+                       for c, sites in result["sample"]]}
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        print(f"details  : {out}")
+    return 0
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    raw = Path(args.input)
+    if not raw.exists():
+        print(f"no such file: {raw}")
+        return 2
+    out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_recovered")
+    return do_recover(raw, out_dir, cp=args.cp, java=args.java,
+                      limit=args.limit, stop_on_error=args.stop_on_error,
+                      cp_file=args.cp_file)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jdec",
@@ -292,6 +370,43 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--no-invert", action="store_true",
                     help="mapping file is already obf -> named (do not invert proguard)")
     sd.set_defaults(func=cmd_decompile)
+
+    snv = sub.add_parser("natives",
+                         help="extract shipped native libs and read their PE "
+                              "export tables (triage for Ghidra/IDA)")
+    snv.add_argument("input")
+    snv.add_argument("-o", "--output", default=None,
+                     help="output dir for extracted libs + report")
+    snv.add_argument("--no-decl", action="store_true",
+                     help="skip scanning java-side native declarations")
+    snv.set_defaults(func=cmd_natives)
+
+    si = sub.add_parser("indy",
+                        help="enumerate invokedynamic sites and BootstrapMethods")
+    si.add_argument("input")
+    si.add_argument("-o", "--output", default=None,
+                    help="write detailed JSON (stats + sampled sites)")
+    si.add_argument("--sample", type=int, default=40,
+                    help="how many classes of site detail to include")
+    si.set_defaults(func=cmd_indy)
+
+    sr = sub.add_parser("recover",
+                        help="self-consistent replay: decrypt indy-encrypted "
+                             "strings/constants by running the target's own "
+                             "bootstrap machinery (needs a runnable classpath)")
+    sr.add_argument("input")
+    sr.add_argument("-o", "--output", default=None, help="output dir")
+    sr.add_argument("--cp", default="", help="extra classpath entries for the "
+                   "replay JVM, ';'-separated on Windows (MC jars, libs, stubs)")
+    sr.add_argument("--cp-file", dest="cp_file", default=None,
+                    help="file containing classpath entries (one per line or "
+                         "';'-joined) - use instead of --cp when long")
+    sr.add_argument("--java", default="java", help="java executable to run")
+    sr.add_argument("--limit", type=int, default=0,
+                    help="only recover the first N classes with sites")
+    sr.add_argument("--stop-on-error", action="store_true",
+                    help="abort the replay JVM on first failure (debug)")
+    sr.set_defaults(func=cmd_recover)
     return p
 
 

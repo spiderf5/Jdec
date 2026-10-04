@@ -364,3 +364,77 @@ A/B 中被删内容的理由与去向：变更报告纪律与证据先行进铁�
 
 `git revert` 本次提交恢复目录与文件；junction 用两条命令重建：
 `rmdir` 旧联接 + `mklink /J` 指回原目录名。用户级拷贝重新 cp 一份即可。
+
+
+---
+
+# 变更报告 5（2026-10-04/05）：Fabric 映射修复 + native/indy/recover 三命令 + deobf_scan 补强
+
+## 任务目标
+
+EdNaven 3.4（Fabric 1.21.11 付费外挂，ZKM+JNIC 双层）实战踩出的缺口补齐：
+Fabric hook 全 0 解析、native 只报数不给出路、BootstrapMethods 无通用解析、
+自洽重放（字符串解密）从一次性脚本收编为正式能力；外加 deobf_scan 两处
+结构性盲区。
+
+## 提交清单
+
+| 提交 | 内容 |
+|---|---|
+| `dbf252d` | skill 触发描述 v2（英文锚词 / Forge-Fabric / jdec 绝对路径与 cwd 约定） |
+| `c0fe4b1` | jdec：yarn 组合修成员 owner 命名空间 + 官方/中介名双索引；auto 映射按 loader 选 yarn；probe 读 fabric.mod.json 补 flavor/版本 |
+| `88692ba` | 指纹库 +JNIC（EdNaven 实证） |
+| 本轮 | `fix(scan)` deobf_scan：--max-classes 静默截断改显式警告（coverage 元数据）；META-INF/jars/ 嵌套 jar 并入扫描；`feat(natives)` 新子命令：提取 native 库 + PE 导出表解析 + JNI 符号/Java 声明匹配 + Ghidra 任务清单；`feat(bsm)` BootstrapMethods 解析 + invokedynamic 站点枚举（动态参数表达式树，建模局部变量 store/load/dup）+ `indy` 子命令；`feat(recover)` 自洽重放子命令：规格生成 → 生成/编译 RecoverDriver → 单 JVM 内读真字段值现场求 key → 调目标类自己的 bootstrap 收割明文 |
+
+## 每处改动的理由
+
+- **截断显式上报**：599/711 对账实证——--max-classes 默认 500，EdNaven 525 类
+  静默丢 112 个 native。统计数字被当全量事实用时必须声明覆盖范围。
+- **auto 按 loader 选映射**：Fabric mod 注解是 Yarn 中介名，mojang 映射
+  永远 0 解析（hook 0/167 根因之一）。
+- **yarn 组合双索引**：成员 yarn 名查询原拿 official owner 查中介 keyed
+  映射，永远 miss（组合循环死变量为证）；Fabric mod 的 hook 翻译必须
+  用中介名查。
+- **recover 自洽重放**：解密器有跨类全局状态——静态重放值 ≠ 运行时值
+  （实测差一倍），两段式必败；单 JVM 内"初始化→反射读真值→现场求
+  key→调类自己的 bootstrap"是唯一自洽路径（221 条实证解密）。
+- **natives**：jdec 字节码侧到"711 方法在 DLL"为止；提取 + PE 导出表 +
+  声明匹配把"接下来做什么"变成可执行清单（EdNaven：sayori 0 导出 =
+  动态注册 → 从 JNI_OnLoad 找 RegisterNatives）。
+
+## 执行的命令与结果
+
+- `python tests/run_tests.py` → **116 passed, 0 failed**（107 基线 + 新增 9）
+- EdNaven 真实样本回归：hook 解析 0/167 → **158/167**（yarn/1.21.11+build.6）；
+  `--deobf` 后 103 文件全 yarn 名、class_310 残留 0
+- deobf_scan 全量（--max-classes 20000）：1488 类（含 9 嵌套 jar）、
+  native 6150（主 jar 711 与 analyze 对账一致）；截断警告在 500 上限时正确出现
+- `natives`：4 库提取，sayori_auth_native.dll 0 导出 = 动态注册，报告给出
+  JNI_OnLoad→RegisterNatives 路线
+- `indy`：43851 站点 / 447 类 / 1858 BSM；38215 站点路由 dispatcher、
+  1038 LambdaMetafactory（vanilla，已过滤）
+- `recover`：端到端跑通（规格→编译→执行→收集）；真实明文验证见
+  D:/MC/samples/ednaven-analysis/readable/src（221 条字符串内联交付来自
+  同机制的 decap 原型）
+
+## 修复轮次
+
+yarn 组合 owner 命名空间 bug（成员值退化成中介名）→ 1 轮；
+recover 驱动 6 轮（Method.invokeWithArguments 不存在 → bootstrap/dynamic
+参数混传 → "null" 令牌 → l2i 压栈 → 变量遮蔽 → 静态参数装箱）。
+
+## 遗留风险
+
+1. recover 对 (Object,long,long) 系引导形态（hideAccess 分发）仍按
+   右对齐 + null 占位猜测调用——部分站点 FAIL；各形态调用约定需逐个
+   对着 fallback 源码确认（诚实清单见 references/string-encryption.md）。
+2. 重映射 MC 的接口桥方法偶发缺失（30/385 AbstractMethodError）——
+   remap 对 bridge/synthetic 的处理待查。
+3. deobf_scan 嵌套 jar 计入总数后，--max-classes 500 的默认值对 fat-jar
+   更容易截断（已有警告，无静默错误）。
+
+## 回滚方式
+
+`git revert <对应提交>`；deobf_scan 行为变化集中在 collect_classes/返回
+值结构（调用方仅 main），revert 即回旧行为；新子命令为纯新增，无兼容
+影响。junction/双写拷贝已同步。
