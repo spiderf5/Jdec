@@ -11,6 +11,7 @@
 """
 
 import argparse
+import io
 import json
 import re
 import struct
@@ -396,28 +397,61 @@ def jar_anomalies(target):
 
 
 def collect_classes(target, max_classes):
-    """返回 {类名: 字节}；目标不可读时返回 None。"""
+    """返回 ({类名: 字节}, coverage)；coverage 记录总量/截断/嵌套 jar。
+
+    统计数字会被当成全量事实使用——静默截断曾让 native 方法数少报 112 个
+    （EdNaven：525 类、上限 500，末尾 25 类里的 native 全部失踪）。
+    截断必须显式上报，让读者知道数字是部分数据。
+    """
     path = Path(target)
     out = {}
+    cov = {"total_seen": 0, "truncated": False, "nested_jars": []}
+
+    def _seen_and_full():
+        cov["total_seen"] += 1
+        return len(out) >= max_classes
+
     try:
         if path.is_dir():
             for f in sorted(path.rglob("*.class")):
+                if _seen_and_full():
+                    cov["truncated"] = True
+                    continue
                 out[str(f.relative_to(path)).replace("\\", "/")] = f.read_bytes()
-                if len(out) >= max_classes:
-                    break
-            return out
+            return out, cov
         if path.is_file():
             if path.suffix.lower() == ".class":
                 out[path.name] = path.read_bytes()
-                return out
+                cov["total_seen"] = 1
+                return out, cov
             if path.suffix.lower() in (".jar", ".zip"):
                 with zipfile.ZipFile(path) as zf:
                     for item in zf.infolist():
-                        if item.filename.lower().endswith(".class"):
-                            out[item.filename] = zf.read(item)
-                            if len(out) >= max_classes:
-                                break
-                return out
+                        if not item.filename.lower().endswith(".class"):
+                            continue
+                        if _seen_and_full():
+                            cov["truncated"] = True
+                            continue
+                        out[item.filename] = zf.read(item)
+                    # fat-jar 打包（Fabric/Forge 的 META-INF/jars/）里的类
+                    # 与主 jar 同属一个运行体，不扫是结构性盲区
+                    for item in zf.infolist():
+                        nm = item.filename.lower()
+                        if not (nm.startswith("meta-inf/jars/") and nm.endswith(".jar")):
+                            continue
+                        try:
+                            with zipfile.ZipFile(io.BytesIO(zf.read(item))) as nz:
+                                cov["nested_jars"].append(item.filename)
+                                for ni in nz.infolist():
+                                    if not ni.filename.lower().endswith(".class"):
+                                        continue
+                                    if _seen_and_full():
+                                        cov["truncated"] = True
+                                        break
+                                    out[item.filename + "!/" + ni.filename] = nz.read(ni)
+                        except (OSError, KeyError, zipfile.BadZipFile):
+                            continue
+                return out, cov
     except (OSError, zipfile.BadZipFile):
         return None
     return None
@@ -679,6 +713,14 @@ def to_text(info):
     lines = ["目标: %s" % info["target"],
              "扫描 class: %d 个（解析成功 %d 个）" % (info["class_count_scanned"], info["class_count_parsed"]),
              "编译目标: Java %s" % info["java_target"]]
+    cov = info.get("coverage") or {}
+    if cov.get("nested_jars"):
+        lines.append("嵌套 jar: %d 个（META-INF/jars/）已并入扫描" % len(cov["nested_jars"]))
+    if cov.get("truncated"):
+        lines.append("  ! 已截断：达到 --max-classes 上限，目标共 %d 个 class，"
+                     "上面的统计只覆盖了前 %d 个——数字是部分数据，"
+                     "加 --max-classes N 提升上限后重跑"
+                     % (cov["total_seen"], info["class_count_scanned"]))
     n = info["naming"]
     lines.append("命名特征: 类名可疑比例 %.1f%% / 成员名可疑比例 %.1f%% / 类名平均长度 %s"
                  % (n["suspicious_class_ratio"] * 100, n["suspicious_member_ratio"] * 100,
@@ -751,7 +793,7 @@ def main():
         sys.stderr.write("错误：目标不存在 -> %s\n" % target)
         return 2
 
-    classes = collect_classes(target, args.max_classes)
+    classes, cov = collect_classes(target, args.max_classes)
     if classes is None:
         sys.stderr.write("错误：无法读取目标（不是 jar/zip/class，或文件损坏） -> %s\n" % target)
         return 2
@@ -760,6 +802,7 @@ def main():
         return 2
 
     info = analyze(str(target), classes)
+    info["coverage"] = cov
     print(to_text(info) if args.text else json.dumps(info, ensure_ascii=False, indent=2))
     return 0
 
