@@ -101,6 +101,7 @@ python jdec.py decompile X.jar -o out --verify-all
 | 字符串加密：静态还原三层不划算时改走运行时出口 | `references/string-encryption.md` |
 | 毒类（静默退出 / native 崩）、agent 桩化、运行时 dump | `references/dynamic-analysis.md` |
 | indy 编码调用图 / 字符串解密 | `python jdec.py indy X.jar` 普查站点；`references/string-encryption.md` 的自洽重放节 |
+| 字符串解密**回填源码**（零残留可读源码） | `python jdec.py recover X.jar --output out/recover --rewrite-src out/src --timeout 7200`；用法与两大坑见 `references/string-encryption.md` 回填节 |
 | native 方法体在 DLL 里（native/virtualised） | `python jdec.py natives X.jar -o out`：提取库 + PE 导出表 + 给 Ghidra 分析师的任务清单 |
 
 运行时捕获的核心思路：**让混淆器自己解密，我们只盯着出口**。优先级是
@@ -130,8 +131,8 @@ Caesium 系）、Threadtear；Vineflower 出源码、CFR 交叉验证可疑段�
 
 ## 修 jdec 本身
 
-- 唯一校验命令：`python tests/run_tests.py`（2026-10-03 基线 107 项；
-  `--with-mc` 123 项，真实样本外置于 `D:/MC/samples/`，缺失自动跳过）。
+- 唯一校验命令：`python tests/run_tests.py`（2026-10-04 基线 123 项；
+  `--with-mc` 更全，真实样本外置于 `D:/MC/samples/`，缺失自动跳过）。
 - 自动探测工具识别不出这个项目（无标准标记文件），校验直接用上面的命令。
 - 修 bug 三步：先复现（失败测试或命令）→ 最小修复 → **真实样本回归**。
   位置配对类并发 bug fixture 抓不住（单类桶完成顺序碰巧一致）。

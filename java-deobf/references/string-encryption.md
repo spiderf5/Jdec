@@ -123,3 +123,70 @@ jdec 命令：`python jdec.py recover X.jar -o out --cp-file <classpath文件>`
   静态不可达，须真机 attach。
 - 混淆目标编译期 intermediary 与运行时版本不一致（跨版本 mod 常见）时，
   classpath 需按"cheat 引用什么名字"准备对应版本的映射产物。
+
+## 解密器"变体家族"：Python 硬编码不可行，直接上 recover（JadeOffline 实证 2026-10-04）
+
+同一位私有混淆器会给**每个类生成一个专属 BSM**（一行 indy 统计里表现为
+几十个 owner 各 ~140 站点）。这些解密器是同一算法模板的**常数随机化变体**：
+TABLE 相同、雪崩结构相同、但乘数/加数/移位量/索引公式逐类不同
+（实测 A 型 `seed ^ i*73244475` vs B 型 `seed-1640531527-i*5+2` 索引）。
+
+教训链：
+
+1. Python 抄算法离线重放**只覆盖显式分析过的变体**（本例 2080/6516），
+   其余全是 BAD——除非愿意逐类逆向常数，否则别走这条路；
+2. 解密器若是**纯函数**（ConstantCallSite(constant(String))、无全局状态），
+   recover 自洽重放**零 classpath 开箱即用**，对全部变体通吃
+   （6516/6516，0 skip——goto 洪水不一定毁表达式栈，本样本 0 个）；
+3. 判定顺序：先看反编译源码里 BSM 是不是 `ConstantCallSite + constant(String)`
+   纯常量替换、有无静态可变字段——纯函数 → recover 一把梭；
+   有跨类全局状态 → 走上一节的自洽 classpath 工程；
+4. BSM 静态参数 (String cipher, int seed) 挂在 **BsmEntry.args**（bootstrap
+   条目级），站点数 ≈ BSM 条目数（6822 vs 6811），基本 1:1；
+5. 解密产物可能不是普通字符串而是**嵌套容器**（"JVM\x01" 魔数 + 自定义
+   序列化 → loader107 字节码解释器）：按可读性过滤，容器另案处理。
+
+## 回填：recover --rewrite-src 一条龙出零残留源码（2026-10-04 并入）
+
+收了明文只算一半——**最后一公里是把明文写回反编译源码**，否则读源码的人
+满屏 `Xxx.decrypt("Q2ZnbA==", 42)`。现在一条命令完成：
+
+```bash
+python jdec.py decompile X.jar -o out          # 先出干净 src/
+python jdec.py recover X.jar --output out/recover \
+        --rewrite-src out/src --timeout 7200    # 收割 + 回填，一条命令
+```
+
+- 匹配键 = `(cipher, seed)`（BSM 条目静态参数），driver 的 OK 行自带这两列；
+- rewrite 的正则按 CFR/其他引擎产出的 BSM 调用形态
+  `Cls.method("site", "cipher", seed)` 匹配，空白类含 CR/LF（长参数折行）；
+- 残留 = FAIL/SKIP 站点 + 非三参形态，如实报告不硬凑。
+
+### 坑一：BSM 静态参数按"方法签名"做键会被同类条目互相覆盖（大坑）
+
+同一个解密器方法会被**同一使用类的多个站点**引用，而每个站点的
+BootstrapMethods 条目携带**各自的** `(cipher, seed)`。driver 若按
+`bsmKey(方法)` 做键存静态参数，类内条目互相覆盖——全部站点拿到
+**最后一个条目**的参数：
+
+- 解密结果错（产出 `'/'`、`'"'` 这类短垃圾，看着像字符串，极具迷惑性）；
+- OK 行的键与源码字面量错位 → 回填大量 miss（实测 2730/6516）；
+- 识别特征：**唯一键数远小于站点数**（3735 键 vs 6516 站点；健康时
+  键≈站点数）、同一键出现在多个类、单站点类全对而多站点类全错。
+
+修复 = 按 **B 行条目 idx** 做键（S 行本来就带 bsmIdx），换类时清空。
+判案过程见 jade-out 诊断：先用"残留站点 siteName 是否在 OK 行里"定位到
+"站点有 OK 行但键错位"，再抽点比对锁定覆盖模式——比纯读代码猜快得多。
+
+### 坑二：修复覆盖后，运行时长会暴增到 30 分钟以上
+
+覆盖时同类 140 个站点共用一组参数，解密器内部的静态缓存让后面 139 个
+站点秒回；修复后**每站点真解密**，6516 站点实测 ~35 分钟。默认
+`timeout=1800s` 会截杀且当时全部输出作废——现在 `--timeout` 可配，
+超时也会保留部分输出（但请直接给够，比如 7200）。
+
+### 明文正确性终验
+
+用独立实现交叉验证：硬抄算法的 Python 解密器（哪怕只覆盖部分变体）
+按 `(fqcn, seed)` 与 recovered.tsv 对齐比对 plain。纯函数家族两边必须
+完全一致；不一致 = driver 还有键位 bug。
