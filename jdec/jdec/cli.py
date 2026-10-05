@@ -364,8 +364,10 @@ def cmd_pool(args: argparse.Namespace) -> int:
         print(f"scanned   : {st['files']} files, {st['pool_classes']} pool "
               f"classes, {st['accessors']} accessor(s), {st['sig_bad']} "
               f"shape-mismatch candidate(s)")
+        extra = (f", {st['overload_skipped']} overload-mismatch skipped"
+                 if st["overload_skipped"] else "")
         print(f"call sites: {st['sites']} ({st['unique']} unique, in "
-              f"{st['files_with_sites']} files)")
+              f"{st['files_with_sites']} files{extra})")
         if st["ambiguous_simple_names"]:
             print(f"ambiguous : {', '.join(st['ambiguous_simple_names'])} "
                   f"(same simple name in several packages - qualified sites "

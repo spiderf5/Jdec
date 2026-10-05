@@ -1211,6 +1211,46 @@ def test_pool_qualified_and_full_string() -> None:
         check("simple call site replaced", '"world_p2"' in res, res)
 
 
+def test_pool_overload_dispatch() -> None:
+    print("pool: overload dispatch keeps only String-accessor call sites")
+    from jdec import pool as PL
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        src = d / "src"
+        (src / "p").mkdir(parents=True)
+        # 2026-10-05 lf21 实测：一个池类里 String a(int,int)（字符串池）与
+        # int a(int,long)（int 常量池）共存，名字级匹配把 int 池调用点也
+        # 扫进 spec -> driver 传错 idx 报 AIOOBE。按实参字面量类型分派。
+        (src / "p" / "TwoPools.java").write_text(
+            "package p;\n"
+            "public class TwoPools {\n"
+            "    static String a(int idx, int seed) { return null; }\n"
+            "    static int a(int idx, long seed) { return 0; }\n"
+            "    String s1() { return a(11, 22); }\n"
+            "    int s2() { return a(33, 44L); }\n"
+            "    int s3() { return a(55, 66666666666L); }\n"
+            "}\n", encoding="utf-8")
+        (src / "p" / "Caller.java").write_text(
+            "package p;\n"
+            "public class Caller {\n"
+            "    String s4() { return TwoPools.a(7, 8); }\n"
+            "    int s5() { return TwoPools.a(9, 10L); }\n"
+            "}\n", encoding="utf-8")
+        spec = d / "spec.tsv"
+        st = PL.scan_spec(src, spec)
+        lines = spec.read_text(encoding="utf-8").splitlines()
+        keys = {tuple(l.split("\t")[i] for i in (3, 4)) for l in lines}
+        check("keeps (int,int) bare site", ("11", "22") in keys, str(keys))
+        check("keeps (int,int) qualified site", ("7", "8") in keys, str(keys))
+        check("skips (int,long) literal", ("33", "44") not in keys, str(keys))
+        check("skips big long literal", ("55", "66666666666") not in keys,
+              str(keys))
+        check("skips qualified (int,long) site", ("9", "10") not in keys,
+              str(keys))
+        check("overload_skipped counted", st["overload_skipped"] == 3,
+              str(st))
+
+
 def test_probe_fingerprints_json() -> None:
     print("probe: fingerprints.json detects obfuscator from keywords")
     with tempfile.TemporaryDirectory() as td:
@@ -2155,6 +2195,7 @@ def main() -> int:
     test_pool_roundtrip()
     test_web_template_js()
     test_pool_qualified_and_full_string()
+    test_pool_overload_dispatch()
     test_probe_fingerprints_json()
     test_ghidra_integration()
     test_native_elf_and_ghidra_annotate()

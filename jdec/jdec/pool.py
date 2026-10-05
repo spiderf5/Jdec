@@ -76,6 +76,39 @@ def norm_int(s: str) -> int:
     return -v if neg else v
 
 
+def _collect_accessors(parsed):
+    """_ACC_DEF 扫描 → (acc, sig_bad)。
+
+    acc: fq -> name -> [签名列表]，签名 = (参1类型, 参2类型)。
+    scan / apply 回填 / apply verify 三处共用，保证口径一致。
+    """
+    acc: dict[str, dict[str, list]] = {}
+    sig_bad: list[tuple[str, str]] = []
+    for _f, fq, txt in parsed:
+        for m in _ACC_DEF.finditer(txt):
+            kinds = _acc_param_kinds(m.group(2))
+            if kinds:
+                acc.setdefault(fq, {}).setdefault(m.group(1), []).append(kinds)
+            else:
+                sig_bad.append((fq, m.group(1)))
+    return acc, sig_bad
+
+
+def _overload_ok(acc, fq: str, meth: str, lit_idx: str, lit_seed: str) -> str:
+    """调用点重载分派（三态）。
+
+    "ok"       分派到返回 String 的同名访问器（按实参字面量类型）；
+    "overload" 有同名 String 访问器但参数类型不匹配——另一套池
+               （int/long 常量池）的调用点，必须剔除；
+    "none"     该类没有同名 String 访问器（本来就不是池类）。
+    """
+    sigs = acc.get(fq, {}).get(meth)
+    if not sigs:
+        return "none"
+    return "ok" if (_lit_kind(lit_idx), _lit_kind(lit_seed)) in sigs \
+        else "overload"
+
+
 def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8", errors="surrogateescape", newline="")
 
@@ -90,11 +123,39 @@ def _fqcn_of(f: Path, txt: str) -> str:
     return (pkg + "." + f.stem) if pkg else f.stem
 
 
-def _acc_params_ok(params: str) -> bool:
+def _acc_param_kinds(params: str):
+    """访问器参数表 → (类型, 类型)（"int"/"long"）；形状不合返回 None。
+
+    2026-10-05 lf21 实测教训：一个池类里 String a(int,int) 与
+    int a(int,long) 两套池共存（字符串池 + int 常量池），名字级白名单会把
+    int 池的调用点也扫进 spec，driver 按字符串池语义传 idx → AIOOBE
+    （Index 31158 = 772^0x7AB2）。签名级分派是唯一可靠判据。
+    """
     ps = [p.strip() for p in params.split(",") if p.strip()]
     if len(ps) != 2:
-        return False
-    return all(_PARAM_II.fullmatch(p) for p in ps)
+        return None
+    kinds = []
+    for p in ps:
+        if not _PARAM_II.fullmatch(p):
+            return None
+        kinds.append("long" if "long" in p else "int")
+    return tuple(kinds)
+
+
+_INT_MIN, _INT_MAX = -0x80000000, 0x7FFFFFFF
+
+
+def _lit_kind(s: str) -> str:
+    """整数字面量的静态类型：L/l 后缀或超 int 范围 → "long"，否则 "int"。
+
+    Java 重载分派阶段 1 不做 long→int 隐式窄化，所以 a(1, 2L) 恒调
+    a(int, long)——字面量后缀就是分派依据（norm_int 会剥掉 L，必须
+    在剥之前看原文）。"""
+    t = s.strip()
+    if t[-1:] in ("L", "l"):
+        return "long"
+    v = norm_int(s)
+    return "int" if _INT_MIN <= v <= _INT_MAX else "long"
 
 
 # --------------------------------------------------------------------------
@@ -102,24 +163,19 @@ def _acc_params_ok(params: str) -> bool:
 # --------------------------------------------------------------------------
 
 def scan_spec(src_dir: Path, spec_path: Path) -> dict:
-    """扫反编译源 → spec.tsv（S\tfqcn\tmeth\tidx\tseed）。"""
+    """扫反编译源 → spec.tsv（S\tfqcn\tmeth\tidx\tseed）。
+
+    acc 结构：fq -> name -> [签名列表]；签名 = (参1类型, 参2类型)。
+    调用点按实参字面量类型分派同名重载（见 _lit_kind），只有分派到
+    返回 String 的访问器才进 spec——int/long 常量池的重载调用点剔除。
+    """
     files = sorted(src_dir.rglob("*.java"))
-    acc: dict[str, set] = {}
-    acc_sig_bad: list[tuple[str, str]] = []
     parsed = []
     for f in files:
         txt = _read(f)
         fq = _fqcn_of(f, txt)
-        names = set()
-        for m in _ACC_DEF.finditer(txt):
-            name, params = m.group(1), m.group(2)
-            if _acc_params_ok(params):
-                names.add(name)
-            else:
-                acc_sig_bad.append((fq, name))
-        if names:
-            acc[fq] = names
         parsed.append((f, fq, txt))
+    acc, acc_sig_bad = _collect_accessors(parsed)
 
     simple: dict[str, str] = {}
     ambiguous: set[str] = set()
@@ -132,20 +188,33 @@ def scan_spec(src_dir: Path, spec_path: Path) -> dict:
 
     sites: set[tuple] = set()
     files_with_sites: dict[str, int] = defaultdict(int)
+    overload_skipped = 0
+
+    def _accept(fq: str, meth: str, lit_idx: str, lit_seed: str) -> bool:
+        verdict = _overload_ok(acc, fq, meth, lit_idx, lit_seed)
+        if verdict == "overload":
+            nonlocal overload_skipped
+            overload_skipped += 1
+        return verdict == "ok"
+
     for f, own_fq, txt in parsed:
-        own_names = acc.get(own_fq, set())
+        own_sigs = acc.get(own_fq, {})
         for m in _CALL_Q.finditer(txt):
             cls_raw, meth = m.group(1), m.group(2)
             cls = cls_raw.split(".")[-1]
             fq = cls_raw if cls_raw in acc else simple.get(cls)
-            if fq is None or (cls in ambiguous and cls_raw not in acc) or meth not in acc[fq]:
+            if fq is None or (cls in ambiguous and cls_raw not in acc):
+                continue
+            if not _accept(fq, meth, m.group(3), m.group(4)):
                 continue
             sites.add((fq, meth, norm_int(m.group(3)), norm_int(m.group(4))))
             files_with_sites[f.name] += 1
-        if own_names:
+        if own_sigs:
             for m in _CALL_BARE.finditer(txt):
                 meth = m.group(1)
-                if meth not in own_names:
+                if meth not in own_sigs:
+                    continue
+                if not _accept(own_fq, meth, m.group(2), m.group(3)):
                     continue
                 sites.add((own_fq, meth, norm_int(m.group(2)),
                            norm_int(m.group(3))))
@@ -161,6 +230,7 @@ def scan_spec(src_dir: Path, spec_path: Path) -> dict:
         "accessors": sum(len(v) for v in acc.values()),
         "sig_bad": len(acc_sig_bad), "sites": sum(files_with_sites.values()),
         "unique": len(sites), "files_with_sites": len(files_with_sites),
+        "overload_skipped": overload_skipped,
         "ambiguous_simple_names": sorted(ambiguous),
         "spec": spec_path,
     }
@@ -279,17 +349,12 @@ def apply(src_dir: Path, harvest_path: Path, out_dir: Path) -> dict:
         shutil.rmtree(out_dir)
     shutil.copytree(src_dir, out_dir)
 
-    # 回填侧访问器识别与 scan 同口径（窄匹配），保证调用点对得上
+    # 回填侧访问器识别与 scan 同口径（含重载分派），保证调用点对得上
     parsed = []
-    acc: dict[str, set] = {}
     for f in sorted(out_dir.rglob("*.java")):
         txt = _read(f)
-        fq = _fqcn_of(f, txt)
-        names = {m.group(1) for m in _ACC_DEF.finditer(txt)
-                 if _acc_params_ok(m.group(2))}
-        if names:
-            acc[fq] = names
-        parsed.append((f, fq, txt))
+        parsed.append((f, _fqcn_of(f, txt), txt))
+    acc, _sig_bad = _collect_accessors(parsed)
     simple: dict[str, str] = {}
     ambiguous: set[str] = set()
     for fq in acc:
@@ -303,13 +368,15 @@ def apply(src_dir: Path, harvest_path: Path, out_dir: Path) -> dict:
     sample: list[str] = []
     for f, own_fq, txt in parsed:
         orig = txt
-        own_names = acc.get(own_fq, set())
+        own_acc = acc.get(own_fq, {})
 
         def repl_q(m: "re.Match") -> str:
             cls_raw, meth = m.group(1), m.group(2)
             cls = cls_raw.split(".")[-1]
             fq = cls_raw if cls_raw in acc else simple.get(cls)
-            if fq is None or (cls in ambiguous and cls_raw not in acc) or meth not in acc[fq]:
+            if fq is None or (cls in ambiguous and cls_raw not in acc):
+                return m.group(0)
+            if _overload_ok(acc, fq, meth, m.group(3), m.group(4)) != "ok":
                 return m.group(0)
             key = (fq, meth, norm_int(m.group(3)), norm_int(m.group(4)))
             if key in plain:
@@ -324,7 +391,10 @@ def apply(src_dir: Path, harvest_path: Path, out_dir: Path) -> dict:
 
         def repl_b(m: "re.Match") -> str:
             meth = m.group(1)
-            if meth not in own_names:
+            if meth not in own_acc:
+                return m.group(0)
+            if _overload_ok(acc, own_fq, meth,
+                            m.group(2), m.group(3)) != "ok":
                 return m.group(0)
             key = (own_fq, meth, norm_int(m.group(2)), norm_int(m.group(3)))
             if key in plain:
@@ -336,7 +406,7 @@ def apply(src_dir: Path, harvest_path: Path, out_dir: Path) -> dict:
             return m.group(0)
 
         txt = _CALL_Q.sub(repl_q, txt)
-        if own_names:
+        if own_acc:
             txt = _CALL_BARE.sub(repl_b, txt)
         if txt != orig:
             _write(f, txt)
@@ -346,21 +416,26 @@ def apply(src_dir: Path, harvest_path: Path, out_dir: Path) -> dict:
     residual_samples: list[str] = []
     for f, own_fq in [(f, fq) for f, fq, _ in parsed]:
         txt = _read(f)
-        own_names = acc.get(own_fq, set())
+        own_acc = acc.get(own_fq, {})
         for m in _CALL_Q.finditer(txt):
             cls, meth = m.group(1), m.group(2)
             fq = simple.get(cls)
-            if fq is None or cls in ambiguous or meth not in acc[fq]:
+            if fq is None or cls in ambiguous:
+                continue
+            if _overload_ok(acc, fq, meth, m.group(3), m.group(4)) != "ok":
                 continue
             key = (fq, meth, norm_int(m.group(3)), norm_int(m.group(4)))
             if key in plain:
                 residual += 1
                 if len(residual_samples) < 5:
                     residual_samples.append(f.name)
-        if own_names:
+        if own_acc:
             for m in _CALL_BARE.finditer(txt):
                 meth = m.group(1)
-                if meth not in own_names:
+                if meth not in own_acc:
+                    continue
+                if _overload_ok(acc, own_fq, meth,
+                                m.group(2), m.group(3)) != "ok":
                     continue
                 key = (own_fq, meth, norm_int(m.group(2)),
                        norm_int(m.group(3)))
