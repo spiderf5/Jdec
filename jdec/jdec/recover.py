@@ -194,7 +194,7 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
                 continue
             try:
                 cf = BM.CF.parse(zf.read(info))
-            except BM.CF.ClassFormatError:
+            except Exception:
                 continue
             if cf.name in seen:
                 continue

@@ -475,7 +475,10 @@ def export_project(
                 for name in z.namelist():
                     if name.endswith(".class") and not name.startswith("META-INF/"):
                         data = z.read(name)
-                        cf = CF.parse(data)
+                        try:
+                            cf = CF.parse(data)
+                        except Exception:
+                            continue
                         if cf.major == 52: java_ver = "8"
                         elif cf.major == 61: java_ver = "17"
                         elif cf.major >= 65: java_ver = "21"

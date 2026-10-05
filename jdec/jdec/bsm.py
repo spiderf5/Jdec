@@ -128,38 +128,55 @@ def _class_attrs(cf):
     blob = cf.attrs_blob
     if len(blob) < 2:
         return
-    n = struct.unpack_from(">H", blob, 0)[0]
-    o = 2
-    for _ in range(n):
-        ni = struct.unpack_from(">H", blob, o)[0]
-        ln = struct.unpack_from(">I", blob, o + 2)[0]
-        o += 6
-        yield _utf8(cf, ni), blob[o:o + ln]
-        o += ln
+    try:
+        n = struct.unpack_from(">H", blob, 0)[0]
+        o = 2
+        for _ in range(n):
+            if o + 6 > len(blob):
+                return
+            ni = struct.unpack_from(">H", blob, o)[0]
+            ln = struct.unpack_from(">I", blob, o + 2)[0]
+            o += 6
+            if o + ln > len(blob):
+                return
+            yield _utf8(cf, ni), blob[o:o + ln]
+            o += ln
+    except (struct.error, IndexError):
+        return
 
 
 def parse_bsm(cf) -> list[BsmEntry]:
-    for name, data in _class_attrs(cf):
-        if name != "BootstrapMethods":
-            continue
-        cnt = struct.unpack_from(">H", data, 0)[0]
-        o = 2
-        out = []
-        for i in range(cnt):
-            ref = struct.unpack_from(">H", data, o)[0]
-            nargs = struct.unpack_from(">H", data, o + 2)[0]
-            o += 4
-            args = [_const(cf, struct.unpack_from(">H", data, o + k * 2)[0])
-                    for k in range(nargs)]
-            o += nargs * 2
-            mh = cf.cp[ref]
-            kind = mh[1][0] if mh and mh[0] == CF.C_METHOD_HANDLE else 0
-            owner, mname, mdesc = _member(cf, mh[1][1]) if mh and mh[0] == CF.C_METHOD_HANDLE \
-                else (None, None, None)
-            out.append(BsmEntry(index=i, kind=kind, owner=owner,
-                                name=mname or "?", desc=mdesc or "?", args=args))
-        return out
+    try:
+        for name, data in _class_attrs(cf):
+            if name != "BootstrapMethods":
+                continue
+            if len(data) < 2:
+                continue
+            cnt = struct.unpack_from(">H", data, 0)[0]
+            o = 2
+            out = []
+            for i in range(cnt):
+                if o + 4 > len(data):
+                    break
+                ref = struct.unpack_from(">H", data, o)[0]
+                nargs = struct.unpack_from(">H", data, o + 2)[0]
+                o += 4
+                if o + nargs * 2 > len(data):
+                    break
+                args = [_const(cf, struct.unpack_from(">H", data, o + k * 2)[0])
+                        for k in range(nargs)]
+                o += nargs * 2
+                mh = cf.cp[ref] if 0 <= ref < len(cf.cp) else None
+                kind = mh[1][0] if mh and mh[0] == CF.C_METHOD_HANDLE else 0
+                owner, mname, mdesc = _member(cf, mh[1][1]) if mh and mh[0] == CF.C_METHOD_HANDLE \
+                    else (None, None, None)
+                out.append(BsmEntry(index=i, kind=kind, owner=owner,
+                                    name=mname or "?", desc=mdesc or "?", args=args))
+            return out
+    except (struct.error, IndexError, KeyError):
+        return []
     return []
+
 
 
 # ---------------------------------------------------------------- site 枚举
@@ -295,7 +312,7 @@ def scan_jar(jar: Path, limit: int = 0) -> dict:
                 continue
             try:
                 cf = CF.parse(zf.read(info))
-            except CF.ClassFormatError:
+            except Exception:
                 continue
             stats["classes"] += 1
             bsm = parse_bsm(cf)

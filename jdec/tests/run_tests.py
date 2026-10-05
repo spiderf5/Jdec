@@ -82,8 +82,10 @@ def test_roundtrip_sample() -> None:
             try:
                 CF.parse(data)
                 check("truncated class is rejected", False, "it parsed anyway")
-            except Exception:  # noqa: BLE001
-                check("truncated class is rejected", True)
+            except CF.ClassFormatError:
+                check("truncated class raises ClassFormatError", True)
+            except Exception as exc:  # noqa: BLE001
+                check("truncated class raises ClassFormatError", False, f"raised {type(exc)} instead")
             continue
         try:
             out = CF.parse(data).serialize()
@@ -953,6 +955,54 @@ def test_rewrite_escapes() -> None:
         check("escape is reversible", java_unescape(inner) == plain)
 
 
+def test_bsm_scan_and_parse_resilience() -> None:
+    print("bsm: scan_jar, parse_bsm, and enum_sites handle valid and corrupt classes")
+    from jdec import bsm as BM
+    from jdec import classfile as CF
+
+    # 1. Whole jar scan on SAMPLE which contains a deliberately truncated class fixture
+    census = BM.scan_jar(SAMPLE)
+    st = census["stats"]
+    check("bsm scan quarantined corrupt class and counted valid classes", st["classes"] == 10, str(st))
+    check("bsm scan identified classes with BSM", st["classes_with_bsm"] >= 4, str(st))
+    check("bsm scan found indy callsites", st["sites"] >= 10, str(st))
+    check("bsm sample contains entries", len(census["sample"]) == 0 or len(census["per_name"]) > 0)
+
+    # 2. Corrupted attribute resilience in parse_bsm
+    with zipfile.ZipFile(SAMPLE) as z:
+        cf = CF.parse(z.read("demo/modern/Showcase.class"))
+    # Corrupt the attributes blob
+    cf.attrs_blob = b"\x00\x05\x00\x01"  # truncated attribute header
+    corrupt_bsm = BM.parse_bsm(cf)
+    check("parse_bsm survives truncated attribute blob without exception", corrupt_bsm == [])
+
+    # 3. Method arity calculation edge cases
+    check("_arity works on primitives and objects", BM._arity("(IDLjava/lang/String;)V") == 3)
+    check("_arity handles long and double correctly", BM._arity("(JJDD)V") == 4)
+    check("_arity handles arrays", BM._arity("([[I[Ljava/lang/String;)V") == 2)
+
+
+def test_recover_spec_generation_and_quarantine() -> None:
+    print("recover: build_spec parses jar and quarantines corrupt classes cleanly")
+    from jdec import recover as RC
+
+    with tempfile.TemporaryDirectory() as td:
+        out_d = Path(td)
+        spec_path, n_sites, n_skip = RC.build_spec(SAMPLE, out_d)
+        check("build_spec produced spec file", spec_path.is_file())
+        check("build_spec found callsites", n_sites >= 10, f"n_sites={n_sites}")
+        lines = spec_path.read_text(encoding="utf-8").splitlines()
+        check("spec lines non-empty", len(lines) >= n_sites)
+        c_lines = [l for l in lines if l.startswith("C\t")]
+        s_lines = [l for l in lines if l.startswith("S\t")]
+        check("spec has class directives", len(c_lines) >= 3, f"classes={len(c_lines)}")
+        check("spec has site directives", len(s_lines) == n_sites, f"sites={len(s_lines)}")
+        if s_lines:
+            s_parts = s_lines[0].split("\t")
+            check("site directive has >= 6 TSV columns", len(s_parts) >= 6, f"cols={len(s_parts)}")
+
+
+
 def test_resource_anomaly() -> None:
     print("mcmod: resource_anomaly flags identifier-level obfuscation tokens")
     with tempfile.TemporaryDirectory() as td:
@@ -1434,7 +1484,9 @@ def test_pipeline_automation() -> None:
         res = PL.run_pipeline(
             SAMPLE,
             out_dir,
-            no_recover=True,
+            no_deflat=False,
+            no_recover=False,
+            export_project=True,
             clean_work=False,
         )
         check("pipeline ran successfully", res.decompile_total > 0)
@@ -1445,9 +1497,23 @@ def test_pipeline_automation() -> None:
         check("strings tsv exists", (out_dir / "strings.tsv").is_file())
         check("report markdown exists", (out_dir / "report.md").is_file())
 
+        # Phase 2 unflattened methods
+        check("pipeline unflattened methods", res.unflattened_methods > 0, f"unflattened={res.unflattened_methods}")
+
+        # Phase 5 recover artifacts
+        check("recover spec tsv exists", (out_dir / "_pipeline" / "recover" / "recover_spec.tsv").is_file())
+        check("recover results tsv exists", (out_dir / "_pipeline" / "recover" / "recovered.tsv").is_file())
+
+        # Phase 8 project artifacts
+        proj_dir = out_dir / "project"
+        check("exported project directory exists", proj_dir.is_dir())
+        check("exported build.gradle exists", (proj_dir / "build.gradle").is_file())
+        check("exported src directory exists", (proj_dir / "src" / "main" / "java").is_dir())
+
         json_data = json.loads((out_dir / "pipeline_summary.json").read_text(encoding="utf-8"))
         check("summary json contains metrics", "metrics" in json_data and json_data["metrics"]["decompile_total"] > 0)
         check("summary json contains profile", "profile" in json_data and json_data["profile"]["classes"] > 0)
+
 
 
 def test_web_workbench_features() -> None:
@@ -2022,6 +2088,8 @@ def main() -> int:
     test_recover_triage()
     test_manifest_and_resources()
     test_rewrite_escapes()
+    test_bsm_scan_and_parse_resilience()
+    test_recover_spec_generation_and_quarantine()
     test_resource_anomaly()
     test_scorecard_smoke()
     test_pool_roundtrip()

@@ -251,65 +251,69 @@ class ClassFile:
 def parse(data: bytes) -> ClassFile:
     if len(data) < 10 or _u4(data, 0) != 0xCAFEBABE:
         raise ClassFormatError("not a class file")
-    minor, major = _u2(data, 4), _u2(data, 6)
-    cp_count = _u2(data, 8)
-    o = 10
-    cp: list = [None] * cp_count
-    i = 1
-    while i < cp_count:
-        tag = _u1(data, o)
-        o += 1
-        if tag == C_UTF8:
-            n = _u2(data, o)
-            o += 2
-            cp[i] = (C_UTF8, data[o:o + n])
-            o += n
-        else:
-            layout = _CP_LAYOUT.get(tag)
-            if layout is None:
-                raise ClassFormatError(f"unknown constant pool tag {tag} at {o - 1}")
-            if tag in (C_LONG, C_DOUBLE):
-                cp[i] = (tag, [data[o:o + 8]])
-                o += 8
-                i += 1  # occupies two slots
-                cp[i] = None
+    try:
+        minor, major = _u2(data, 4), _u2(data, 6)
+        cp_count = _u2(data, 8)
+        o = 10
+        cp: list = [None] * cp_count
+        i = 1
+        while i < cp_count:
+            tag = _u1(data, o)
+            o += 1
+            if tag == C_UTF8:
+                n = _u2(data, o)
+                o += 2
+                cp[i] = (C_UTF8, data[o:o + n])
+                o += n
             else:
-                vals = []
-                for kind in layout:
-                    if kind == "u1":
-                        vals.append(_u1(data, o))
-                        o += 1
-                    elif kind == "u2":
-                        vals.append(_u2(data, o))
-                        o += 2
-                    else:  # fixed-width numeric payload ("4" / "8")
-                        n = int(kind)
-                        vals.append(data[o:o + n])
-                        o += n
-                cp[i] = (tag, vals)
-        i += 1
+                layout = _CP_LAYOUT.get(tag)
+                if layout is None:
+                    raise ClassFormatError(f"unknown constant pool tag {tag} at {o - 1}")
+                if tag in (C_LONG, C_DOUBLE):
+                    cp[i] = (tag, [data[o:o + 8]])
+                    o += 8
+                    i += 1  # occupies two slots
+                    cp[i] = None
+                else:
+                    vals = []
+                    for kind in layout:
+                        if kind == "u1":
+                            vals.append(_u1(data, o))
+                            o += 1
+                        elif kind == "u2":
+                            vals.append(_u2(data, o))
+                            o += 2
+                        else:  # fixed-width numeric payload ("4" / "8")
+                            n = int(kind)
+                            vals.append(data[o:o + n])
+                            o += n
+                    cp[i] = (tag, vals)
+            i += 1
 
-    access_flags = _u2(data, o); o += 2
-    this_class = _u2(data, o); o += 2
-    super_class = _u2(data, o); o += 2
-    iface_count = _u2(data, o); o += 2
-    interfaces = [_u2(data, o + 2 * k) for k in range(iface_count)]
-    o += 2 * iface_count
-    fields, o = _read_members(data, o)
-    methods, o = _read_members(data, o)
-    attrs_at = o
-    attrs_count = _u2(data, o); o += 2
-    for _ in range(attrs_count):
-        o += 2
-        ln = _u4(data, o); o += 4
-        o += ln
-    cf = ClassFile(
-        major=major, minor=minor, access_flags=access_flags,
-        this_class=this_class, super_class=super_class, interfaces=interfaces,
-        fields=fields, methods=methods, attrs_blob=data[attrs_at:o], cp=cp,
-    )
-    _build_utf8_cache(cf)
-    return cf
+        access_flags = _u2(data, o); o += 2
+        this_class = _u2(data, o); o += 2
+        super_class = _u2(data, o); o += 2
+        iface_count = _u2(data, o); o += 2
+        interfaces = [_u2(data, o + 2 * k) for k in range(iface_count)]
+        o += 2 * iface_count
+        fields, o = _read_members(data, o)
+        methods, o = _read_members(data, o)
+        attrs_at = o
+        attrs_count = _u2(data, o); o += 2
+        for _ in range(attrs_count):
+            o += 2
+            ln = _u4(data, o); o += 4
+            o += ln
+        cf = ClassFile(
+            major=major, minor=minor, access_flags=access_flags,
+            this_class=this_class, super_class=super_class, interfaces=interfaces,
+            fields=fields, methods=methods, attrs_blob=data[attrs_at:o], cp=cp,
+        )
+        _build_utf8_cache(cf)
+        return cf
+    except (struct.error, IndexError) as exc:
+        raise ClassFormatError(f"truncated or malformed class file: {exc}") from exc
+
 
 
 def _read_members(data: bytes, o: int):
