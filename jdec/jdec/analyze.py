@@ -71,6 +71,16 @@ _API_RULES: dict[str, list[tuple[str, str]]] = {
     ],
     "anti-debug": [
         ("java/lang/management/ManagementFactory", "getRuntimeMXBean"),
+        ("java/lang/management/RuntimeMXBean", "getInputArguments"),
+    ],
+    "unsafe-memory": [
+        ("sun/misc/Unsafe", "getUnsafe"),
+        ("jdk/internal/misc/Unsafe", "getUnsafe"),
+    ],
+    "classloader-manipulation": [
+        ("java/lang/ClassLoader", "defineClass"),
+        ("java/lang/instrument/Instrumentation", "retransformClasses"),
+        ("java/lang/instrument/Instrumentation", "redefineClasses"),
     ],
     "machine-fingerprint": [
         ("java/net/NetworkInterface", "getHardwareAddress"),

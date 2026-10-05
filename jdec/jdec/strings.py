@@ -32,6 +32,12 @@ _SUSPICIOUS = (
     (re.compile(r"Runtime|getRuntime|ProcessBuilder|cmd\.exe|powershell", re.I),
      "exec"),
     (re.compile(r"ClassLoader|defineClass|Unsafe", re.I), "class-loading"),
+    (re.compile(r"discord(?:app)?[.]com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+", re.I), "webhook"),
+    (re.compile(r"api[.]telegram[.]org/bot[0-9]+:[A-Za-z0-9_-]+", re.I), "telegram"),
+    (re.compile(r"pastebin[.]com|raw[.]githubusercontent[.]com|ngrok[.]io|ngrok-free[.]app|hastebin[.]com|rentry[.]co", re.I), "c2-staging"),
+    (re.compile(r"(?:(?<![A-Za-z0-9])[13][a-km-zA-HJ-NP-Z1-9]{25,34}(?![A-Za-z0-9])|(?<![A-Za-z0-9])0x[a-fA-F0-9]{40}(?![A-Za-z0-9]))"), "crypto"),
+    (re.compile(r"^[A-Za-z0-9+/]{48,}={0,2}$"), "encrypted-blob"),
+    (re.compile(r"^[0-9a-fA-F]{48,}$"), "encrypted-blob"),
 )
 
 
@@ -54,6 +60,14 @@ class StringDump:
     @property
     def total(self) -> int:
         return len(self.rows)
+
+    def tag_counts(self) -> dict[str, int]:
+        from collections import Counter
+        c: Counter = Counter()
+        for r in self.rows:
+            for t in r[2]:
+                c[t] += 1
+        return dict(c.most_common())
 
     def grep(self, needle: str) -> "StringDump":
         low = needle.lower()

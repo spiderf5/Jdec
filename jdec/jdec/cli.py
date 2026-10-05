@@ -12,6 +12,7 @@ from pathlib import Path
 from . import analyze as AZ
 from . import bsm as BM
 from . import engines as EN
+from . import ghidra_engine as GE
 from . import mappings as MP
 from . import native_scan as NS
 from . import pool as PL
@@ -49,11 +50,24 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
 def cmd_engines(args: argparse.Namespace) -> int:
     d = Path(args.engines_dir)
+    if getattr(args, "with_ghidra", False):
+        gh = GE.find_ghidra(engines_dir=d)
+        if not gh:
+            print("Ghidra not found in engines directory; downloading ...")
+            try:
+                GE.download_ghidra(d)
+            except Exception as exc:
+                print(f"Failed to download Ghidra: {exc}")
+        else:
+            print(f"Ghidra is already present at: {gh}")
     missing = EN.ensure_engines(d)
     print(f"engines dir: {d}")
     for key, eng in EN.ENGINES.items():
         ok = eng.available(d)
         print(f"  {eng.label:<24} {'available' if ok else 'MISSING'}")
+    gh = GE.find_ghidra(engines_dir=d)
+    gh_status = f"available ({gh.name})" if gh else "MISSING (pass --with-ghidra to download)"
+    print(f"  {'Ghidra Headless':<24} {gh_status}")
     if missing:
         print(f"could not fetch: {', '.join(missing)}")
         return 1
@@ -217,8 +231,9 @@ def cmd_strings(args: argparse.Namespace) -> int:
     print(f"strings    : {total} total, {d.total} written")
     tagged = sum(1 for r in d.rows if r[2])
     if tagged:
-        print(f"tagged     : {tagged} literal(s) look like url / path / credential "
-              f"/ exec / machine-id")
+        counts = d.tag_counts()
+        summary = ", ".join(f"{k}: {v}" for k, v in list(counts.items())[:6])
+        print(f"tagged     : {tagged} literal(s) ({summary})")
     print(f"tsv        : {tsv}")
     print(f"json       : {js}")
     return 0
@@ -231,8 +246,30 @@ def cmd_natives(args: argparse.Namespace) -> int:
         return 2
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_natives")
     tri = NS.triage(raw, out_dir, collect_decl=not args.no_decl)
+
+    decompiled_info = None
+    if getattr(args, "decompile", False):
+        engines_dir = Path(args.engines_dir) if hasattr(args, "engines_dir") else DEFAULT_ENGINES_DIR
+        gh = GE.find_ghidra(explicit_path=args.ghidra, engines_dir=engines_dir)
+        if not gh and getattr(args, "fetch_ghidra", False):
+            print("Ghidra not found; fetching Ghidra Headless into engines/ghidra ...")
+            try:
+                gh = GE.download_ghidra(engines_dir)
+            except Exception as e:
+                print(f"Failed to download Ghidra: {e}")
+        if gh:
+            print(f"ghidra engine: {gh}")
+            decompiled_info = NS.decompile_libs(tri, out_dir, gh)
+            total_decomp = sum(d.get("decompiled_count", 0) for d in decompiled_info.values())
+            print(f"decompiled   : {total_decomp} JNI function(s) exported to C pseudo-code")
+        else:
+            print("note         : Ghidra Headless not found. Native C decompilation skipped.")
+            print("               To download and set up Ghidra automatically, run:")
+            print("                 python jdec.py engines --with-ghidra")
+            print("               Or run with --fetch-ghidra / specify path via --ghidra <PATH>.")
+
     report = out_dir / "native-triage.md"
-    NS.write_report(tri, raw.name, report)
+    NS.write_report(tri, raw.name, report, decompiled_info=decompiled_info)
     print(f"libs      : {len(tri.libs)} extracted -> {out_dir}")
     for lib in tri.libs:
         extra = f"  ({lib.error})" if lib.error else ""
@@ -424,6 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_probe)
 
     se = sub.add_parser("engines", help="download / check decompiler engines")
+    se.add_argument("--with-ghidra", action="store_true",
+                    help="download and prepare Ghidra Headless native engine into engines/ghidra")
     se.set_defaults(func=cmd_engines)
 
     ss = sub.add_parser("strings",
@@ -493,6 +532,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="output dir for extracted libs + report")
     snv.add_argument("--no-decl", action="store_true",
                      help="skip scanning java-side native declarations")
+    snv.add_argument("--decompile", action="store_true",
+                     help="decompile extracted native libraries to C pseudo-code using Ghidra Headless")
+    snv.add_argument("--ghidra", default=None,
+                     help="path to Ghidra installation directory (or set GHIDRA_HOME)")
+    snv.add_argument("--fetch-ghidra", action="store_true",
+                     help="automatically download Ghidra into engines/ghidra if not present")
     snv.set_defaults(func=cmd_natives)
 
     si = sub.add_parser("indy",

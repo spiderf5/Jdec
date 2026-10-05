@@ -203,25 +203,69 @@ def parse_tiny(text: str, source: str = "tiny",
     return m
 
 
-def parse_tsrg(text: str, source: str = "tsrg") -> Mapping:
+def parse_tsrg(text: str, source: str = "tsrg",
+               from_ns: str | None = None, to_ns: str | None = None) -> Mapping:
     m = Mapping(source=source)
     cur_obf: str | None = None
-    for line in text.splitlines():
+    lines = text.splitlines()
+    if not lines:
+        return m
+
+    is_v2 = False
+    from_idx = 0
+    to_idx = 1
+
+    for line in lines:
         if not line.strip():
             continue
-        if not line.startswith("\t"):
-            bits = line.split()
-            if len(bits) >= 2:
-                cur_obf = bits[0]
-                m.add_class(bits[0], bits[1])
+        # Check TSRG v2 header
+        if line.startswith("tsrg2"):
+            is_v2 = True
+            header_bits = line.split()
+            namespaces = header_bits[1:]
+            if from_ns and from_ns in namespaces:
+                from_idx = namespaces.index(from_ns)
+            if to_ns and to_ns in namespaces:
+                to_idx = namespaces.index(to_ns)
             continue
-        bits = line.strip().split()
-        if cur_obf is None:
+
+        # Parameter line (TSRG v2 parameter mappings use 2 tabs)
+        if line.startswith("\t\t"):
             continue
-        if len(bits) == 2:
-            m.add_member(cur_obf, bits[0], None, bits[1])
-        elif len(bits) >= 3:
-            m.add_member(cur_obf, bits[0], bits[1], bits[2])
+
+        # Member line (1 tab)
+        if line.startswith("\t"):
+            if cur_obf is None:
+                continue
+            bits = line.strip().split()
+            if not bits:
+                continue
+            # Method has descriptor with '(' in bits[1]
+            if len(bits) >= 2 and "(" in bits[1]:
+                desc = bits[1]
+                target_idx = 1 + to_idx if is_v2 else 2
+                if len(bits) > target_idx:
+                    m.add_member(cur_obf, bits[0], desc, bits[target_idx])
+            elif len(bits) >= 2:
+                # Field line
+                target_idx = to_idx if is_v2 else 1
+                if len(bits) > target_idx:
+                    m.add_member(cur_obf, bits[0], None, bits[target_idx])
+            continue
+
+        # Class line (no leading tab)
+        bits = line.split()
+        target_idx = to_idx if is_v2 else 1
+        src_idx = from_idx if is_v2 else 0
+        if len(bits) > max(src_idx, target_idx):
+            cur_obf = bits[src_idx]
+            m.add_class(cur_obf, bits[target_idx])
+        elif len(bits) >= 2:
+            cur_obf = bits[0]
+            m.add_class(bits[0], bits[1])
+        else:
+            cur_obf = None
+
     return m
 
 
@@ -233,7 +277,7 @@ def load_mapping(path: Path, from_ns: str | None = None, to_ns: str | None = Non
     head = text.lstrip().splitlines()[0] if text.strip() else ""
     if "->" in head or re.search(r"^\s+\d+:\d+:", text, re.M) or " -> " in text[:4000]:
         return parse_proguard(text, source=path.name, invert=invert)
-    return parse_tsrg(text, source=path.name)
+    return parse_tsrg(text, source=path.name, from_ns=from_ns, to_ns=to_ns)
 
 
 # --------------------------------------------------------------------------

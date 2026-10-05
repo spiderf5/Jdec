@@ -165,9 +165,10 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
             prof.mc_version = m.group(1)
 
     # a mod jar doesn't shade the loader, so the name-marker pass above
-    # misses it; fabric.mod.json is the reliable signal for both the loader
+    # misses it; mod manifests are the reliable signal for both the loader
     # and the game version the mod declares
     if "fabric.mod.json" in names:
+        prof.is_minecraft = True
         try:
             fmj = json.loads(zf.read("fabric.mod.json"))
         except Exception:
@@ -179,6 +180,54 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
                 dep = str((fmj.get("depends") or {}).get("minecraft") or "")
                 if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", dep):
                     prof.mc_version = dep
+
+    if "quilt.mod.json" in names:
+        prof.is_minecraft = True
+        if not prof.mc_flavor:
+            prof.mc_flavor = "Quilt"
+        try:
+            qdoc = json.loads(zf.read("quilt.mod.json").decode("utf-8", "replace"))
+            ql = qdoc.get("quilt_loader", {}) if isinstance(qdoc.get("quilt_loader"), dict) else {}
+            if not prof.mc_version:
+                deps = ql.get("depends") or []
+                if isinstance(deps, list):
+                    for d in deps:
+                        if isinstance(d, dict) and d.get("id") == "minecraft":
+                            v = d.get("versions")
+                            if isinstance(v, str) and re.fullmatch(r"\d+\.\d+(?:[.]\d+)?", v):
+                                prof.mc_version = v
+                                break
+        except Exception:
+            pass
+
+    if "META-INF/neoforge.mods.toml" in names or "META-INF/mods.toml" in names:
+        prof.is_minecraft = True
+        is_neo = "META-INF/neoforge.mods.toml" in names
+        if not prof.mc_flavor:
+            prof.mc_flavor = "NeoForge" if is_neo else "Forge"
+        if not prof.mc_version:
+            key = "META-INF/neoforge.mods.toml" if is_neo else "META-INF/mods.toml"
+            try:
+                tt = zf.read(key).decode("utf-8", "replace")
+                mv = re.search(r'''versionRange\s*=\s*['"]\[?(\d+\.\d+(?:[.]\d+)?)''', tt)
+                if mv:
+                    prof.mc_version = mv.group(1)
+            except Exception:
+                pass
+
+    if "mcmod.info" in names:
+        prof.is_minecraft = True
+        if not prof.mc_flavor:
+            prof.mc_flavor = "Forge"
+        if not prof.mc_version:
+            try:
+                doc = json.loads(zf.read("mcmod.info").decode("utf-8", "replace"))
+                d = doc[0] if isinstance(doc, list) and doc and isinstance(doc[0], dict) else (doc if isinstance(doc, dict) else {})
+                mcv = d.get("mcversion")
+                if isinstance(mcv, str) and re.fullmatch(r"\d+\.\d+(?:[.]\d+)?", mcv):
+                    prof.mc_version = mcv
+            except Exception:
+                pass
 
     joined_lower = joined.lower()
     for item in _load_fingerprints():

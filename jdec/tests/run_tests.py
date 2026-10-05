@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1143,6 +1144,190 @@ def test_probe_fingerprints_json() -> None:
         check("signature recorded", any("JNIC" in s for s in prof.signatures), str(prof.signatures))
 
 
+def test_ghidra_integration() -> None:
+    print("ghidra: engine detection, script validation, and report integration")
+    import shutil
+    from jdec import ghidra_engine as GE
+    from jdec import native_scan as NS
+
+    # 1. worker script validation
+    check("ghidra_worker.java exists", GE.WORKER_JAVA.exists())
+    txt = GE.WORKER_JAVA.read_text(encoding="utf-8")
+    check("worker script defines GhidraScript", "ghidra_worker extends GhidraScript" in txt)
+    check("worker script uses DecompInterface", "DecompInterface" in txt)
+
+    # 2. find_ghidra on mock installation
+    with tempfile.TemporaryDirectory() as td:
+        mock_dir = Path(td) / "mock_ghidra"
+        support = mock_dir / "support"
+        support.mkdir(parents=True)
+        bin_name = "analyzeHeadless.bat" if sys.platform == "win32" else "analyzeHeadless"
+        (support / bin_name).write_text("echo mock", encoding="utf-8")
+
+        found = GE.find_ghidra(explicit_path=mock_dir)
+        check("mock ghidra detected via explicit_path", found == mock_dir.resolve(), str(found))
+
+        engines_dir = Path(td) / "engines"
+        engines_dir.mkdir()
+        shutil.copytree(mock_dir, engines_dir / "ghidra")
+        found_engine = GE.find_ghidra(engines_dir=engines_dir)
+        check("mock ghidra detected in engines dir", found_engine is not None, str(found_engine))
+
+    # 3. native_scan report formatting with decompiled info
+    with tempfile.TemporaryDirectory() as td:
+        rep_out = Path(td) / "test-triage.md"
+        tri = NS.Triage(libs=[NS.NativeLib(name="test.dll", size=1024, format="PE", exports=["Java_com_x_Y_z"])])
+        decomp_mock = {
+            "test.dll": {
+                "ok": True,
+                "decompiled_count": 1,
+                "functions": [{"name": "Java_com_x_Y_z", "entry": "0x1000", "file": "src/Java_com_x_Y_z.c"}]
+            }
+        }
+        NS.write_report(tri, "test.jar", rep_out, decompiled_info=decomp_mock)
+        md = rep_out.read_text(encoding="utf-8")
+        check("report contains decompiled section", "decompiled C sources (via Ghidra Headless)" in md)
+        check("report lists decompiled function", "Java_com_x_Y_z" in md and "src/Java_com_x_Y_z.c" in md)
+
+
+def test_native_elf_and_ghidra_annotate() -> None:
+    print("natives: ELF (.so) export parsing and Ghidra annotation script generation")
+    from jdec import native_scan as NS
+
+    # 1. ELF export parsing
+    ehdr = bytearray(64)
+    ehdr[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<HHIQQQIHHHHHH", ehdr, 16, 3, 0x3E, 1, 0, 0, 64, 0, 64, 0, 0, 64, 3, 0)
+    sh0 = bytearray(64)
+    sh1 = bytearray(64)
+    struct.pack_into("<IIQQQQIIQQ", sh1, 0, 0, 11, 2, 0, 256, 72, 2, 1, 8, 24)
+    sh2 = bytearray(64)
+    dynstr_data = b"\x00Java_demo_Cls_run\x00JNI_OnLoad\x00"
+    struct.pack_into("<IIQQQQIIQQ", sh2, 0, 0, 3, 2, 0, 328, len(dynstr_data), 0, 0, 1, 0)
+
+    sym0 = bytearray(24)
+    sym1 = bytearray(24)
+    struct.pack_into("<IBBHQQ", sym1, 0, 1, 0x12, 0, 1, 0x1000, 32)
+    sym2 = bytearray(24)
+    struct.pack_into("<IBBHQQ", sym2, 0, 19, 0x12, 0, 1, 0x1020, 16)
+
+    elf = bytes(ehdr + sh0 + sh1 + sh2 + sym0 + sym1 + sym2 + dynstr_data)
+    exports = NS.parse_elf_exports(elf)
+    check("ELF parsed JNI exports", "Java_demo_Cls_run" in exports and "JNI_OnLoad" in exports, str(exports))
+
+    # 2. Ghidra GUI annotation script generation
+    with tempfile.TemporaryDirectory() as td:
+        script_out = Path(td) / "ghidra_annotate.py"
+        tri = NS.Triage(
+            libs=[NS.NativeLib(name="libsample.so", size=len(elf), format="ELF", exports=exports)],
+            native_decl=[("demo/Cls", "run")]
+        )
+        NS.write_ghidra_annotation_script(tri, script_out)
+        check("ghidra_annotate.py written", script_out.exists())
+        txt = script_out.read_text(encoding="utf-8")
+        check("ghidra_annotate maps Java method", "Java_demo_Cls_run" in txt and "demo/Cls" in txt)
+        check("ghidra_annotate contains run entry", "def run():" in txt and "JNI_BINDINGS" in txt)
+
+
+def test_score_and_signal_enhancements() -> None:
+    print("score/analyze: hard error patterns and expanded API rules")
+    from jdec.score import _HARD_ERROR_PATTERNS
+    samples = [
+        "// Method dump skipped",
+        "/* Decompilation failed: stack underflow */",
+        "// Decompilation aborted",
+    ]
+    for s in samples:
+        matched = any(p.search(s) for p in _HARD_ERROR_PATTERNS)
+        check(f"hard error matched: {s}", matched)
+
+
+def test_multimodule_enhancements() -> None:
+    print("modules: strings threat tags, tsrg2 mappings, quilt/neoforge metadata")
+    # 1. strings.py
+    check("webhook detected", "webhook" in ST.classify("https://discord.com/api/webhooks/123456789/AbCdEf-GhIj"))
+    check("telegram bot detected", "telegram" in ST.classify("https://api.telegram.org/bot123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"))
+    check("c2 staging detected", "c2-staging" in ST.classify("https://pastebin.com/raw/xyz123"))
+    check("crypto address detected", "crypto" in ST.classify("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"))
+    blob = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="
+    check("encrypted blob detected", "encrypted-blob" in ST.classify(blob))
+    sd = ST.StringDump(rows=[("ClsA", "s1", ["webhook", "url"]), ("ClsB", "s2", ["webhook"])])
+    tc = sd.tag_counts()
+    check("tag_counts computed", tc.get("webhook") == 2 and tc.get("url") == 1, str(tc))
+
+    # 2. mappings.py TSRG v2
+    tsrg2_sample = (
+        "tsrg2 obf srg\n"
+        "a net/minecraft/client/main/Main\n"
+        "\tb field_1234_a\n"
+        "\tc (Ljava/lang/String;)V func_5678_b\n"
+        "\t\t0 p_5678_0_\n"
+    )
+    m = MP.parse_tsrg(tsrg2_sample)
+    check("tsrg2 class parsed", m.lookup_class("a") == "net/minecraft/client/main/Main")
+    check("tsrg2 field parsed", m.lookup_member("a", "b", "") == "field_1234_a")
+    check("tsrg2 method parsed", m.lookup_member("a", "c", "(Ljava/lang/String;)V") == "func_5678_b")
+    check("tsrg2 parameter skipped as member", m.lookup_member("a", "0", "") is None)
+
+    # 3. mcmod.py & probe.py (Quilt & NeoForge)
+    from jdec import mcmod as MM
+    tmp_dir = Path(tempfile.mkdtemp(prefix="jdec_test_meta_"))
+    try:
+        # Mock Quilt jar
+        quilt_jar = tmp_dir / "quilt_test.jar"
+        with zipfile.ZipFile(quilt_jar, "w") as z:
+            quilt_json = {
+                "schema_version": 1,
+                "quilt_loader": {
+                    "id": "quilt_sample",
+                    "version": "2.0.0",
+                    "metadata": {"name": "Quilt Sample Mod", "contributors": {"AuthorA": "Owner"}},
+                    "entrypoints": {"init": "com.example.QuiltMod"},
+                    "depends": [{"id": "minecraft", "versions": "1.20.2"}]
+                },
+                "mixin": "quilt_sample.mixins.json"
+            }
+            z.writestr("quilt.mod.json", json.dumps(quilt_json))
+        qmeta = MM.read_mod_meta(quilt_jar)
+        check("quilt loader recognized", qmeta.loader == "quilt", str(qmeta.loader))
+        check("quilt mod id", qmeta.mod_id == "quilt_sample", str(qmeta.mod_id))
+        check("quilt name", qmeta.name == "Quilt Sample Mod", str(qmeta.name))
+        check("quilt entrypoint", "com.example.QuiltMod" in qmeta.entrypoints, str(qmeta.entrypoints))
+        check("quilt mixin config", "quilt_sample.mixins.json" in qmeta.mixin_configs, str(qmeta.mixin_configs))
+
+        qprof = profile_jar(quilt_jar)
+        check("quilt flavor in probe", qprof.mc_flavor == "Quilt", str(qprof.mc_flavor))
+        check("quilt version in probe", qprof.mc_version == "1.20.2", str(qprof.mc_version))
+
+        # Mock NeoForge jar
+        neo_jar = tmp_dir / "neo_test.jar"
+        with zipfile.ZipFile(neo_jar, "w") as z:
+            neo_toml = (
+                "modId = 'neoforge_test'\n"
+                "displayName = 'NeoForge Mod'\n"
+                "version = '1.20.4-1.0'\n"
+                "authors = 'Dev'\n"
+                "description = 'A test mod'\n"
+                "[[dependencies.neoforge_test]]\n"
+                "modId = 'minecraft'\n"
+                "versionRange = '[1.20.4, 1.21)'\n"
+                "[[mixins]]\n"
+                "config = 'neo.mixins.json'\n"
+            )
+            z.writestr("META-INF/neoforge.mods.toml", neo_toml)
+        nmeta = MM.read_mod_meta(neo_jar)
+        check("neoforge loader recognized", nmeta.loader == "neoforge", str(nmeta.loader))
+        check("neoforge mod id", nmeta.mod_id == "neoforge_test", str(nmeta.mod_id))
+        check("neoforge name", nmeta.name == "NeoForge Mod", str(nmeta.name))
+        check("neoforge mixin config", "neo.mixins.json" in nmeta.mixin_configs, str(nmeta.mixin_configs))
+
+        nprof = profile_jar(neo_jar)
+        check("neoforge flavor in probe", nprof.mc_flavor == "NeoForge", str(nprof.mc_flavor))
+        check("neoforge version in probe", nprof.mc_version == "1.20.4", str(nprof.mc_version))
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -1232,6 +1417,10 @@ def main() -> int:
     test_pool_roundtrip()
     test_pool_qualified_and_full_string()
     test_probe_fingerprints_json()
+    test_ghidra_integration()
+    test_native_elf_and_ghidra_annotate()
+    test_score_and_signal_enhancements()
+    test_multimodule_enhancements()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

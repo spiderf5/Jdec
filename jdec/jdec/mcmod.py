@@ -336,11 +336,19 @@ def _first_dict(node) -> dict:
 
 
 def read_mod_meta(jar: Path) -> ModMeta:
-    """loader 元数据（fabric.mod.json / mods.toml / mcmod.info）+ manifest。
+    """loader 元数据（fabric.mod.json / quilt.mod.json / mods.toml / mcmod.info）+ manifest。
 
     manifest 是固定采集项：不管 loader 是什么，身份/agent 声明都在那里。"""
     meta = _read_loader_meta(jar)
     meta.manifest = read_manifest(jar)
+    if meta.loader is None and meta.manifest:
+        ag = meta.manifest.agent_attrs()
+        if ag.get("Premain-Class") or ag.get("Agent-Class"):
+            meta.loader = "java-agent"
+        elif "FMLCorePlugin" in meta.manifest.main:
+            meta.loader = "forge (coremod)"
+        elif "TweakClass" in meta.manifest.main:
+            meta.loader = "launchwrapper (tweaker)"
     return meta
 
 
@@ -380,29 +388,69 @@ def _read_loader_meta(jar: Path) -> ModMeta:
                 meta.mixin_configs += [str(m) for m in mix]
             return meta
 
+        if "quilt.mod.json" in names:
+            try:
+                doc = json.loads(z.read("quilt.mod.json").decode("utf-8", "replace"))
+            except Exception:
+                doc = {}
+            meta.loader = "quilt"
+            meta.source_file = "quilt.mod.json"
+            ql = doc.get("quilt_loader", {}) if isinstance(doc.get("quilt_loader"), dict) else {}
+            meta.mod_id = ql.get("id") or doc.get("id")
+            meta.version = ql.get("version") or doc.get("version")
+            md = ql.get("metadata", {}) if isinstance(ql.get("metadata"), dict) else {}
+            meta.name = md.get("name") or doc.get("name")
+            meta.description = md.get("description") or doc.get("description")
+            contribs = md.get("contributors", {})
+            if isinstance(contribs, dict):
+                meta.authors = list(contribs.keys())
+            elif isinstance(contribs, list):
+                meta.authors = [str(c) for c in contribs]
+            elif isinstance(doc.get("authors"), list):
+                meta.authors = [str(a) for a in doc["authors"] if not isinstance(a, dict)]
+
+            eps = ql.get("entrypoints") or doc.get("entrypoints") or {}
+            if isinstance(eps, dict):
+                for group in ("main", "client", "server", "init"):
+                    val = eps.get(group)
+                    if isinstance(val, str):
+                        meta.entrypoints.append(val)
+                    elif isinstance(val, list):
+                        for it in val:
+                            if isinstance(it, str):
+                                meta.entrypoints.append(it)
+                            elif isinstance(it, dict) and it.get("value"):
+                                meta.entrypoints.append(str(it["value"]))
+            mix = doc.get("mixin") or doc.get("mixins") or ql.get("mixin") or ql.get("mixins")
+            if isinstance(mix, str):
+                meta.mixin_configs.append(mix)
+            elif isinstance(mix, list):
+                meta.mixin_configs += [str(m) for m in mix]
+            return meta
+
         if "META-INF/mods.toml" in names or "META-INF/neoforge.mods.toml" in names:
             key = ("META-INF/neoforge.mods.toml"
                    if "META-INF/neoforge.mods.toml" in names else "META-INF/mods.toml")
             text = z.read(key).decode("utf-8", "replace")
             meta.loader = "neoforge" if "neoforge" in key else "forge"
             meta.source_file = key
-            m = re.search(r'^\s*modId\s*=\s*"([^"]+)"', text, re.M)
+            m = re.search(r'^\s*modId\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.M)
             if m:
                 meta.mod_id = m.group(1)
-            m = re.search(r'^\s*displayName\s*=\s*"([^"]+)"', text, re.M)
+            m = re.search(r'^\s*displayName\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.M)
             if m:
                 meta.name = m.group(1)
-            m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.M)
+            m = re.search(r'^\s*version\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.M)
             if m:
                 meta.version = m.group(1)
-            m = re.search(r'^\s*authors\s*=\s*"([^"]+)"', text, re.M)
+            m = re.search(r'^\s*authors\s*=\s*[\'"]([^\'"]+)[\'"]', text, re.M)
             if m:
                 meta.authors = [a.strip() for a in m.group(1).split(",") if a.strip()]
-            m = re.search(r'^\s*description\s*=\s*["]{0,3}([^"\n]+)', text, re.M)
+            m = re.search(r'^\s*description\s*=\s*[\'"]{0,3}([^\'"\n]+)', text, re.M)
             if m:
                 meta.description = m.group(1)
             # Forge declares mixin configs in [[mixins]] blocks
-            meta.mixin_configs = re.findall(r'^\s*config\s*=\s*"([^"]+\.json)"', text, re.M)
+            meta.mixin_configs = re.findall(r'^\s*config\s*=\s*[\'"]([^\'"]+\.json)[\'"]', text, re.M)
             return meta
 
         if "mcmod.info" in names:

@@ -9,6 +9,7 @@ __pycache__/
 #   python jdec.py engines          (engine jars)
 #   python tests/build_fixtures.py  (sample/mixin/flow/collide jars)
 jdec/engines/*.jar
+jdec/engines/ghidra/
 jdec/engines/bridge/*.class
 jdec/engines/tap/*.jar
 jdec/engines/tap/*.class

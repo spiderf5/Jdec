@@ -39,8 +39,9 @@ jdec 的价值在引擎之外：**调度、验证、反混淆**。
    读不了的隔离掉，不让它拖垮其余 7786 个类。
 5. **Minecraft 反混淆**  
    `brc` → `CreeperEntity`。支持 Mojang 官方映射（1.14+）、Fabric  
-   Intermediary+Yarn、旧版 MCP/tsrg（1.7-1.12）。重映射在字节码层完成，  
-   声明处和**所有调用点**一起改名，产出的 jar 类名与路径一致，能被 JVM 加载。
+   Intermediary+Yarn、旧版 MCP/tsrg（1.7-1.12）、现代 Forge TSRG v2（含命名空间与多级参数过滤）
+   以及 modern Forge (1.16+) 的 `official-srg` 双命名空间组合映射。
+   重映射在字节码层完成，声明处和**所有调用点**一起改名，产出的 jar 类名与路径一致，能被 JVM 加载。
 
 ## 安装
 
@@ -95,6 +96,8 @@ python jdec.py indy client.jar                 # indy 站点普查：4 万级站
                                                # 每个站点的 bootstrap 与参数表达式
 python jdec.py natives client.jar -o nat/      # 提取 native 库 + PE 导出表 +
                                                # 声明匹配 + 给 Ghidra 的任务清单
+                                               # （加 --decompile 可自动调用 Ghidra 输出 C 伪代码）
+python jdec.py engines --with-ghidra           # 一键自动下载并配置内置 Ghidra Headless 引擎
 python jdec.py recover client.jar -o rec/     --cp-file classpath.txt                    # 自洽重放：跑目标自己的解密
                                                # 机器收明文（classpath 见下）
 ```
@@ -125,8 +128,8 @@ python jdec.py analyze client.jar -o out --mc-version 1.20.4
   `machine-fingerprint` / `encrypted-strings`，按类统计，并列出  
   「值得先看的类」。
 
-读的是 Fabric 的 `fabric.mod.json`、Forge/NeoForge 的 `META-INF/mods.toml`、  
-旧版的 `mcmod.info`，以及它们声明的 `*.mixins.json`。元数据被删了也没关系：  
+读的是 Fabric 的 `fabric.mod.json`、Quilt 的 `quilt.mod.json`、Forge/NeoForge 的 `META-INF/mods.toml` 与 `META-INF/neoforge.mods.toml`、  
+旧版的 `mcmod.info`，以及它们声明的 `*.mixins.json`。若缺少 loader 文件，自动识别 Java Agent 与 FML 启动桩。元数据被删了也没关系：  
 扫不到配置就全量扫注解，照样能找出来。
 
 **refmap 也会读**。Fabric 构建时会把 `@Inject(method = "...")` 改写成 intermediary 名  
@@ -205,7 +208,7 @@ jdec 直接把它解出来，**不需要执行任何东西、不需要加载类*
 
 ```bash
 python jdec.py strings client.jar -o out
-python jdec.py strings client.jar --suspicious      # 只留 url / ip / 路径 / 凭据 / 命令 / 机器码
+python jdec.py strings client.jar --suspicious      # 威胁特征标签（webhook / telegram / c2-staging / crypto / 加密 blob / url / ip / 路径 / 凭据 / 命令 / 机器码）
 python jdec.py strings client.jar --grep api         # 只留含某个词的
 ```
 

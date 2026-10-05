@@ -30,6 +30,9 @@ _HARD_ERROR_PATTERNS = [
         r"\$FF:\s*couldn",
         r"error\s+while\s+decompiling",
         r"exception\s+in\s+thread",
+        r"method\s+dump\s+skipped",
+        r"decompilation\s+failed",
+        r"decompilation\s+aborted",
     )
 ]
 
