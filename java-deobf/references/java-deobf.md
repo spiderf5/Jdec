@@ -1,6 +1,6 @@
 # Java 反混淆手册（含 Minecraft 客户端）
 
-Mode C 的参考资料。核心认知：**Minecraft 客户端里其实是两套混淆叠在一起**，必须分开处理。
+核心认知：**Minecraft 客户端里其实是两套混淆叠在一起**，必须分开处理。
 
 ## 前提：只处理你有权处理的代码
 
@@ -171,14 +171,14 @@ Skid / qProtect（非最新）、Scuti、CheatBreaker、Bozar、RakSzild、HP888
 如果能拿到同一份代码**混淆前 / 混淆后**的两个 jar，先做差分再谈别的。
 它能同时回答三件事：检测器准不准、这一轮混淆改了什么、哪些东西混淆器根本碰不到。
 
-实测（ZKM 27，Forge 1.7-1.12 模组，722 → 723 类）：
+基线测量（ZKM 27 处理同源 Forge 1.7–1.12 模组，722 → 723 类）：
 
 | 指标 | 原件 | 混淆后 | 读法 |
 |---|---|---|---|
 | `clinit-decryptor` | 75 | 315 | 字符串加密被大幅加强（4.2×） |
 | `long-constant-array` | 1263 | 4326 | 整数 / 长整型加密加强 |
 | `overload-collision` | 568 | 137 | 名字变了，重载分布随之变 |
-| 被标记的类集合 | 142 | 352 | 类名被重命名（`myau/J` → `myau/A`） |
+| 被标记的类集合 | 142 | 352 | 类名被整体重命名（单字母形态轮换） |
 | **mixin hook 目标** | **123** | **123** | **一个都没变** |
 | native 方法 / indy 站点 | 101 / 1716 | 101 / 1716 | 二次混淆不再处理这两项 |
 
@@ -187,7 +187,7 @@ Skid / qProtect（非最新）、Scuti、CheatBreaker、Bozar、RakSzild、HP888
   注解值是常量池常量，这是它碰不到的。凡是靠名字建立的映射（MC 官方映射、
   Yarn、MCP）必须先做，混淆器不认识它们。
 - 检测器的召回率可以直接验：拿被标记的类反编译，看结构是否真的对得上。
-  实测抽查 ZKM 标记的解密器类，反编译出来确实是 DES 解密循环 —— 不是误报。
+  抽查 ZKM 标记的解密器类，反编译结果确为 DES 解密循环——非误报。
 
 脚本上很容易做：两份 `analysis.json` 逐字段相减即可，不必重新扫描。
 
@@ -202,9 +202,9 @@ ZKM 是商业混淆器，27 版本起强度明显提升，特征是**叠加使�
 **后果**：直接丢给反编译器大概率崩溃，或者吐出无法阅读的代码。
 顺序必须是**先跑 flow / indy transformer，再反编译**，反过头来等于白做。
 
-### ZKM 27 enhanced 模式的实测形态
+### ZKM 27 enhanced 模式的形态
 
-一份 Forge 1.7-1.12 模组（722 类）上的实测结果，`deobf_scan.py` 报 `clinit-decryptor`
+基线测量（同源 Forge 模组，722 类）：`deobf_scan.py` 报 `clinit-decryptor`
 315 处、`long-constant-array` 4326 处、`indy-long` 190 处。解密方法反编译后长这样：
 
 ```java
@@ -222,7 +222,7 @@ private static String b(int n, long l) {
 
 要点：
 
-- **调用形态是 `(String, int, long)`，第一个参数是标记**（实测见过 `"o"` 与 `"y"` 两种），
+- **调用形态是 `(String, int, long)`，第一个参数是标记**（观察过 `"o"` 与 `"y"` 两种），
   后面两个是索引与被 session key 异或过的 long。找解密方法时按这个签名搜。
 - **密文表本身也是加密的**：`<clinit>` 里先用一个 session key 把表项解出来，
   每个调用点再用各自的 key 解出最终明文 —— **两层，不是一层**。
@@ -305,15 +305,14 @@ p/Q:method:(...)V····       ← 4 个空格 = 静态字段读
 ## 陷阱
 
 - **别在常量池里搜库扩展名**：`.dll` / `.so` 当子串匹配会命中任何含该串的普通文本
-  （`also`、`resolve`、`socket`…）。实测 vanilla 1.20.4 的 22597 个条目里**没有任何
-  `.so` 文件**，却因为常量池里有含 "so" 的字符串而报了 native 痕迹。
+  （`also`、`resolve`、`socket`…）。基线测量中 vanilla 1.20.4 的 22597 个条目里**没有任何 `.so` 文件**，
+  却因常量池含 "so" 子串而误报 native 痕迹。
   库文件只看 **jar 条目名**；常量池里只搜 `System.loadLibrary` 这类方法调用。
 - **Minecraft 自己的资源格式要进白名单**：`.nbt`（结构文件）、`.dat`、`.snbt`
   不在「常规条目扩展名」表里时，会被判成 Scuti / ClassGuard 风格的加密类 ——
-  实测 vanilla 一次报了 10 个 `data/minecraft/structures/.../*.nbt`。
+  基线测量中 vanilla 一次报了 10 个 `data/minecraft/structures/.../*.nbt`。
 - **控制流指标要看命中占比，不能看有没有**。`deobf_scan.py` 的 JSON 字段
-  `backward_handlers` / `irreducible_gotos` 是二值指纹，但**实测 ZKM 27 的
-  `backward_handlers` 恒为 0** —— 它用 goto 洪水（13.9% vs vanilla 1.34%）而不是
+  `backward_handlers` / `irreducible_gotos` 是二值指纹，但**ZKM 27 的 `backward_handlers` 恒为 0（基线测量）** —— 它用 goto 洪水（13.9% vs vanilla 1.34%）而不是
   异常表后跳。别把「公开分析里的 4265 处后跳」当成 ZKM 的通用特征。
   另外 `fake-sourcefile` 和 `overload-collision` 在 vanilla 上分别是 100% 和 34%，
   在 ZKM 样本上只有 0.1% 和 3.7% —— **方向是反的**，只能报告不能当证据。
@@ -329,7 +328,7 @@ p/Q:method:(...)V····       ← 4 个空格 = 静态字段读
   某些名字在 Windows 上甚至无法解压；Caesium 往字符串里塞 HTML 片段，专门破坏会解析 HTML 的逆向工具；
   还有构造非法字节码让工具崩溃的。**遇到「工具莫名崩溃 / 解压失败」，先怀疑目标在对抗工具，而不是工具坏了。**
 - **检测工具自己也会误报，阈值救不了你**：子串匹配是最容易踩的坑 —— 拿 `.so` 在常量池里搜会命中
-  `also` / `resolve` / `socket`，实测 vanilla 1.20.4 的 22597 个条目里 0 个 `.so` 文件却报了 native。
+  `also` / `resolve` / `socket`，基线测量中 vanilla 1.20.4 的 22597 个条目里 0 个 `.so` 文件却报了 native。
   库扩展名要看 **jar 条目名**，不要在常量池里搜。同理要把项目自己的资源格式（`.nbt` / `.dat` / `.snbt`）
   加进「已知条目」白名单，否则 Minecraft 的结构文件会被当成加密类（一次报了 10 个）。
   任何启发式都该先在**未混淆的真实目标**上跑一遍确认零误报，再拿去用。

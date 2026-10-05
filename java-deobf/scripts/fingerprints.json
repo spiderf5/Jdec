@@ -1,56 +1,294 @@
 {
   "version": 1,
   "_comment": "混淆器指纹库与检测阈值。改这个文件就能扩展检测能力与调参，不需要动 Python 代码。改完直接重跑 deobf_scan.py 生效。keywords 匹配的是 jar 内条目名与 class 常量池字符串（已转小写比较）。",
-
   "obfuscators": [
-    { "name": "Allatori", "keywords": ["allatori"], "tool": "java-deobfuscator" },
-    { "name": "Zelix KlassMaster (ZKM)", "keywords": ["zelix", "zkm", "klassmaster"],
-      "tool": "Threadtear / java-deobfuscator（ZKM 27 起带 flow / indy 混淆，需专门的 transformer）" },
-    { "name": "ZKM 27 enhanced 字符串加密（DES）",
-      "keywords": ["DES/CBC/PKCS5Padding", "DESKeySpec", "javax/crypto/spec/IvParameterSpec"],
-      "tool": "java-deobfuscator 的 zelix.StringEncryptionTransformer（执行引擎；key 藏在多层常量折叠 + indy 里，手写 DES 还原成本过高）" },
-    { "name": "JNIC",
-      "keywords": ["jnic", "dev/jnic"],
-      "tool": "商业 native 虚拟化壳：选定方法体迁入随附 DLL，字节码层只剩声明（jdec 判 native/virtualised）。常与 ZKM 链式出现（重打包链顶层包名可能直接叫 NewZKMJNIC，实证 EdNaven 3.4 / sayori_auth_native.dll，711 native 方法/37 类）。静态反编译只能还原 Java 层，native 方法体需 IDA/Ghidra 或运行时捕获" },
-    { "name": "Stringer", "keywords": ["stringer"], "tool": "Threadtear / java-deobfuscator" },
-    { "name": "DashO", "keywords": ["dasho", "preemptive"], "tool": "java-deobfuscator" },
-    { "name": "ProGuard / R8", "keywords": ["proguard", "android/tools/r8"], "tool": "官方 retrace / 重映射" },
-    { "name": "DexGuard", "keywords": ["dexguard"], "tool": "java-deobfuscator" },
-    { "name": "ClassGuard", "keywords": ["classguard"], "tool": "java-deobfuscator（类加密，AES 密钥常在 native 库里）" },
-    { "name": "Smoke", "keywords": ["smoke"], "tool": "java-deobfuscator" },
-    { "name": "SkidSuite2", "keywords": ["skidsuite"], "tool": "java-deobfuscator" },
-    { "name": "Radon", "keywords": ["radon"], "tool": "java-deobfuscator / narumii（部分）" },
-    { "name": "Obzcure", "keywords": ["obzcure", "spigotprotect"], "tool": "java-deobfuscator" },
-    { "name": "superblaubeere27 / JObf", "keywords": ["superblaubeere", "sb27"], "tool": "narumii Deobfuscator" },
-    { "name": "Paramorphism", "keywords": ["paramorphism"], "tool": "narumii Deobfuscator（会利用 jar 重复条目与假目录）" },
-    { "name": "Caesium", "keywords": ["caesium"], "tool": "narumii Deobfuscator（带 HTML 注入，注意工具解析风险）" },
-    { "name": "Skid / qProtect", "keywords": ["qprotect"], "tool": "narumii（非最新版）" },
-    { "name": "Scuti", "keywords": ["scuti"], "tool": "narumii Deobfuscator（会把类打包成 XOR 加密的 blob）" },
-    { "name": "HsGuard", "keywords": ["hsguard"], "tool": "narumii Deobfuscator" },
-    { "name": "CheatBreaker", "keywords": ["cheatbreaker"], "tool": "narumii Deobfuscator" },
-    { "name": "Bozar", "keywords": ["bozar"], "tool": "narumii Deobfuscator" },
-    { "name": "Monsey", "keywords": ["monsey"], "tool": "narumii Deobfuscator" },
-    { "name": "RakSzild", "keywords": ["rakszild"], "tool": "narumii Deobfuscator" },
-    { "name": "HP888", "keywords": ["hp888"], "tool": "narumii Deobfuscator" },
-    { "name": "Skidfuscator", "keywords": ["skidfuscator"], "tool": "narumii（部分）；三代控制流混淆较难" },
-    { "name": "Branchlock", "keywords": ["branchlock"], "tool": "narumii（部分）" },
-    { "name": "Eskid", "keywords": ["eskid"], "tool": "Ackerun 的 Eskid transformer" },
-    { "name": "Binsecure", "keywords": ["binsecure"], "tool": "narumii（部分）" },
-    { "name": "Colonial", "keywords": ["colonial"], "tool": "narumii（部分）" },
-    { "name": "Sentinel", "keywords": ["sentinel"], "tool": "无公开 transformer，需手工分析" },
-    { "name": "XenonGuard", "keywords": ["xenonguard"], "tool": "无公开 transformer（基于 CheatBreaker，可先试 CheatBreaker transformer）" },
-    { "name": "Grunt", "keywords": ["grunt"], "tool": "手工分析（常带 mixin / Forge 模组结构）" },
-    { "name": "MyJ2C", "keywords": ["myj2c"], "tool": "Allatori 系 transformer 部分可用" },
-    { "name": "Phantom Shield X", "keywords": ["phantomshield", "fl0wowp4rty"],
-      "tool": "无公开 transformer；Java 侧只能还原到 loader 边界，native 部分需配合 IDA / Ghidra" }
+    {
+      "name": "Allatori",
+      "keywords": [
+        "allatori"
+      ],
+      "tool": "java-deobfuscator"
+    },
+    {
+      "name": "Zelix KlassMaster (ZKM)",
+      "keywords": [
+        "zelix",
+        "zkm",
+        "klassmaster"
+      ],
+      "tool": "Threadtear / java-deobfuscator（ZKM 27 起带 flow / indy 混淆，需专门的 transformer）"
+    },
+    {
+      "name": "ZKM 27 enhanced 字符串加密（DES）",
+      "keywords": [
+        "DES/CBC/PKCS5Padding",
+        "DESKeySpec",
+        "javax/crypto/spec/IvParameterSpec"
+      ],
+      "tool": "java-deobfuscator 的 zelix.StringEncryptionTransformer（执行引擎；key 藏在多层常量折叠 + indy 里，手写 DES 还原成本过高）"
+    },
+    {
+      "name": "JNIC",
+      "keywords": [
+        "jnic",
+        "dev/jnic"
+      ],
+      "tool": "商业 native 虚拟化壳：选定方法体迁入随附 DLL，字节码层只剩声明（jdec 判 native/virtualised）。常与 ZKM 链式出现（重打包链顶层包名可能直接叫 NewZKMJNIC，已在真实制品验证，711 native 方法/37 类）。静态反编译只能还原 Java 层，native 方法体需 IDA/Ghidra 或运行时捕获"
+    },
+    {
+      "name": "Stringer",
+      "keywords": [
+        "stringer"
+      ],
+      "tool": "Threadtear / java-deobfuscator"
+    },
+    {
+      "name": "DashO",
+      "keywords": [
+        "dasho",
+        "preemptive"
+      ],
+      "tool": "java-deobfuscator"
+    },
+    {
+      "name": "ProGuard / R8",
+      "keywords": [
+        "proguard",
+        "android/tools/r8"
+      ],
+      "tool": "官方 retrace / 重映射"
+    },
+    {
+      "name": "DexGuard",
+      "keywords": [
+        "dexguard"
+      ],
+      "tool": "java-deobfuscator"
+    },
+    {
+      "name": "ClassGuard",
+      "keywords": [
+        "classguard"
+      ],
+      "tool": "java-deobfuscator（类加密，AES 密钥常在 native 库里）"
+    },
+    {
+      "name": "Smoke",
+      "keywords": [
+        "smoke"
+      ],
+      "tool": "java-deobfuscator"
+    },
+    {
+      "name": "SkidSuite2",
+      "keywords": [
+        "skidsuite"
+      ],
+      "tool": "java-deobfuscator"
+    },
+    {
+      "name": "Radon",
+      "keywords": [
+        "radon"
+      ],
+      "tool": "java-deobfuscator / narumii（部分）"
+    },
+    {
+      "name": "Obzcure",
+      "keywords": [
+        "obzcure",
+        "spigotprotect"
+      ],
+      "tool": "java-deobfuscator"
+    },
+    {
+      "name": "superblaubeere27 / JObf",
+      "keywords": [
+        "superblaubeere",
+        "sb27"
+      ],
+      "tool": "narumii Deobfuscator"
+    },
+    {
+      "name": "Paramorphism",
+      "keywords": [
+        "paramorphism"
+      ],
+      "tool": "narumii Deobfuscator（会利用 jar 重复条目与假目录）"
+    },
+    {
+      "name": "Caesium",
+      "keywords": [
+        "caesium"
+      ],
+      "tool": "narumii Deobfuscator（带 HTML 注入，注意工具解析风险）"
+    },
+    {
+      "name": "Skid / qProtect",
+      "keywords": [
+        "qprotect"
+      ],
+      "tool": "narumii（非最新版）"
+    },
+    {
+      "name": "Scuti",
+      "keywords": [
+        "scuti"
+      ],
+      "tool": "narumii Deobfuscator（会把类打包成 XOR 加密的 blob）"
+    },
+    {
+      "name": "HsGuard",
+      "keywords": [
+        "hsguard"
+      ],
+      "tool": "narumii Deobfuscator"
+    },
+    {
+      "name": "CheatBreaker",
+      "keywords": [
+        "cheatbreaker"
+      ],
+      "tool": "narumii Deobfuscator"
+    },
+    {
+      "name": "Bozar",
+      "keywords": [
+        "bozar"
+      ],
+      "tool": "narumii Deobfuscator"
+    },
+    {
+      "name": "Monsey",
+      "keywords": [
+        "monsey"
+      ],
+      "tool": "narumii Deobfuscator"
+    },
+    {
+      "name": "RakSzild",
+      "keywords": [
+        "rakszild"
+      ],
+      "tool": "narumii Deobfuscator"
+    },
+    {
+      "name": "HP888",
+      "keywords": [
+        "hp888"
+      ],
+      "tool": "narumii Deobfuscator"
+    },
+    {
+      "name": "Skidfuscator",
+      "keywords": [
+        "skidfuscator"
+      ],
+      "tool": "narumii（部分）；三代控制流混淆较难"
+    },
+    {
+      "name": "Branchlock",
+      "keywords": [
+        "branchlock"
+      ],
+      "tool": "narumii（部分）"
+    },
+    {
+      "name": "Eskid",
+      "keywords": [
+        "eskid"
+      ],
+      "tool": "Ackerun 的 Eskid transformer"
+    },
+    {
+      "name": "Binsecure",
+      "keywords": [
+        "binsecure"
+      ],
+      "tool": "narumii（部分）"
+    },
+    {
+      "name": "Colonial",
+      "keywords": [
+        "colonial"
+      ],
+      "tool": "narumii（部分）"
+    },
+    {
+      "name": "Sentinel",
+      "keywords": [
+        "sentinel"
+      ],
+      "tool": "无公开 transformer，需手工分析"
+    },
+    {
+      "name": "XenonGuard",
+      "keywords": [
+        "xenonguard"
+      ],
+      "tool": "无公开 transformer（基于 CheatBreaker，可先试 CheatBreaker transformer）"
+    },
+    {
+      "name": "Grunt",
+      "keywords": [
+        "grunt"
+      ],
+      "tool": "手工分析（常带 mixin / Forge 模组结构）"
+    },
+    {
+      "name": "MyJ2C",
+      "keywords": [
+        "myj2c"
+      ],
+      "tool": "Allatori 系 transformer 部分可用"
+    },
+    {
+      "name": "Phantom Shield X",
+      "keywords": [
+        "phantomshield",
+        "fl0wowp4rty",
+        "tech/skidonion"
+      ],
+      "tool": "Transformer 套件：NativeObfuscation=字节码直译 C 源码（开源 JNIC 同族，MethodProcessor 16 类 handler，runtime 预编译包放 \\bin）+ jphantom(org.clyze) 类型欺骗 + 单参访问器字符串池 (C)Ljava/lang/Object;。验证服务端开源（DH+ChaCha20+Ed25519+HWID）。Java 侧还原到 loader 边界，native 需 IDA/Ghidra——源码级验证 study/OpenPhantomShield"
+    },
+    {
+      "name": "BytecodeVM",
+      "keywords": [
+        "nhcm/bytecodevm",
+        "$CodePool"
+      ],
+      "tool": "纯字节码 VM 虚拟化器（VM 用 Java 字节码写，无 native；17 种结构 SIMPLE_DISPATCH..REGISTER_BASED，随机 opcode 映射+操作数加密+super instruction+integrity VM）。probe 有专用水印扫描器：常量池 Long 0x42564D57434F4445(\"BVMWCODE\")+AES-GCM 胶囊（key 随密文自包含，静态可解，jdec/bvmw.py 纯 stdlib 解码出 owner/artifactId/时间戳）——源码级验证 study/BytecodeVM SDK。jar 里有 nhcm/bytecodevm SDK 注解类（Virtualize/DoNotVirtualize，CLASS retention，可能被 SdkAnnotationRemover 剥掉）或非重命名模式的 $CodePool 分块类"
+    },
+    {
+      "name": "native-obfuscator (radioegor146)",
+      "keywords": [
+        "by/radioegor146",
+        "nativeobfuscator/Native"
+      ],
+      "tool": "字节码→C(JNI) 鼻祖，GPL-3.0。方法体迁入生成的 C++ + 每类 Loader，Java 层剩 native 声明；SDK 注解 @Native/@NotNative（by.radioegor146.nativeobfuscator 包，可能残留）。MyJ2C 未经许可大量复用其代码；ghidra 侧可按其 C 模板识别翻译函数"
+    }
   ],
-
-  "html_markers": ["<html", "<font", "<b>", "<img ", "&lt;html"],
-
-  "normal_bootstrap": ["LambdaMetafactory", "StringConcatFactory", "ObjectMethods", "RecordBootstrap", "SwitchBootstraps"],
-
-  "native_lib_exts": [".dll", ".so", ".dylib", ".lib", ".jnilib"],
-
+  "html_markers": [
+    "<html",
+    "<font",
+    "<b>",
+    "<img ",
+    "&lt;html"
+  ],
+  "normal_bootstrap": [
+    "LambdaMetafactory",
+    "StringConcatFactory",
+    "ObjectMethods",
+    "RecordBootstrap",
+    "SwitchBootstraps"
+  ],
+  "native_lib_exts": [
+    ".dll",
+    ".so",
+    ".dylib",
+    ".lib",
+    ".jnilib"
+  ],
   "thresholds": {
     "_comment": "全部是可调参数。flow 相关阈值强烈建议按自己的项目校准：拿一份同项目未混淆的 jar 跑一遍，看基线值再调。",
     "min_instructions_for_flow_check": 200,

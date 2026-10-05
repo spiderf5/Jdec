@@ -1,245 +1,190 @@
-\---  
+---
 name: java-deobf
-  
-
-  
-description: 面向混淆 Java（含 Minecraft 客户端与 Forge / Fabric 模组）的反编译、反混淆与行为分析工作流，主力工具是 jdec（多引擎反编译驱动，位于 D:\MC\Workbuddy\deobf\jdec）。覆盖：混淆度探测与混淆器识别（ZKM / Allatori / Stringer / DashO / superblaubeere27 / JObf / JNIC 等）、Mojang / Yarn / MCP 映射反混淆、Mixin hook 提取与 refmap 还原、indy 调用目标解码、字符串情报导出、native / 虚拟化保护判定、运行时捕获（agent 桩化 / dump）。凡用户提到反编译 / decompile、反混淆 / deobfuscate / deobf、逆向工程 / reverse engineering、混淆的 jar / class / 字节码、还原类名方法名、字符串解密、MC 客户端或模组分析、外挂 / 作弊客户端 / 可疑 jar 分析，或丢来一个 jar 问"这里面是什么 / 它想干什么"，都使用本 skill；也覆盖 jdec 本身的开发、测试与 bug 修复。普通后端业务代码的编写与调试不在此列。  
-\---
+description: 面向混淆 Java（含 Minecraft 客户端与 Forge / Fabric 模组）的反编译、反混淆与行为分析工作流，主力工具是 jdec（多引擎反编译驱动）。覆盖：混淆度探测与混淆器识别（ZKM / Allatori / Stringer / DashO / superblaubeere27 / JObf / JNIC 等）、Mojang / Yarn / MCP 映射反混淆、Mixin hook 提取与 refmap 还原、indy 调用目标解码、字符串加密的静态与动态还原、native / 虚拟化保护判定、运行时捕获（agent 桩化 / payload dump）。凡用户提到反编译 / decompile、反混淆 / deobfuscate / deobf、逆向工程 / reverse engineering、混淆的 jar / class / 字节码、还原类名方法名、字符串解密、MC 客户端或模组分析、可疑 jar 分析，或丢来一个 jar 问"这里面是什么 / 它想干什么"，都使用本 skill；也覆盖 jdec 本身的开发、测试与 bug 修复。普通后端业务代码的编写与调试不在此列。
+---
 
 # java-deobf
 
-## 定位
+## 1. 定位与范围
 
-把混淆过的 Java 还原到**读得懂、可验证**的形态，并回答"它想干什么"。
+本 skill 处理两类问题：
 
-主力工具是 jdec（多引擎反编译驱动，位于 `D:\MC\Workbuddy\deobf\jdec\`）：
-  
-多引擎择优、MC 反混淆、混淆器归因、Mixin 分析、字符串导出、native 判定
-  
-都已做成代码。本 skill 负责
-  
-**流程编排、判定纪律，以及 jdec 覆盖不了的部分**（无 jdec 环境的降级路径、
-  
-运行时捕获、知识沉淀）。工具用法细节读
-  
-`D:\MC\Workbuddy\deobf\jdec\README.md`，不在这里重复。
+1. **还原**：把经混淆器处理的 Java 字节码恢复到可读、可编译、行为等价的形态；
+2. **定性**：回答"这个 jar 是什么、改了系统的哪些行为、有哪些外部通信面"。
 
-本 skill 是用户级安装，任何工作区都可能触发。runbook 里的命令默认在
-  
-`D:\MC\Workbuddy\deobf` 下执行，其他工作区先 `cd` 过去再用；jdec 不可用时
-  
-（别的机器、路径被移走）才走降级路径。本文中的 `scripts/`、`references/`、
-  
-`assets/` 一律指本 skill 目录下的文件（加载本 skill 时会给出 base
-  
-directory），不是当前工作区的。
+主力工具 jdec（多引擎反编译驱动：CFR / Vineflower / Procyon 择优、映射反混淆、
+混淆器指纹归因、Mixin 分析、字符串导出、native 分诊、运行时捕获）。本 skill
+提供流程编排、判定准则与 jdec 未覆盖的降级路径；工具的命令行细节见 jdec 的
+`README.md`。
 
-## 铁律
+约定：正文中的 `scripts/`、`references/`、`assets/` 均指本 skill 目录内的
+文件（加载时给出 base directory）。runbook 命令默认在 jdec 所在的工作区根
+目录执行；jdec 不可用时才走第 7 节的降级路径。
 
-1. **只分析有权分析的代码**——自有项目、已授权的研究或学习。对方明确禁止时停止。
-2. **动手前先备份原始 jar**。重命名与字节码打补丁基本不可逆。
-3. **先探测再动手**。`jdec probe` 或 `deobf_scan.py` 拿到混淆度、版本与指纹，
-     
-   不凭文件名或包名猜混淆器——ZKM 这类纯字节码变换的工具不留任何运行时痕迹，
-     
-   包名认混淆器只对一半工具有效。
-4. **结论必须有证据**（真实命令输出）。"跑通不等于完成"：判定类逻辑改完必须用
-     
-   **真实样本回归**——fixture 会骗人，javac 会把你想造的特征优化掉（if 链折叠成
-     
-   switch，造不出 goto 洪水）。
-5. **最小 diff**。修 jdec 本身不顺手重构；还原命名必须有证据（注解明文、
-     
-   行为对应），拿不准的保留原名加注释，不造没有依据的名字。
-6. **交付标准**：可重新编译 + 行为与原始一致。**读得懂不等于还原正确**。
-7. **敏感信息只定性不外传**：分析中发现的 URL、凭据、机器码，报告里说明
-     
-   存在与用途即可，不原样扩散。
-8. **沉淀**：本次新验证的结论回写 `fingerprints.json` / `references/`
-     
-   （工作区如有长期记忆文件也同步）。只写验证过的，不写猜测；不删旧条目，
-     
-   除非确认是错的并注明证据。改完指纹库跑 `self_test.py` 验证。
-9. **失败清单必须逐类归因分桶，禁止统一叙事**。把一批失败一句"结构性边界"
-     
-   带过 = 把可修的混进不可修的（lf21 实测：11 个失败类里 4 个是 classpath
-     
-   错杀，一条 triage 就能救回来）。recover 跑完先读 `failed_triage.md`
-     
-   （八桶归因 + 每桶处置建议）；手写报告时逐条回答"为什么败、能不能救、
-     
-   值不值得救"。
+## 2. 方法论原则
 
-## 第一性原理（思考纪律）
+以下原则从反复出现的失败模式中归纳，效力等同操作规程。
 
-形态识别、工具、runbook 都是**捷径，不是前提**。套路失效时回到问题的物理
-本质重新推导，往往比扩展工具便宜得多（Elowen 实证：三种已知字符串加密形态
-全不匹配，没有去给 jdec 加第四种模式，而是回到不变量推出 60 行 FieldDump）：
+**授权与安全**
 
-1. **字符串加密的核心不变量：解密是为了使用——明文必然在某个时刻以明文
-   形态存在于内存**（常量池、字段、数组、intern 表）。所以"盯着出口"
-   （运行时收割）永远可行；静态模拟只是省钱手段，不是唯一路径。
-2. **字节码是事实标准**。反编译输出全是近似；验证、评分、回填对账都以
-   字节码为准，不做行数与文本猜测。
-3. **混淆改不了两类东西**：注解里的常量、对 JDK/游戏 API 的调用点——
-   分析优先打这里，比硬啃密文便宜。
-4. **环境是物理前提**：JVM 版本（class v69 必须 JDK 25）、依赖 jar、
-   路径转换，任何一项错 = 结果全假或全空。先验环境再怀疑工具（365 假
-   CNFE 的根因是 MSYS 搅 classpath，不是类真不存在）。
-5. **先问"数据此刻在哪、以什么形态存在"，再选手段**。摸不清形态就先
-   probe/indy 普查/small sample，看清解密产物落在哪，收割方法自然浮出。
+1. 仅分析有明确授权的代码；权利方禁止时停止。
+2. 动手前备份原始制品。重命名与字节码改写基本不可逆。
 
-## 实战 runbook
+**证据与验证**
 
-按成本从低到高走，前两步就能决定要不要继续投入：
+3. 先探测后动手：混淆器归因必须来自结构指纹而非文件名或包名——纯字节码
+   变换型混淆器（如 ZKM）不留运行时痕迹。
+4. 结论必须可复现（附真实命令输出）。判定类逻辑的修改必须经真实样本回归；
+   仅用 fixture 验证不可靠——编译器会优化掉人造特征（如 if 链折叠为
+   switch，无法构造 goto 洪水）。
+5. 跨实现交叉验证是校准翻译/解密类代码的首选手段：以被逆向实现自身
+   （或其衍生实现）的输出为真值，对拍逐字节比较。
+6. 交付标准：可重新编译且行为与原始一致。"可读"不是正确性的充分条件。
+
+**最小作用域**
+
+7. 修工具不做顺手重构。还原命名必须有证据（注解明文、行为对应）；无证据
+   时保留原名并加注释。
+
+**信息处置**
+
+8. 敏感信息（URL、凭据、机器码）只定性不扩散：报告说明存在与用途，不原样
+   复制。
+
+**知识沉淀**
+
+9. 新验证的结论回写指纹库与 references；只写验证过的，不写推测；不删除
+   既有条目，除非确认有误并附证据。修改指纹库后运行 `self_test.py`。
+
+**失败分析**
+
+10. 失败清单必须逐类归因分桶，禁止以单一叙事带过。经验上，报告为失败的
+    条目中相当比例（实践中常见 ~30%）属 classpath 组装错杀等可修复类，
+    统一叙事会把可救的与不可救的混在一起。
+
+## 3. 分析不变量
+
+形态识别、工具与流程都是捷径而非前提；套路失效时回到问题的物理本质重新
+推导。五条核心不变量：
+
+1. **解密的目的在于使用**——明文必然在某一时刻以明文形态存在于内存
+   （常量池、静态字段、数组、intern 表）。因此"在出口处收集"（运行时
+   捕获）总是可行；静态模拟只是降低成本的手段。
+2. **字节码是事实标准**。反编译输出是近似；验证、评分与回填对账一律以
+   字节码为准。
+3. **混淆不改变两类信息**：注解中的常量、对 JDK / 平台 API 的调用点。
+   分析优先覆盖这两类。
+4. **环境是前提**：class 文件版本（v69 需 JDK 25）、依赖库、路径转换，
+   任何一项错误都会使结果全假或全空。先验证环境，再怀疑工具。
+5. **先确定"数据此刻在哪、以什么形态存在"，再选择手段**。形态不明时先做
+   探测与普查，观察解密产物落在哪个存储，收集方案自然浮现。
+
+## 4. 分析管线
+
+按成本递增排序；前两步通常足以决定投入策略。
 
 ```bash
-# 0. 环境（一次）：JDK 9+（Zulu 21 已验证），引擎 jar 自动从 Maven Central 下载
+# 环境（一次）：JDK 9+，反编译引擎自动从 Maven Central 获取
 python jdec.py engines
 ```
 
-### 1. probe — 先看对面是什么
+### 4.1 probe — 指纹与画像
 
 ```bash
 python jdec.py probe X.jar
 ```
 
-混淆度评分、MC 版本、结构指纹采样、native 方法数。产出决定后续投入与预期：
-  
-native 密集意味着部分代码不在字节码里，任何反编译器都还原不出来。
+产出：混淆度评分、目标平台版本、结构指纹采样、native 方法计数。
+native 方法密集意味着部分逻辑不在字节码内，任何反编译器都无法直接还原。
 
-### 2. strings — 最便宜的情报
+### 4.2 strings — 低成本情报面
 
 ```bash
-python jdec.py strings X.jar -o out --suspicious   # 只留 url/ip/路径/凭据/命令/机器码
+python jdec.py strings X.jar -o out --suspicious   # URL/IP/路径/凭据/命令/机器码
 python jdec.py strings X.jar -o out --grep 关键词
 ```
 
-程序总得和外界说话——URL、写的文件、执行的命令、校验的 token 在常量池里，
-  
-**混淆器改不掉**。不用执行、不用改写，扫一遍就出结果。
+外部通信面（URL、写盘路径、执行的命令、校验 token）位于常量池，混淆不
+改变其存在性；无需执行即可采集。
 
-### 3. analyze — 它改了游戏哪里
+### 4.3 analyze — 行为面
 
 ```bash
-python jdec.py analyze X.jar -o out --mc-version 1.20.4
+python jdec.py analyze X.jar -o out --mc-version <ver>
 ```
 
-Mixin hook 清单（目标自动过映射翻译，`brc` → `CreeperEntity`）+ 行为信号
-  
-（JNI / 网络 / 加密 / 反调试 / 机器指纹）。**注解里的目标是常量池常量，
-  
-混淆改不了**——这是分析比反编译更稳的原因。Fabric refmap 会先于 MC 映射还原
-  
-（顺序反了没有任何映射认识 `method_1234`）。
+Mixin hook 清单（目标经映射翻译）+ 行为信号（JNI / 网络 / 加密 / 反调试 /
+机器指纹）。注解中的 hook 目标是常量池常量，混淆不改写——这是行为面分析
+比源码还原更稳定的原因。Fabric refmap 必须先于 MC 映射还原，顺序颠倒时
+任何映射都无法识别 `method_NNNN` 形态的中间名。
 
-### 4. decompile — 源码与逐类评分
+### 4.4 decompile — 源码与逐类评分
 
 ```bash
 python jdec.py decompile X.jar -o out --verify-all
 ```
 
-两趟多引擎择优（CFR / Vineflower / Procyon），以**字节码为标准答案**逐类打分，
-  
-不做行数猜测。产出 `src/`、`report.md`（哪些类没还原干净）、`report.json`
-  
-（含每类的 `rel` 输出路径——大小写孪生类的路径经百分号编码，不等于类名，
-  
-从这里反查）。native 方法单列，不计入还原失败。
+两趟多引擎择优，以字节码为基准逐类评分。产物：`src/`、`report.md`（未
+还原干净的类）、`report.json`（含每类 `rel` 输出路径——大小写冲突类的路径
+经百分号编码，与类名不同，需由此反查）。native 方法单列，不计入还原失败。
 
-### 5. 深挖（按需，先读对应 reference 再动手）
+### 4.5 深挖（按需；先读对应 reference）
 
-| 症状                                           | 去处                                                                                                                                     |         |                                                                                                                                        |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| 混淆器归因存疑、想看工具链与映射体系                           | `references/java-deobf.md`                                                                                                             |         |                                                                                                                                        |
-| 控制流混淆（goto 洪水、不可归约循环）指标怎么读                   | `references/control-flow.md`                                                                                                           |         |                                                                                                                                        |
-| 字符串加密：静态还原三层不划算时改走运行时出口                      | `references/string-encryption.md`                                                                                                      |         |                                                                                                                                        |
-| 毒类（静默退出 / native 崩）、agent 桩化、运行时 dump        | `references/dynamic-analysis.md`                                                                                                       |         |                                                                                                                                        |
-| indy 编码调用图 / 字符串解密                           | `python jdec.py indy X.jar` 普查站点；`references/string-encryption.md` 的自洽重放节                                                              |         |                                                                                                                                        |
-| 字符串解密**回填源码**（零残留可读源码）                       | `python jdec.py recover X.jar --output out/recover --rewrite-src out/src --timeout 7200`；用法与两大坑见 `references/string-encryption.md` 回填节 |         |                                                                                                                                        |
-| 字符串加密是**池形态（无 indy）**：`Cls.a(idx, seed)` 访问器 | \`python jdec.py pool scan                                                                                                             | harvest | apply`：扫调用点 → JVM 反射重放（真类加载触发 clinit）→ \u 转义回填 + verify + 失败八桶归因；classpath 组装与 lwjgl 取舍见 `references/string-encryption.md\` 池 replay 节 |
-| native 方法体在 DLL 里（native/virtualised）        | `python jdec.py natives X.jar -o out`：提取库 + PE 导出表 + 给 Ghidra 分析师的任务清单                                                                 |         |                                                                                                                                        |
+| 症状 | 去处 |
+|---|---|
+| 混淆器归因存疑；工具链与映射体系 | `references/java-deobf.md` |
+| 控制流混淆指标的解读与阈值 | `references/control-flow.md` |
+| 字符串加密：形态识别与还原路线 | `references/string-encryption.md` |
+| 毒类、agent 桩化、运行时 dump、Frida 捕获 | `references/dynamic-analysis.md` |
+| indy 调用目标普查 | `python jdec.py indy X.jar`；`references/string-encryption.md` |
+| 字符串解密回填源码（零残留） | `python jdec.py recover X.jar --output out/recover --rewrite-src out/src` |
+| 访问器池形态：`Cls.a(idx, seed)` | `python jdec.py pool scan\|harvest\|apply` |
+| 单参池形态：`(C)Ljava/lang/Object;` | `python jdec.py opspool X.jar`（纯静态 DES 解密） |
+| native 方法体在 PE/ELF 内 | `python jdec.py natives X.jar -o out`；裸 DLL 可直接作为输入 |
+| dumped 库的结构化查询 | `python jdec.py nativedb <lib> --build <dir>`；`nativedb <dir> --search <kw>` |
+| BytecodeVM 类虚拟化器的程序提取 | `jdec/bvmw_devirt.py`（原型） |
 
-运行时捕获的核心思路：**让混淆器自己解密，我们只盯着出口**。优先级是
-  
-零环境的纯重放 → 字节码手术 agent → 真实环境倾倒；真环境里授权校验必须
-  
-真过，桩化 agent 反而会坏事。
+### 4.6 收尾核查
 
-### 6. 收尾自查（六问，全过才算收工）
+1. 失败清单是否已按桶归因，并逐桶回答"成因 / 可否修复 / 是否值得修复"；
+2. MANIFEST / 模块描述符元数据是否已并入定性结论（vendor、Premain 声明、
+   标识符异常）；
+3. 回填字面量是否全部转义（产出树中裸控制字节计数应为 0；统计与检索
+   需按二进制安全方式进行，否则对账数字静默漏计）；
+4. 是否产出 scorecard 并与上一轮对比（无法回答"比上轮好多少"即未完成）；
+5. 新结论是否已按第 2 节第 9 条沉淀；
+6. 报告对未解部分给出的是分桶证据还是统一叙事。
 
-1. **失败清单归因了吗**？recover/pool 跑完先读 `failed_triage.md` 八桶，
-     
-   逐桶回答"能不能救、值不值得救"——禁止一句"结构性边界"带过（铁律 9）。
-2. **MANIFEST / mods.toml 元数据收进报告了吗**？analyze 已自动采集
-     
-   manifest 与资源清单，但 vendor、Premain 双声明、标识符异常这类
-     
-   硬情报要人工写进定性结论。
-3. **回填字面量全转义了吗**？产出树里裸控制字节应为 0（统计与 grep
-     
-   一律加 `-a`），否则对账数字会静默漏计。
-4. **scorecard 出了吗**？`python jdec.py scorecard <样本目录> -o
-   out/sc.json --compare out/上一次.json`——答不出"比上次好多少"就
-     
-   不算完成一轮迭代。
-5. **新结论沉淀了吗**（铁律 8）：指纹进 `fingerprints.json`、方法论进
-     
-   `references/`，项目/用户级双写同步。
-6. **报告里对未解部分给的是分桶证据还是统一叙事**？收尾时自查一遍措辞。
+### 4.7 沉淀
 
-### 7. 沉淀
+识别新混淆器：向 `scripts/fingerprints.json` 的 `obfuscators` 追加
+`name` / `keywords` / `tool`，运行 `scripts/self_test.py` 验证。控制流
+阈值与目标生态相关，应以同源未混淆制品建立基线后再调整。
 
-按铁律 8 执行。识别到新混淆器：往 `scripts/fingerprints.json` 的
-  
-`obfuscators` 加 `name` / `keywords` / `tool`，然后
-  
-`python scripts/self_test.py <刚扫的目标>` 验证；控制流阈值因项目而异，
-  
-拿同源未混淆 jar 跑出基线再调。
-
-## 无 jdec 时的降级路径
+## 5. 无 jdec 时的降级路径
 
 ```bash
 python scripts/deobf_scan.py <jar/class/目录> --text
 ```
 
-只解析 class 结构与 jar 目录，不执行目标代码：命名可疑比例、字符串加密迹象、
-  
-混淆器线索、native 方法、jar 结构异常、反射与动态调用特征，附推荐工具链。
-  
-之后按 `references/java-deobf.md`：java-deobfuscator（Allatori / Stringer /
-  
-ZKM / DashO 系）、narumii-Deobfuscator（superblaubeere27 / Paramorphism /
-  
-Caesium 系）、Threadtear；Vineflower 出源码、CFR 交叉验证可疑段落、
-  
-反编译器全崩时用 Krakatau 看指令、Recaf 看字节码结构后自写 transformer。
-  
-字符串加密先定位解密方法再批量还原，不要手工一个个解。
+仅解析 class 结构与 jar 目录，不执行目标代码：命名可疑度、字符串加密
+迹象、混淆器线索、native 方法、结构异常、反射与动态调用特征，并给出
+推荐工具链。开源工具链选择见 `references/java-deobf.md`；原则：字符串
+加密先定位解密方法再批量还原，不做逐串手工解密。
 
-## 修 jdec 本身
+## 6. jdec 的维护
 
-- 唯一校验命令：`python tests/run_tests.py`（2026-10-04 深挖后基线 164 项；
-    
-  `--with-mc` 更全，真实样本外置于 `D:/MC/samples/`，缺失自动跳过）。
-- 自动探测工具识别不出这个项目（无标准标记文件），校验直接用上面的命令。
-- 修 bug 三步：先复现（失败测试或命令）→ 最小修复 → **真实样本回归**。
-    
-  位置配对类并发 bug fixture 抓不住（单类桶完成顺序碰巧一致）。
-- 改 `classfile.py` 后必跑 round-trip 断言：parse→serialize 字节级一致，
-    
-  否则重映射会静默损坏每个类。
-- fixture jar 由 `python tests/build_fixtures.py` 用 javac 编出；跑测试时
-    
-  jar 缺失会自动构建，构建不了就跳过而不是判失败。
+- 校验命令唯一：`python tests/run_tests.py`（基线随功能演进由运行器
+  打印；`--with-mc` 含真实样本用例，样本缺失自动跳过）。
+- 缺陷修复流程：复现（失败测试或命令）→ 最小修复 → 真实样本回归。
+  位置/配对类并发缺陷 fixture 可能无法捕获（单桶完成顺序恰好一致）。
+- 修改 `classfile.py` 后必须运行 round-trip 断言：parse→serialize 字节级
+  一致，否则重映射会静默损坏所有类。
+- fixture jar 由 `tests/build_fixtures.py` 经 javac 构建；缺失时自动
+  构建，构建失败跳过该组测试而非计为失败。
 
-## 变更报告
+## 7. 变更报告
 
-改动 jdec 或本 skill 后，按 `assets/change-report-template.md` 生成
-  
-`change-report.md`（jdec 的报告文件，历次报告追加式），行数统计用
-  
-`scripts/diff_summary.py`。报告必须包含：任务目标、文件级变更、每处改动
-  
-的理由、执行的命令与结果、修复轮次、遗留风险、回滚方式。
+修改 jdec 或本 skill 后，按 `assets/change-report-template.md` 生成
+`change-report.md`（追加式）。内容必须包含：任务目标、文件级变更、每处
+修改的理由、执行的命令与结果、修复轮次、遗留风险、回滚方式。

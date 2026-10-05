@@ -33,7 +33,7 @@
         "jnic",
         "dev/jnic"
       ],
-      "tool": "商业 native 虚拟化壳：选定方法体迁入随附 DLL，字节码层只剩声明（jdec 判 native/virtualised）。常与 ZKM 链式出现（重打包链顶层包名可能直接叫 NewZKMJNIC，实证 EdNaven 3.4 / sayori_auth_native.dll，711 native 方法/37 类）。静态反编译只能还原 Java 层，native 方法体需 IDA/Ghidra 或运行时捕获"
+      "tool": "商业 native 虚拟化壳：选定方法体迁入随附 DLL，字节码层只剩声明（jdec 判 native/virtualised）。常与 ZKM 链式出现（重打包链顶层包名可能直接叫 NewZKMJNIC，已在真实制品验证，711 native 方法/37 类）。静态反编译只能还原 Java 层，native 方法体需 IDA/Ghidra 或运行时捕获"
     },
     {
       "name": "Stringer",
