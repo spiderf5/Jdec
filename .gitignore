@@ -26,3 +26,27 @@ jdec/tests/mcout/
 jdec/tests/out*/
 jdec/tests/demo_analysis/
 jdec/tests/demo_flow/
+
+# caches and mappings
+cache/
+.jdec_mappings/
+pool_work/
+
+# logs and crash dumps
+*.log
+logs/
+jdec/logs/
+hs_err_pid*.log
+
+# CLI default output directories
+*_decompiled/
+*_analysis/
+*_strings/
+*_recovered/
+*_natives/
+*_pool/
+scorecard.json
+scorecard.md
+
+# java compiled classes
+*.class

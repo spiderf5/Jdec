@@ -19,6 +19,15 @@ import sys
 import zipfile
 from pathlib import Path
 
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 JAVA_MAJOR = {
     45: "1.1", 46: "1.2", 47: "1.3", 48: "1.4", 49: "5", 50: "6", 51: "7",
     52: "8", 53: "9", 54: "10", 55: "11", 56: "12", 57: "13", 58: "14",

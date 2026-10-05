@@ -759,6 +759,34 @@ def test_yarn_compose() -> None:
           repr(m.lookup_member("net/minecraft/class_310", "method_1481", None)))
 
 
+def test_official_srg_compose() -> None:
+    print("mappings: official-srg compose combines Mojang classes and SRG members")
+    from jdec import mappings as MP
+    mojang = MP.Mapping(source="test-mojang")
+    mojang.add_class("brc", "net/minecraft/world/entity/monster/Creeper")
+    mojang.add_member("brc", "a", "(I)V", "tick")
+
+    srg = MP.Mapping(source="test-srg")
+    srg.add_class("brc", "net/minecraft/entity/monster/EntityCreeper")
+    srg.add_member("brc", "a", "(I)V", "m_6075_")
+    srg.add_member("brc", "b", "I", "f_19853_")
+
+    combined = MP.compose_official_srg(mojang, srg, source="test-combined")
+
+    check("class maps to official Mojang name",
+          combined.lookup_class("brc") == "net/minecraft/world/entity/monster/Creeper",
+          repr(combined.lookup_class("brc")))
+    check("member maps to SRG name under obf owner",
+          combined.lookup_member("brc", "a", "(I)V") == "m_6075_",
+          repr(combined.lookup_member("brc", "a", "(I)V")))
+    check("member maps to SRG name under official owner",
+          combined.lookup_member("net/minecraft/world/entity/monster/Creeper", "a", "(I)V") == "m_6075_",
+          repr(combined.lookup_member("net/minecraft/world/entity/monster/Creeper", "a", "(I)V")))
+    check("field maps to SRG name under official owner",
+          combined.lookup_member("net/minecraft/world/entity/monster/Creeper", "b", "I") == "f_19853_",
+          repr(combined.lookup_member("net/minecraft/world/entity/monster/Creeper", "b", "I")))
+
+
 def test_auto_mapping_set_flavor() -> None:
     print("cli: auto picks yarn for Fabric/Quilt, version pick otherwise")
     p = SimpleNamespace(mc_flavor="Fabric")
@@ -788,9 +816,11 @@ def test_java_escape() -> None:
 def test_rewrite_sources() -> None:
     print("recover: rewrite_sources backfills plaintexts, keeps misses")
     from jdec.recover import rewrite_sources
+    import base64
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
-        # 三个站点：一个单行、一个跨行折行（其他引擎形态）、一个无解
+        # 四个站点：单行、跨行折行、Base64 带换行/转义、无解
+        b64_val = "b64:" + base64.b64encode(b"line1\nline2").decode("ascii")
         (d / "A.java").write_text(
             'class A {\n'
             '    String s = Enc.d("n1", "Q2ZnbA==", 42);\n'
@@ -798,22 +828,26 @@ def test_rewrite_sources() -> None:
             '            "n2",\n'
             '            "TG9uZw==",\n'
             '            -7);\n'
+            '    String v = Enc.d("n4", "QjY0", 99);\n'
             '    String u = Enc.d("n3", "TWlz=", 9);\n'
             "}\n", encoding="utf-8")
         tsv = d / "recovered.tsv"
         rows = [
             "OK\tpkg.C\tn1\tQ2ZnbA==\t42\tsecret",
             "OK\tpkg.C\tn2\tTG9uZw==\t-7\tlonger",
+            f"OK\tpkg.C\tn4\tQjY0\t99\t{b64_val}",
             "FAIL\tpkg.C\tn3\t?\t?\tboom",
         ]
         tsv.write_text(chr(10).join(rows) + chr(10), encoding="utf-8")
         st = rewrite_sources(d, tsv)
-        check("two sites replaced", st["replaced"] == 2, str(st))
+        check("three sites replaced", st["replaced"] == 3, str(st))
         check("unrecoverable site missed", st["missed"] == 1, str(st))
         check("residual counts the miss", st["residual"] == 1, str(st))
         check("no key conflicts", st["conflicts"] == 0, str(st))
         txt = (d / "A.java").read_text(encoding="utf-8")
         check("plaintexts written back", '"secret"' in txt and '"longer"' in txt)
+        check("base64 newline preserved without double escaping",
+              '"line1\\nline2"' in txt and '"line1\\\\nline2"' not in txt)
         check("unmatched site untouched", "TWlz=" in txt)
 
 
@@ -1047,6 +1081,68 @@ def test_pool_roundtrip() -> None:
               "Sample.a(11, 22)" not in utxt and "a(33, 44)" not in stxt)
 
 
+def test_pool_qualified_and_full_string() -> None:
+    print("pool: handles java.lang.String return type and package-qualified calls")
+    from jdec import pool as PL
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        src = d / "src"
+        (src / "com" / "example").mkdir(parents=True)
+        # Class with java.lang.String return type
+        (src / "com" / "example" / "Holder.java").write_text(
+            "package com.example;\n"
+            "public class Holder {\n"
+            "    public static java.lang.String decode(int a, int b) { return null; }\n"
+            "}\n", encoding="utf-8"
+        )
+        # Caller using full qualified name com.example.Holder.decode(...) and simple Holder.decode(...)
+        (src / "com" / "example" / "Caller.java").write_text(
+            "package com.example;\n"
+            "public class Caller {\n"
+            '    String s = com.example.Holder.decode(100, 200);\n'
+            '    String s2 = Holder.decode(300, 400);\n'
+            "}\n", encoding="utf-8"
+        )
+        spec = d / "spec.tsv"
+        st = PL.scan_spec(src, spec)
+        check("pool scan finds Holder class", st["pool_classes"] == 1, str(st))
+        check("pool scan finds 2 sites", st["unique"] == 2, str(st))
+        lines = spec.read_text(encoding="utf-8").splitlines()
+        keys = {tuple(l.split("\t")[i] for i in (1, 2, 3, 4)) for l in lines}
+        check("both qualified and simple sites recorded",
+              ("com.example.Holder", "decode", "100", "200") in keys
+              and ("com.example.Holder", "decode", "300", "400") in keys,
+              str(keys))
+
+        # Test apply with harvest mock
+        import base64
+        hv = d / "harvest.tsv"
+        val1 = base64.b64encode(b"hello_p2").decode("ascii")
+        val2 = base64.b64encode(b"world_p2").decode("ascii")
+        hv.write_text(
+            f"R\tcom.example.Holder\tdecode\t100\t200\t{val1}\n"
+            f"R\tcom.example.Holder\tdecode\t300\t400\t{val2}\n",
+            encoding="utf-8"
+        )
+        out = d / "applied"
+        PL.apply(src, hv, out)
+        res = (out / "com" / "example" / "Caller.java").read_text(encoding="utf-8")
+        check("qualified call site replaced", '"hello_p2"' in res, res)
+        check("simple call site replaced", '"world_p2"' in res, res)
+
+
+def test_probe_fingerprints_json() -> None:
+    print("probe: fingerprints.json detects obfuscator from keywords")
+    with tempfile.TemporaryDirectory() as td:
+        jar = Path(td) / "test_obf.jar"
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("dev/jnic/Bridge.class", b"\xca\xfe\xba\xbe")
+            z.writestr("com/example/Main.class", b"\xca\xfe\xba\xbe")
+        prof = profile_jar(jar)
+        check("fingerprints.json matched JNIC", prof.obfuscator == "JNIC", str(prof.obfuscator))
+        check("signature recorded", any("JNIC" in s for s in prof.signatures), str(prof.signatures))
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -1124,6 +1220,7 @@ def main() -> int:
     test_iso_buckets()
     test_weak_engine_is_rescued()
     test_yarn_compose()
+    test_official_srg_compose()
     test_auto_mapping_set_flavor()
     test_java_escape()
     test_rewrite_sources()
@@ -1133,6 +1230,8 @@ def main() -> int:
     test_resource_anomaly()
     test_scorecard_smoke()
     test_pool_roundtrip()
+    test_pool_qualified_and_full_string()
+    test_probe_fingerprints_json()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

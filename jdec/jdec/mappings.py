@@ -549,6 +549,35 @@ def fetch_mcp_mappings(version: str, cache: Path) -> Mapping:
     raise RuntimeError(f"no joined.tsrg inside mcp_config for {version}")
 
 
+def compose_official_srg(mojang: Mapping, srg: Mapping, source: str = "") -> Mapping:
+    """Compose Mojang official class names with Forge SRG member names.
+
+    Essential for Forge 1.16+ mod analysis and modern Forge client environments:
+    Forge mods reference classes by official Mojang names, but members by SRG
+    identifiers (m_... / f_...).
+
+    Members are indexed under both the obfuscated owner and the official owner,
+    so lookups succeed regardless of whether the input jar has obfuscated or
+    official class references.
+    """
+    out = Mapping(source=source or f"official-srg via {mojang.source} + {srg.source}")
+    out.classes = dict(mojang.classes)
+    for owner, members in srg.members.items():
+        official_owner = mojang.classes.get(owner, owner)
+        for (name, desc), srg_name in members.items():
+            out.add_member(owner, name, desc, srg_name)
+            if official_owner != owner:
+                out.add_member(official_owner, name, desc, srg_name)
+    return out
+
+
+def fetch_official_srg_mappings(version: str, cache: Path) -> Mapping:
+    """Mojang official classes + MCP SRG members for modern Forge (1.16+)."""
+    mojang = fetch_mojang_mappings(version, cache)
+    srg = fetch_mcp_mappings(version, cache)
+    return compose_official_srg(mojang, srg, source=f"official-srg/{version}")
+
+
 def auto_fetch(version: str, kind: str, cache: Path) -> Mapping:
     kind = kind.lower()
     if kind in ("mojang", "official"):
@@ -557,6 +586,8 @@ def auto_fetch(version: str, kind: str, cache: Path) -> Mapping:
         return fetch_yarn_mappings(version, cache)
     if kind in ("mcp", "srg", "legacy"):
         return fetch_mcp_mappings(version, cache)
+    if kind in ("official-srg", "forge-srg", "forge", "neoforge"):
+        return fetch_official_srg_mappings(version, cache)
 
     def as_tuple(v: str) -> tuple[int, ...]:
         parts = re.findall(r"\d+", v)

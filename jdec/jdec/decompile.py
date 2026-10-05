@@ -402,8 +402,8 @@ def decompile(
                   f"separately-named files")
 
     # ------------------------------------------------------------- pass 2
-    suspects = [n for n in batched if outcomes[n].status == "missing"]
-    suspects += _scan_error_markers(src_dir, batched, outcomes)
+    suspects = [n for n in good if outcomes[n].status == "missing"]
+    suspects += _scan_error_markers(src_dir, good, outcomes)
     suspects = sorted(set(suspects))
     print(f"[4/5] pass 2: {len(suspects)} class(es) need a second opinion ...")
 
@@ -419,11 +419,18 @@ def decompile(
                 except Exception:
                     pass
 
-        # two inputs: a small jar holding only the suspects (engines that can
-        # take an external classpath), and a merged jar for Procyon which cannot
-        retry_only = work / "retry_only.jar"
-        _pack_names(input_path, suspects, retry_only, entries)
-        retry_merged: Path | None = None
+        # Case-colliding classes are partitioned into buckets to prevent
+        # same-lowercase files overwriting each other in engine output dirs
+        suspect_col = _case_collisions(suspects)
+        if suspect_col:
+            col_names = {n for grp in suspect_col.values() for n in grp}
+            non_col = [n for n in suspects if n not in col_names]
+            buckets = _iso_buckets(suspect_col)
+            if non_col:
+                buckets[0].extend(non_col)
+            suspect_batches = [sorted(b) for b in buckets]
+        else:
+            suspect_batches = [suspects]
 
         candidates: dict[str, list[tuple[str, str, Path, Quality]]] = {}
         variants = ["default", "lenient"]
@@ -432,45 +439,51 @@ def decompile(
                 eng = EN.ENGINES[ekey]
                 if variant == "lenient" and "lenient" not in eng.variants:
                     continue
-                odir = work / f"out2_{ekey}_{variant}"
-                if odir.exists():
-                    shutil.rmtree(odir, ignore_errors=True)
-                if eng.needs_jar_input:
-                    if retry_merged is None:
-                        retry_merged = work / "retry_merged.jar"
-                        _pack_names(input_path, suspects, retry_merged, entries,
-                                    extra_jar=input_path)
-                    inp: Path = retry_merged
+                matched = 0
+                for bi, batch in enumerate(suspect_batches):
+                    odir = work / f"out2_{ekey}_{variant}_{bi}"
+                    if odir.exists():
+                        shutil.rmtree(odir, ignore_errors=True)
+                    retry_only = work / f"retry_{bi}.jar"
+                    if not retry_only.exists():
+                        _pack_names(input_path, batch, retry_only, entries)
+                    if eng.needs_jar_input:
+                        retry_merged = work / f"retry_merged_{bi}.jar"
+                        if not retry_merged.exists():
+                            _pack_names(input_path, batch, retry_merged, entries,
+                                        extra_jar=input_path)
+                        inp: Path = retry_merged
+                    else:
+                        inp = retry_only
+                    r = EN.run_engine(eng, engines_dir, inp, odir, variant=variant,
+                                      timeout=timeout, memory=memory, extra_cp=classpath)
+                    if not r.files:
+                        continue
+                    for rel, path in r.files.items():
+                        stem = rel[:-5]
+                        if stem not in batch:
+                            # an engine may inline a nested class under its outer
+                            if not any(s.split("$", 1)[0] == stem for s in batch):
+                                continue
+                            targets = [s for s in batch if s.split("$", 1)[0] == stem]
+                        else:
+                            targets = [stem]
+                        try:
+                            src = path.read_text("utf-8", "replace")
+                        except Exception:
+                            continue
+                        for t in targets:
+                            gt = truth.get(t)
+                            if gt is None:
+                                continue
+                            q = evaluate(src, gt)
+                            candidates.setdefault(t, []).append((ekey, variant, path, q))
+                            matched += 1
+                if matched:
+                    print(f"    {eng.label}[{variant}]: {matched} candidate(s)")
                 else:
-                    inp = retry_only
-                r = EN.run_engine(eng, engines_dir, inp, odir, variant=variant,
-                                  timeout=timeout, memory=memory, extra_cp=classpath)
-                if not r.files:
                     print(f"    {eng.label}[{variant}]: produced nothing"
                           + (f" ({r.error})" if r.error else ""))
-                    continue
-                matched = 0
-                for rel, path in r.files.items():
-                    stem = rel[:-5]
-                    if stem not in suspects:
-                        # an engine may inline a nested class under its outer
-                        if not any(s.split("$", 1)[0] == stem for s in suspects):
-                            continue
-                        targets = [s for s in suspects if s.split("$", 1)[0] == stem]
-                    else:
-                        targets = [stem]
-                    try:
-                        src = path.read_text("utf-8", "replace")
-                    except Exception:
-                        continue
-                    for t in targets:
-                        gt = truth.get(t)
-                        if gt is None:
-                            continue
-                        q = evaluate(src, gt)
-                        candidates.setdefault(t, []).append((ekey, variant, path, q))
-                        matched += 1
-                print(f"    {eng.label}[{variant}]: {matched} candidate(s)")
 
         for name, cands in candidates.items():
             cands.sort(key=lambda c: -c[3].score)
@@ -490,10 +503,11 @@ def decompile(
             if prev_truth is not None and o.rel and (src_dir / o.rel).exists():
                 prev_q = _quality_of(src_dir / o.rel, prev_truth)
             if o.status != "ok" or (prev_q is not None and better(q, prev_q)):
-                dest = src_dir / (name + ".java")
+                rel = _safe_rel(name) if name in colliding else (name + ".java")
+                dest = src_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, dest)
-                o.rel = name + ".java"
+                o.rel = rel
                 o.engine = ekey
                 o.variant = variant
                 o.quality = q

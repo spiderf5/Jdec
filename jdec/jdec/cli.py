@@ -448,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     sa.add_argument("--mc-version", default=None, help="Minecraft version, e.g. 1.20.4")
     sa.add_argument("--mappings", default=None, help="mapping file (proguard/tiny/tsrg)")
     sa.add_argument("--mapping-set", default="auto",
-                    choices=["auto", "mojang", "yarn", "mcp", "none"])
+                    choices=["auto", "mojang", "yarn", "mcp", "official-srg", "forge-srg", "none"])
     sa.add_argument("--no-invert", action="store_true",
                     help="mapping file is already obf -> named")
     sa.add_argument("--limit", type=int, default=0,
@@ -477,7 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--mc-version", default=None, help="Minecraft version, e.g. 1.20.4")
     sd.add_argument("--mappings", default=None, help="mapping file (proguard/tiny/tsrg)")
     sd.add_argument("--mapping-set", default="auto",
-                    choices=["auto", "mojang", "yarn", "mcp", "none"],
+                    choices=["auto", "mojang", "yarn", "mcp", "official-srg", "forge-srg", "none"],
                     help="which mapping source to fetch")
     sd.add_argument("--limit", type=int, default=0,
                     help="only decompile the first N classes (quick trial run)")
@@ -581,6 +581,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform == "win32":
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     args = build_parser().parse_args(argv)
     return args.func(args)
 

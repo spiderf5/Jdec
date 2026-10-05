@@ -34,6 +34,21 @@ _COMMON_STEMS = (
 _STEM_RE = re.compile("|".join(sorted(_COMMON_STEMS, key=len, reverse=True)), re.I)
 _MC_VERSION_IN_PATH = re.compile(r"(?<![\w.])(1\.\d{1,2}(?:\.\d{1,2})?|2[0-9]w\d{1,2}[a-z]?|\d{2}\.\d{1,2})(?![\w.])")
 
+def _load_fingerprints() -> list[dict]:
+    candidates = [
+        Path(__file__).resolve().parent / "fingerprints.json",
+        Path(__file__).resolve().parent.parent.parent / "java-deobf" / "scripts" / "fingerprints.json",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return data.get("obfuscators", [])
+            except Exception:
+                pass
+    return []
+
+
 _KNOWN_OBFUSCATORS = {
     "com/allatori/": "Allatori",
     "com/dasho/": "Dash-O",
@@ -165,11 +180,21 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
                 if re.fullmatch(r"\d+\.\d+(?:\.\d+)?", dep):
                     prof.mc_version = dep
 
-    for marker, obf in _KNOWN_OBFUSCATORS.items():
-        if marker in joined and obf:
-            prof.obfuscator = obf
-            prof.signatures.append(f"obfuscator package {marker}")
+    joined_lower = joined.lower()
+    for item in _load_fingerprints():
+        name = item.get("name")
+        kws = item.get("keywords", [])
+        if any(kw.lower() in joined_lower for kw in kws):
+            prof.obfuscator = name
+            prof.signatures.append(f"obfuscator signature: {name}")
             break
+
+    if not prof.obfuscator:
+        for marker, obf in _KNOWN_OBFUSCATORS.items():
+            if marker in joined and obf:
+                prof.obfuscator = obf
+                prof.signatures.append(f"obfuscator package {marker}")
+                break
 
     # bytecode versions across everything (cheap: header only)
     from .classfile import java_version_of

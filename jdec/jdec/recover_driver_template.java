@@ -165,8 +165,11 @@ public class RecoverDriver {
                     System.out.println("SITEINFO\t" + siteName + "\t"
                             + (dyn.length > 0 ? String.valueOf(dyn[0]) : "-") + "\t"
                             + (dyn.length > 1 ? String.valueOf(dyn[1]) : "-"));
+                    String plainStr = String.valueOf(out);
+                    String b64 = "b64:" + Base64.getEncoder().encodeToString(
+                            plainStr.getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     System.out.println("OK\t" + fqcn + "\t" + siteName + "\t"
-                            + esc(cipher) + "\t" + seed + "\t" + esc(String.valueOf(out)));
+                            + esc(cipher) + "\t" + seed + "\t" + b64);
                     ok++;
                 }
             } catch (Throwable t) {
@@ -181,6 +184,9 @@ public class RecoverDriver {
         }
         System.err.println("driver: ok=" + ok + " ref=" + ref
                 + " fail=" + fail + " skip=" + skip);
+        System.out.flush();
+        System.err.flush();
+        System.exit(0);
     }
 
     static Method resolveBsm(String owner, String name, String bsmDesc) throws Exception {

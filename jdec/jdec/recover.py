@@ -18,6 +18,7 @@ classpath 由调用者提供（remap 到同命名空间的 MC + 依赖库 + stub
 
 from __future__ import annotations
 
+import base64
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -320,6 +321,36 @@ def java_unescape(s: str) -> str:
     return "".join(out)
 
 
+def decode_plain_field(raw: str) -> str:
+    """把 recovered.tsv 的明文列解码（支持 b64:... 及兼容 legacy esc 格式）。"""
+    if raw.startswith("b64:"):
+        try:
+            return base64.b64decode(raw[4:]).decode("utf-8", errors="surrogateescape")
+        except Exception:
+            pass
+    # legacy esc() 格式：反转义 \\t, \\n, \\r, \\\\ 防止二次转义
+    out = []
+    i = 0
+    while i < len(raw):
+        if raw[i] == "\\" and i + 1 < len(raw):
+            n = raw[i + 1]
+            if n == "t":
+                out.append("\t")
+            elif n == "n":
+                out.append("\n")
+            elif n == "r":
+                out.append("\r")
+            elif n == "\\":
+                out.append("\\")
+            else:
+                out.append(n)
+            i += 2
+        else:
+            out.append(raw[i])
+            i += 1
+    return "".join(out)
+
+
 def norm_classpath(cp: str) -> str:
     """归一化给 java 看的 classpath：反斜杠→正斜杠，MSYS 盘符 →D: 风格。
 
@@ -349,7 +380,8 @@ def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
         parts = line.split("\t")
         if len(parts) < 6 or parts[0] != "OK":
             continue
-        cipher, seed, plain = parts[3], parts[4], parts[-1]
+        cipher, seed, raw_plain = parts[3], parts[4], parts[-1]
+        plain = decode_plain_field(raw_plain)
         if cipher == "-" or seed == "-":
             continue
         if plain.startswith("[L") or re.search(r"@[0-9a-f]{4,}$", plain):
@@ -492,7 +524,7 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         parts = v.split("\t")
         if len(parts) < 4:
             continue
-        s = parts[-1]
+        s = decode_plain_field(parts[-1])
         if s.startswith("[L") or re.search(r"@[0-9a-f]{4,}$", s):
             continue
         uniq.add(s)

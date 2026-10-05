@@ -47,12 +47,12 @@ _SNUM = "(-?[ ]*" + _NUM + ")"
 # 访问器定义：static（可带 public/private/... 前缀）String name(两参)
 _ACC_DEF = re.compile(
     "(?<![A-Za-z0-9_$.])(?:(?:public|protected|private|final|static)" + _WS
-    + ")+String" + _WS + "(" + _ID + ")" + _WS + "[(]([^)]*)[)]")
+    + ")+(?:java[.]lang[.])?String" + _WS + "(" + _ID + ")" + _WS + "[(]([^)]*)[)]")
 # 访问器参数形状：两个 int/long（final 可选）
 _PARAM_II = re.compile("(?:final" + _WS + ")?(?:int|long)" + _WS + _ID + "[ ]*")
-# qualified 调用：Cls.a(n, n) —— Cls 取简单名（前不接标识符字符，可接 .）
+# qualified 调用：Cls.a(n, n) 或 pkg.Cls.a(n, n)
 _CALL_Q = re.compile(
-    "(?<![A-Za-z0-9_$])(" + _ID + ")[.](" + _ID + ")" + _WS + "[(]"
+    "(?<![A-Za-z0-9_$.])(" + _ID + "(?:[.]" + _ID + ")*)[.](" + _ID + ")" + _WS + "[(]"
     + _SNUM + _WS + "," + _WS + _SNUM + _WS + "[)]")
 # bare 调用：a(n, n) —— 只在池类自己的文件里、名字在白名单内才认
 _CALL_BARE = re.compile(
@@ -135,9 +135,10 @@ def scan_spec(src_dir: Path, spec_path: Path) -> dict:
     for f, own_fq, txt in parsed:
         own_names = acc.get(own_fq, set())
         for m in _CALL_Q.finditer(txt):
-            cls, meth = m.group(1), m.group(2)
-            fq = simple.get(cls)
-            if fq is None or cls in ambiguous or meth not in acc[fq]:
+            cls_raw, meth = m.group(1), m.group(2)
+            cls = cls_raw.split(".")[-1]
+            fq = cls_raw if cls_raw in acc else simple.get(cls)
+            if fq is None or (cls in ambiguous and cls_raw not in acc) or meth not in acc[fq]:
                 continue
             sites.add((fq, meth, norm_int(m.group(3)), norm_int(m.group(4))))
             files_with_sites[f.name] += 1
@@ -292,9 +293,10 @@ def apply(src_dir: Path, harvest_path: Path, out_dir: Path) -> dict:
         own_names = acc.get(own_fq, set())
 
         def repl_q(m: "re.Match") -> str:
-            cls, meth = m.group(1), m.group(2)
-            fq = simple.get(cls)
-            if fq is None or cls in ambiguous or meth not in acc[fq]:
+            cls_raw, meth = m.group(1), m.group(2)
+            cls = cls_raw.split(".")[-1]
+            fq = cls_raw if cls_raw in acc else simple.get(cls)
+            if fq is None or (cls in ambiguous and cls_raw not in acc) or meth not in acc[fq]:
                 return m.group(0)
             key = (fq, meth, norm_int(m.group(3)), norm_int(m.group(4)))
             if key in plain:

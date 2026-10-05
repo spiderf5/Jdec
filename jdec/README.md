@@ -73,7 +73,7 @@ python jdec.py decompile client.jar -o out
 | `--verify-all`                          | 逐个类对照字节码打分，出完整报告（慢一些）             |
 | `--limit 300`                           | 只处理前 N 个类，快速试跑                    |
 | `--mappings f.txt`                      | 映射文件（proguard / tiny / tsrg 自动识别） |
-| `--mapping-set mojang\|yarn\|mcp\|none` | 自动下载哪套映射                          |
+| `--mapping-set mojang\|yarn\|mcp\|official-srg\|none` | 自动下载哪套映射（official-srg 专用于现代 Forge 1.16+） |
 | `--mc-version 1.20.4`                   | jar 里读不出版本时手动指定                   |
 | `-e cfr,vineflower`                     | 指定引擎顺序                            |
 | `--clean-work`                          | 结束后删除中间产物目录（可能有上千个文件，所以默认不删）      |
