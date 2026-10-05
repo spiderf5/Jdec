@@ -281,3 +281,93 @@ signature / clinit-chain / other 八桶，各带处置建议）——拿到失�
 **回填的编码卫生**：替换字面量统一 `\uXXXX` 转义（json.dumps 默认行为），
 不要把原始字符或 surrogateescape 裸字节写进源码——裸控制字节会让下游所有
 grep/diff 把文件判成 binary，静默漏统计、对不上账（见上面 MSYS 第④坑）。
+
+## 第三形态：clinit 内联切片解密 → static 字段（Elowen 2026-10-05）
+
+ZKM 字符串加密的第三种实战形态（前两种：indy 加密→recover；访问器池→pool）。
+
+**形态识别**：clinit 里 `new String[N]` 局部数组 + packed 载体串 +
+`substring(v1, v1+len)` 切片循环 + 解密 helper（CFR 重组后是
+`while(true){...break blockN}` 交错）→ 结果写 `static final String[]`
+与 `static final String` 字段。**无自定义 indy bootstrap**（indy 普查全为
+LambdaMetafactory/StringConcatFactory）。pool scan 零命中（没有两参访问器）
+就是此形态的信号。
+
+**收割法（不需要写解密器，也不需要 jdec 工具）**：明文在类加载后直接躺在
+static 字段里——JDK 真类加载触发 clinit + 反射读字段即全收。FieldDump.java
+（~60 行）：逐类 `Class.forName(cn)`（默认初始化）→ `getDeclaredFields()`
+过滤 static String/String[] → base64 落 TSV（S/A 行），失败单行 FAIL 留归因。
+
+### Java 版本硬约束
+
+样本 Java 25 字节码（class v69）→ **replay 必须真 JDK 25 运行时**，
+Java 21 加载即 UnsupportedClassVersionError。Temurin 25 从清华 Adoptium
+镜像 20 秒到手；`api.adoptium.net` 会重定向 GitHub（实测 8KB/s，不可用）：
+`https://mirrors.tuna.tsinghua.edu.cn/Adoptium/25/jdk/x64/windows/`。
+
+### MSYS 坑复烧（全部实证）
+
+1. **含分号混合盘符长 classpath 被路径转换搅坏**：现象是 365/366 假
+   ClassNotFoundException（单类短 classpath 加载即正常）。~~根治：JDK
+   `@argfile`~~ **（2026-10-05 修正：argfile 对超长 cp 会静默假应用——
+   6.6KB 的 cp 写进 argfile 后部分 jar 失效/`-XshowSettings` 里
+   java.class.path 直接为空，运行不报错、结果半真半假最骗人）**。
+   **真根治：`CLASSPATH` 环境变量**——MSYS 不转换 CLASSPATH env，实测
+   6.9KB cp 全量生效；类名参数（非路径）可安全走命令行/argfile。
+2. `/tmp` 会被转换成 `D://tmp`（当前盘符根）——java 的输出目录/参数一律
+   写 Windows 风格相对或绝对路径。
+3. `javac` 不带 `-d` 时 .class 落在当前目录，classpath 记得对上。
+
+### 收益与边界（Elowen 实测）
+
+196/366 类加载成功，收 254 条明文（覆盖 47 类）。失败 170 类分桶：
+102 摸 MC 运行时（需对应版本 Fabric 全家桶）、47 连坐（依赖前桶失败类）、
+21 缺独立库（gson/joml/skija/fabric-api，补 jar 即救）。jar 常量池
+可疑串=0 时优先怀疑此形态——解密类 clinit 纯字符串操作，最小 classpath
+（样本 jar + log4j）就能收走大半。
+
+### 全量收割配方（Elowen 2026-10-05 续：196/366 → 365/366）
+
+裸最小 classpath 只能收大半；全量收割 = 组装目标运行时全家桶 + driver 预引导。
+
+**classpath 组装（Fabric 新版 / mojmap 直读时代）**：
+- MC 客户端：piston-meta `version_manifest_v2.json` → 版本 json →
+  `downloads.client.url`（sha1 校验）。**26.x 起官方 jar 即 mojmap 名，
+  无需重映射**（hook/引用直接对上）。
+- libraries：版本 json `libraries[].downloads.artifact` 全量下载、剔
+  `natives-` 平台包（类加载不需要 native）；joml/gson/brigadier/fastutil
+  都在这里，不用单独找。
+- fabric-loader（maven.fabricmc.net）+ fabric-api（`+26.3` 后缀版本）；
+  **asm 五件套（asm/-tree/-analysis/-commons/-util）必补**——loader
+  ClassTweaker 硬依赖，缺了初始化链全断（现象：loader jar 在 cp 上却
+  NCDFE org/objectweb/asm/ClassVisitor）。
+- 样本 `META-INF/jars/*` 嵌套 jar（skija 三件套等）解出来直接上 cp——
+  版本就是作者实测的那份。
+
+**driver preinit 三件套（FieldDump.main 开头，全部 try/catch 降级）**：
+1. **FabricLoader gameDir 注入**：样本 clinit 会真调
+   `FabricLoader.getInstance().getGameDir()`——裸 JVM loader 已初始化但
+   gameDir 未设置 → `IllegalStateException: invoked too early?`。反射设
+   `FabricLoaderImpl.INSTANCE` 的私有 `gameDir`/`configDir` 字段。
+2. **MC 引导**：`SharedConstants.tryDetectVersion()` +
+   `Bootstrap.bootStrap()`（官方单测同款）——不做则
+   Blocks/BuiltInRegistries/LivingEntity 等注册表系 clinit 全炸并连坐。
+3. **gamedir 目录预创建**：样本 clinit 可能真开文件
+   （`Elowen-NextGen/antibots.log` 的 FileWriter）——目录不存在 =
+   FileNotFoundException 连坐。顺便：**clinit 开的文件名就是免费情报**。
+
+**访问标志补丁（hideAccess 形态反噬）**：ZKM 剥过 MC private 字段的访问
+检查 → 裸 jar 上 `IllegalAccessError`。用 jdec classfile 模块
+（parse → 改 `field.access_flags` private→public → serialize 字节级保真）
+重打包 client.jar 副本。**rezip 必须剔 `META-INF/*.SF|*.RSA|*.DSA`**——
+改了签名条目后 JVM 校验 digest 直接 SecurityException 杀类加载。
+
+**死代码判定法（网络定性收尾）**：全量解密后 0 URL/IP ≠ 完，还要查
+"有网络能力但没接线"——对可疑网络类做**字节码常量池 xref**（扫全 jar 的
+Methodref/Fieldref 指向它的引用数）：0 引用 = 孤儿类（死代码/为未来版本
+预留），配合"反编译树零调用点 + 解密串零类名反射串"三证齐才下结论。
+Elowen 的伪造 Firefox UA HTTP 客户端即此结局。
+
+**成绩对照**：最小 cp 196/366（254 条）→ 全量配方 365/366（1203 行/
+917 唯一），唯一剩 1 类 = clinit 取 mod 单例（`Elowen.S()` 为 null，
+需真机 mod 初始化，结构性）。
