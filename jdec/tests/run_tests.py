@@ -1765,6 +1765,10 @@ def test_decompiler_trap_pruning() -> None:
                     cdata = zout.read(n)
                     cf = CF.parse(cdata)
                     check(f"deflat class {n} parses cleanly", cf.name is not None)
+            # Test StackMapTable stripping explicitly on OldStyle
+            old_data = zout.read("demo/legacy/OldStyle.class")
+            old_cf = CF.parse(old_data)
+            check("_strip_stackmaps is idempotent and safe", DF._strip_stackmaps(old_cf) == 0)
 
     # 8. Regression test: pipeline with no_natives=True (verifies UnboundLocalError fix)
     from jdec import pipeline as PL_MOD
