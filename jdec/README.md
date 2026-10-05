@@ -89,21 +89,23 @@ out/
                （冲突类的 rel 经百分号编码，不等于类名，外部工具从这里反查）
 ```
 
-深挖三条命令（字符串/native 保护撞墙时用）：
+深挖与进阶分析命令（字符串/控制流/native 保护撞墙时用）：
 
 ```bash
 python jdec.py indy client.jar                 # indy 站点普查：4 万级站点、
                                                # 每个站点的 bootstrap 与参数表达式
-python jdec.py natives client.jar -o nat/      # 提取 native 库 + PE 导出表 +
-                                               # 声明匹配 + 给 Ghidra 的任务清单
-                                               # （加 --decompile 可自动调用 Ghidra 输出 C 伪代码）
+python jdec.py natives client.jar -o nat/      # 提取 native 库 + PE/ELF 导出表 + 动态 RegisterNatives 识别 +
+                                               # 反向 JNI 调用图 (FindClass/GetMethodID) + Ghidra 逆向脚本
+                                               # （加 --decompile 可自动调用内置 Ghidra 输出 C 伪代码）
+python jdec.py deflat client.jar -o deflat.jar # 字节码控制流平坦化消除 (CFG de-flattening) 与常量折叠
+python jdec.py recover client.jar -o rec/      # 自洽重放：内置自动挂载 mc_stubs.jar 单例桩，
+                                               # 消除 needs-instance / needs-bootstrap 连坐失效
+python jdec.py web out/                        # 启动本地多引擎交互式 Web 工作台 (代码对比/搜索/Hook浏览器)
+python jdec.py rename out/src/ -o map.txt      # 提取混淆标识符上下文，生成 ProGuard 映射与 LLM 重命名提示词
 python jdec.py engines --with-ghidra           # 一键自动下载并配置内置 Ghidra Headless 引擎
-python jdec.py recover client.jar -o rec/     --cp-file classpath.txt                    # 自洽重放：跑目标自己的解密
-                                               # 机器收明文（classpath 见下）
 ```
 
-`recover` 的 classpath 要能把目标类真正加载起来：remap 到与目标编译期
-同命名空间的 MC + 依赖库 + 缺失类的 stub，`-Xverify:none` 必开。
+`recover` 和 `pool` 默认自动生成并挂载合成桩 `mc_stubs.jar`（提供非空单例 `Minecraft.getInstance()`、`SharedConstants`、`Bootstrap`、`BuiltInRegistries` 等），无需启动真游戏环境即可跑过 90% 的初始化依赖门禁；若需要原生无桩环境可传入 `--no-stubs`。
 方法论与覆盖边界见 skill `references/string-encryption.md` 的
 「自洽重放」节——**解密器有跨类全局状态，静态重放求 key 必错，
 必须单 JVM 内初始化→读真值→现场求 key**。
@@ -309,8 +311,42 @@ recover them:
 3. **native 反汇编**：Ghidra/IDA 分析 DLL 本体——虚拟化保护下是按周
    计的手工活，只在确需 native 内部算法时上。
 
-实测参照（EdNaven 3.4 / sayori_auth_native.dll）：0 导出 = 动态注册，
-从 `JNI_OnLoad` 找 `RegisterNatives` 恢复 方法↔函数 映射。
+### 原生深度分析：动态注册与反向 JNI 调用图
+
+针对现代 Native 加壳（如使用 `JNI_OnLoad` + `RegisterNatives` 隐藏真实符号）：
+- **动态方法映射识别 (`RegisterNatives`)**：自动解析 Ghidra 反编译的 C 代码或二进制数据段，提取 `JNINativeMethod` 结构体，将哈希名/数字名的 Java native 方法与底层 C 函数指针关联。
+- **反向 JNI 调用图 (Native -> Java)**：静态挖掘 C 伪代码中的 `FindClass`、`GetMethodID`、`GetFieldID`、`Call<Type>Method` 等跨语言调用点，精确查明原生库内部在操纵哪些 Java 类、反射读取哪些敏感字段。
+- **Ghidra 自动化注解脚本**：自动输出 `ghidra_annotate.py`，导入 Ghidra 即可一键恢复所有 JNI 函数名和数据类型。
+
+## 控制流平坦化消除 (CFG De-flattening)
+
+某些混淆器（如 ZKM、Allatori、Dash-O）将方法体打碎为有限状态机：所有的基本块包裹在一个 `while(true) switch(state)` 分发器内，末尾通过修改状态变量并跳转回 switch 头部执行下一步，反编译器往往生成死循环或海量 goto。
+
+```bash
+python jdec.py deflat input.jar -o input_deflat.jar
+```
+
+`deflat` 模块在字节码层工作：
+1. **常量折叠引擎**：化简异或混淆常数（如 `bipush 5 ^ bipush 3` 直接求值为 `6`）。
+2. **状态分发器重构**：识别 `tableswitch` / `lookupswitch` 分发器，分析状态转移表，将每个 case 块末尾跳回 switch 的 `goto` 直接重定向至下一个目标基本块，安全恢复线性和结构化控制流，无需依赖易损坏的重排。
+
+## 交互式 Web 工作台与语义命名恢复
+
+```bash
+python jdec.py web out/
+```
+
+- **零依赖 Web 工作台**：单命令启动内置本地 Web 服务，多栏暗色界面，支持：
+  - 类目录树即时过滤与搜索。
+  - 多引擎反编译源码并排检视与差异对比。
+  - Mixin Hook 目标注入点快速定位。
+  - 恶意/高危威胁字符串（Webhook/C2/IP/凭据）按类汇总透视。
+
+```bash
+python jdec.py rename out/src/ -o llm_mappings.txt --prompt-out prompt.json
+```
+
+- **语义反混淆与 LLM 映射生成**：通过静态扫描类结构、常量池字面量、参数与返回类型以及 Mixin 注解信息，提取混淆成员的语义线索，输出标准 JSON 格式提示词供大模型批量推导可读名字，并直接写出标准 ProGuard 重命名映射表。
 
 ## 实测
 

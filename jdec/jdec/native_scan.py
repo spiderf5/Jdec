@@ -11,6 +11,7 @@ ELF/Mach-O 库只提取不解析，报告里说明。
 
 from __future__ import annotations
 
+import re
 import struct
 import zipfile
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ class NativeLib:
     format: str            # "PE" | "ELF" | "Mach-O" | "unknown"
     exports: list[str] = field(default_factory=list)
     jni_exports: list[str] = field(default_factory=list)   # Java_* / JNI_OnLoad
+    dynamic_methods: list[dict] = field(default_factory=list)  # JNINativeMethod tables: name, sig, address
+    reverse_jni: list[dict] = field(default_factory=list)      # FindClass, GetMethodID, GetFieldID calls
     strings: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -44,6 +47,18 @@ class Triage:
                   + "_" + meth.replace("_", "_1")
             want.add(jni)
         return want & set().union(*[set(l.jni_exports) for l in self.libs]) if self.libs else set()
+
+    def matched_dynamic(self) -> list[dict]:
+        """Dynamically registered methods that match declared native methods."""
+        out = []
+        for lib in self.libs:
+            for dm in lib.dynamic_methods:
+                mname = dm.get("name")
+                for cls, meth in self.native_decl:
+                    if meth == mname:
+                        out.append({"class": cls, "method": meth, "sig": dm.get("sig"), "lib": lib.name, "func": dm.get("func")})
+                        break
+        return out
 
 
 # ---------------------------------------------------------------- PE parsing
@@ -279,6 +294,61 @@ def extract_libs(jar: Path, out_dir: Path) -> list[tuple[str, bytes]]:
     return found
 
 
+def scan_reverse_jni_c(c_text: str, func_name: str = "") -> list[dict]:
+    """Scan decompiled C text for calls to JNIEnv APIs interacting with JVM."""
+    out = []
+    _WS = "[ \t\r\n]*"
+    _STR = '["\']([^"\']+)["\']'
+    rx_cls = re.compile('FindClass' + _WS + '[(](?:[^,]+,[ \t\r\n]*)?' + _STR + _WS + '[)]')
+    rx_mid = re.compile('(?:GetMethodID|GetStaticMethodID)' + _WS + '[(](?:[^,]+,[ \t\r\n]*){1,2}' + _STR + _WS + ',' + _WS + _STR + _WS + '[)]')
+    rx_fid = re.compile('(?:GetFieldID|GetStaticFieldID)' + _WS + '[(](?:[^,]+,[ \t\r\n]*){1,2}' + _STR + _WS + ',' + _WS + _STR + _WS + '[)]')
+    rx_call = re.compile('Call(?:Static)?(?:Object|Boolean|Byte|Char|Short|Int|Long|Float|Double|Void)Method' + _WS + '[(](?:[^,]+,[ \t\r\n]*){1,2}([A-Za-z0-9_]+)')
+
+    for m in rx_cls.finditer(c_text):
+        out.append({"type": "FindClass", "class": m.group(1), "function": func_name})
+    for m in rx_mid.finditer(c_text):
+        out.append({"type": "GetMethodID", "method": m.group(1), "sig": m.group(2), "function": func_name})
+    for m in rx_fid.finditer(c_text):
+        out.append({"type": "GetFieldID", "field": m.group(1), "sig": m.group(2), "function": func_name})
+    for m in rx_call.finditer(c_text):
+        out.append({"type": "CallMethod", "mid_var": m.group(1), "function": func_name})
+    return out
+
+
+def scan_register_natives_c(c_text: str, func_name: str = "") -> list[dict]:
+    """Extract JNINativeMethod registrations from decompiled C code."""
+    out = []
+    _WS = "[ \t\r\n]*"
+    _STR = '["\']([^"\']+)["\']'
+    rx_struct = re.compile('[{]' + _WS + _STR + _WS + ',' + _WS + _STR + _WS + ',' + _WS + '([^,}]+)[}]')
+    for m in rx_struct.finditer(c_text):
+        name = m.group(1)
+        sig = m.group(2)
+        raw_fn = m.group(3).strip()
+        clean_fn = raw_fn
+        if clean_fn.startswith("(") and ")" in clean_fn:
+            clean_fn = clean_fn.split(")", 1)[1].strip()
+        clean_fn = clean_fn.lstrip("&").strip()
+        if "(" in sig and ")" in sig:
+            out.append({"name": name, "sig": sig, "func": clean_fn or raw_fn, "source": func_name})
+    return out
+
+
+def scan_binary_jni_descriptors(data: bytes) -> list[dict]:
+    """Scan raw binary for candidate JNI descriptor signatures."""
+    out = []
+    rx_desc = re.compile(b"[(][A-Za-z0-9_$/;[]*[)][A-Za-z0-9_$/;[]+")
+    seen = set()
+    for m in rx_desc.finditer(data):
+        raw = m.group(0)
+        if len(raw) < 3 or raw in seen:
+            continue
+        seen.add(raw)
+        sig = raw.decode("ascii", "replace")
+        out.append({"sig": sig, "offset": m.start()})
+    return out
+
+
 def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
     from . import classfile as CF       # 延迟导入：仅 jar 路径才付出解析成本
 
@@ -298,6 +368,7 @@ def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
         else:
             lib.error = "PE / ELF 以外的格式仅提取不解析（Mach-O 待补）"
         lib.strings = scan_strings(data)
+        lib.dynamic_methods = scan_binary_jni_descriptors(data)
         tri.libs.append(lib)
     if collect_decl:
         with zipfile.ZipFile(jar) as zf:
@@ -326,11 +397,25 @@ def decompile_libs(tri: Triage, out_dir: Path, ghidra_home: Path) -> dict:
         lib_out = out_dir / (lib_path.stem + "_decompiled")
         res = GE.decompile_library(ghidra_home, lib_path, lib_out)
         results[lib.name] = res
+
+        # Scan decompiled C sources for reverse JNI calls and RegisterNatives
+        src_dir = lib_out / "src"
+        if src_dir.is_dir():
+            for c_file in sorted(src_dir.glob("*.c")):
+                try:
+                    c_txt = c_file.read_text(encoding="utf-8", errors="replace")
+                    rev = scan_reverse_jni_c(c_txt, c_file.name)
+                    lib.reverse_jni.extend(rev)
+                    dyn = scan_register_natives_c(c_txt, c_file.name)
+                    lib.dynamic_methods.extend(dyn)
+                except Exception:
+                    pass
     return results
 
 
 def write_report(tri: Triage, jar_name: str, out: Path, decompiled_info: dict | None = None) -> None:
     static = tri.matched_static()
+    dyn_matched = tri.matched_dynamic()
     dynamic_only = [(c, m) for c, m in tri.native_decl
                     if "Java_" + c.replace("/", ".").replace("_", "_1")
                     .replace(".", "_") + "_" + m.replace("_", "_1") not in static]
@@ -339,8 +424,11 @@ def write_report(tri: Triage, jar_name: str, out: Path, decompiled_info: dict | 
               f"- java-side native declarations: {len(tri.native_decl)} "
               f"(in {len({c for c, _ in tri.native_decl})} classes)",
               f"- statically exported JNI symbols matched: {len(static)}",
-              f"- dynamic-registration suspects (no Java_ export): {len(dynamic_only)}",
-              ""]
+              f"- dynamic-registration suspects (no Java_ export): {len(dynamic_only)}"]
+    if dyn_matched:
+        lines += [f"- dynamically registered JNI methods resolved: {len(dyn_matched)}"]
+    lines += [""]
+
     ghidra_script = out.parent / "ghidra_annotate.py"
     if tri.native_decl:
         write_ghidra_annotation_script(tri, ghidra_script)
@@ -356,6 +444,27 @@ def write_report(tri: Triage, jar_name: str, out: Path, decompiled_info: dict | 
         if lib.jni_exports:
             show = ", ".join(lib.jni_exports[:12])
             lines += [f"- JNI symbols (first 12): `{show}`"]
+        lines += [""]
+
+    if dyn_matched:
+        lines += ["## dynamically registered JNI methods (RegisterNatives)", ""]
+        lines += ["| Java Class | Method | Descriptor | Native Library | Bound Function |",
+                  "| :--- | :--- | :--- | :--- | :--- |"]
+        for dm in dyn_matched:
+            lines += [f"| `{dm['class']}` | `{dm['method']}` | `{dm.get('sig', '-')}` | `{dm['lib']}` | `{dm.get('func', '-')}` |"]
+        lines += [""]
+
+    all_rev = [r for lib in tri.libs for r in lib.reverse_jni]
+    if all_rev:
+        lines += ["## reverse JNI interactions (Native -> Java calls)", ""]
+        lines += ["| Native Function | JNI Call Type | Target Class / Member | Signature |",
+                  "| :--- | :--- | :--- | :--- |"]
+        for r in all_rev[:30]:
+            target = r.get("class") or r.get("method") or r.get("field") or "-"
+            sig = r.get("sig") or "-"
+            lines += [f"| `{r.get('function', '-')}` | `{r.get('type')}` | `{target}` | `{sig}` |"]
+        if len(all_rev) > 30:
+            lines += [f"- ... {len(all_rev) - 30} more reverse JNI calls (see decompiled C files)"]
         lines += [""]
 
     if decompiled_info:

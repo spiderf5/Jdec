@@ -172,7 +172,7 @@ def scan_spec(src_dir: Path, spec_path: Path) -> dict:
 
 def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
             cp_file: Path | None = None, java: str = "java",
-            timeout: int = 3600) -> dict:
+            timeout: int = 3600, with_stubs: bool = True) -> dict:
     """生成/编译 PoolDriver，真类加载逐站点求明文 → out_tsv（R/E 行）。"""
     work_dir.mkdir(parents=True, exist_ok=True)
     src = work_dir / "PoolDriver.java"
@@ -182,10 +182,17 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
     if r.returncode != 0:
         raise RuntimeError("javac failed: " + (r.stderr or r.stdout or "")[-2000:])
 
+    sep = ";" if os.name == "nt" else ":"
+    if with_stubs:
+        try:
+            from . import stubs
+            stub_jar = stubs.ensure_stubs_jar()
+            cp = str(stub_jar) + (sep if cp else "") + cp
+        except Exception:
+            pass
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
         cp = cp + (";" if cp and not cp.endswith(";") else "") + extra.strip()
-    sep = ";" if os.name == "nt" else ":"
     classpath = sep.join([str(work_dir), cp]) if cp else str(work_dir)
     classpath = norm_classpath(classpath)
     argsfile = work_dir / "java_args.txt"

@@ -446,8 +446,17 @@ def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
 
 def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             limit: int = 0, stop_on_error: bool = False,
-            cp_file: Path | None = None, timeout: int = 1800) -> int:
+            cp_file: Path | None = None, timeout: int = 1800,
+            with_stubs: bool = True) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
+    sep = ";" if __import__("os").name == "nt" else ":"
+    if with_stubs:
+        try:
+            from . import stubs
+            stub_jar = stubs.ensure_stubs_jar()
+            cp = str(stub_jar) + (sep if cp else "") + cp
+        except Exception:
+            pass
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
         cp = cp + (";" if cp and not cp.endswith(";") else "") + extra.strip()
@@ -463,7 +472,6 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         print("javac failed:\n" + str(r.stderr or r.stdout or "")[-2000:])
         return 1
 
-    sep = ";" if __import__("os").name == "nt" else ":"
     classpath = sep.join([str(out_dir), cp, str(jar)]) if cp else \
         sep.join([str(out_dir), str(jar)])
     classpath = norm_classpath(classpath)

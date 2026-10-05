@@ -333,7 +333,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_recovered")
     rc = do_recover(raw, out_dir, cp=args.cp, java=args.java,
                     limit=args.limit, stop_on_error=args.stop_on_error,
-                    cp_file=args.cp_file, timeout=args.timeout)
+                    cp_file=args.cp_file, timeout=args.timeout,
+                    with_stubs=getattr(args, "with_stubs", True))
     tsv = out_dir / "recovered.tsv"
     if args.rewrite_src:
         if not Path(args.rewrite_src).is_dir():
@@ -380,7 +381,8 @@ def cmd_pool(args: argparse.Namespace) -> int:
             spec.parent / "pool_harvest.tsv"
         st = PL.harvest(spec, out_tsv, spec.parent, cp=args.cp,
                         cp_file=args.cp_file, java=args.java,
-                        timeout=args.timeout)
+                        timeout=args.timeout,
+                        with_stubs=getattr(args, "with_stubs", True))
         if st["timed_out"]:
             print(f"WARNING   : driver killed at {args.timeout}s timeout "
                   f"(partial output kept; rerun with --timeout N)")
@@ -444,6 +446,47 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
         changed = sum(1 for d in deltas if d["status"] in ("changed", "new"))
         print(f"compare   : {changed}/{len(deltas)} row(s) changed/new "
               f"vs {compare.name}")
+    return 0
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    from . import web
+    p = Path(args.input)
+    if not p.exists():
+        print(f"no such file or directory: {p}")
+        return 2
+    web.start_server(p, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
+def cmd_rename(args: argparse.Namespace) -> int:
+    from . import rename
+    p = Path(args.input)
+    if not p.exists():
+        print(f"no such file or directory: {p}")
+        return 2
+    candidates = rename.scan_source_tree(p) if p.is_dir() else rename.scan_source_file(p)
+    print(f"scanned   : {len(candidates)} candidate obfuscated member(s)")
+    if getattr(args, "prompt_out", None):
+        prompt = rename.export_llm_prompt(candidates, limit=args.limit)
+        Path(args.prompt_out).write_text(prompt, encoding="utf-8")
+        print(f"prompt    : exported LLM prompt to {args.prompt_out}")
+    if args.output:
+        n = rename.write_proguard_mapping(candidates, Path(args.output))
+        print(f"mapping   : {n} heuristic rule(s) written to {args.output}")
+    return 0
+
+
+def cmd_deflat(args: argparse.Namespace) -> int:
+    from . import deflat
+    p = Path(args.input)
+    if not p.is_file():
+        print(f"no such file: {p}")
+        return 2
+    out = Path(args.output) if args.output else p.with_name(p.stem + "_deflat" + p.suffix)
+    stats = deflat.deflat_jar(p, out)
+    print(f"deflat    : {stats['methods_unflattened']} method(s) unflattened across {stats['classes']} class(es)")
+    print(f"output    : {out}")
     return 0
 
 
@@ -574,6 +617,8 @@ def build_parser() -> argparse.ArgumentParser:
                          ".java sources under DIR (matches the BSM call "
                          "form Cls.method(\"site\", \"cipher\", seed)); "
                          "pair with decompile output src/")
+    sr.add_argument("--no-stubs", dest="with_stubs", action="store_false", default=True,
+                    help="do not inject synthetic Minecraft runtime stubs into classpath")
     sr.set_defaults(func=cmd_recover)
 
     sp = sub.add_parser("pool",
@@ -599,6 +644,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--timeout", type=int, default=3600,
                     help="kill the replay JVM after N seconds (default "
                          "3600); partial output is kept on timeout")
+    sp.add_argument("--no-stubs", dest="with_stubs", action="store_false", default=True,
+                    help="do not inject synthetic Minecraft runtime stubs into classpath")
     sp.set_defaults(func=cmd_pool)
 
     ssc = sub.add_parser("scorecard",
@@ -622,6 +669,33 @@ def build_parser() -> argparse.ArgumentParser:
     ssc.add_argument("--timeout", type=int, default=1800,
                      help="per-jar decompile timeout (decompile mode only)")
     ssc.set_defaults(func=cmd_scorecard)
+
+    sw = sub.add_parser("web",
+                        help="launch lightweight local web workbench for "
+                             "interactive multi-engine review & triage")
+    sw.add_argument("input", help="decompiled output directory or jar path")
+    sw.add_argument("--port", type=int, default=8080, help="HTTP server port")
+    sw.add_argument("--no-browser", action="store_true", help="do not auto-open browser")
+    sw.set_defaults(func=cmd_web)
+
+    sren = sub.add_parser("rename",
+                          help="semantic identifier recovery & LLM prompt export")
+    sren.add_argument("input", help="source directory or single .java file")
+    sren.add_argument("-o", "--output", default=None,
+                      help="output ProGuard mapping file with heuristic suggestions")
+    sren.add_argument("--prompt-out", default=None,
+                      help="export structured JSON prompt for LLM renaming")
+    sren.add_argument("--limit", type=int, default=50,
+                      help="maximum members to include in prompt export")
+    sren.set_defaults(func=cmd_rename)
+
+    sdef = sub.add_parser("deflat",
+                          help="bytecode control flow de-flattening and constant folding")
+    sdef.add_argument("input", help="target jar to de-flatten")
+    sdef.add_argument("-o", "--output", default=None,
+                      help="output jar path (default: <input>_deflat.jar)")
+    sdef.set_defaults(func=cmd_deflat)
+
     return p
 
 

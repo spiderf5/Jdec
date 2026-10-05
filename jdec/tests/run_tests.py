@@ -1328,6 +1328,102 @@ def test_multimodule_enhancements() -> None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def test_advanced_roadmap_features() -> None:
+    print("advanced: reverse JNI, RegisterNatives, stubs, deflat, and rename")
+    from jdec import native_scan as NS
+    from jdec import stubs
+    from jdec import deflat as DF
+    from jdec import rename as RN
+
+    # 1. Reverse JNI & RegisterNatives scanning
+    c_snippet = (
+        'jclass c = (*env)->FindClass(env, "net/minecraft/client/Minecraft");\n'
+        'jmethodID m = (*env)->GetMethodID(env, c, "run", "()V");\n'
+        'jfieldID f = (*env)->GetFieldID(env, c, "player", "Ljava/lang/Object;");\n'
+        '(*env)->CallVoidMethod(env, obj, m);\n'
+        'env->FindClass("net/minecraft/world/World");\n'
+    )
+    rev = NS.scan_reverse_jni_c(c_snippet, "native_init")
+    check("reverse JNI FindClass", any(r["type"] == "FindClass" and r["class"] == "net/minecraft/client/Minecraft" for r in rev))
+    check("reverse JNI C++ FindClass", any(r["type"] == "FindClass" and r["class"] == "net/minecraft/world/World" for r in rev))
+    check("reverse JNI GetMethodID", any(r["type"] == "GetMethodID" and r["method"] == "run" for r in rev))
+    check("reverse JNI GetFieldID", any(r["type"] == "GetFieldID" and r["field"] == "player" for r in rev))
+    check("reverse JNI CallMethod", any(r["type"] == "CallMethod" and r["mid_var"] == "m" for r in rev))
+
+    c_reg = 'static JNINativeMethod methods[] = { { "nativeFunc", "(ILjava/lang/String;)Z", (void*)&sub_1234 } };'
+    dyn = NS.scan_register_natives_c(c_reg, "JNI_OnLoad")
+    check("RegisterNatives parsed", len(dyn) == 1 and dyn[0]["name"] == "nativeFunc" and dyn[0]["func"] == "sub_1234")
+
+    # 2. Fake MC Stubs jar generation
+    tmp_stubs = Path(tempfile.mkdtemp(prefix="jdec_test_stubs_"))
+    try:
+        sjar = stubs.ensure_stubs_jar(cache_dir=tmp_stubs)
+        check("stubs jar generated", sjar.is_file())
+        with zipfile.ZipFile(sjar) as z:
+            names = z.namelist()
+        check("stubs has Minecraft", "net/minecraft/client/Minecraft.class" in names)
+        check("stubs has Launch", "net/minecraft/launchwrapper/Launch.class" in names)
+        check("stubs has SharedConstants", "net/minecraft/SharedConstants.class" in names)
+        check("stubs has BuiltInRegistries", "net/minecraft/core/registries/BuiltInRegistries.class" in names)
+    finally:
+        shutil.rmtree(tmp_stubs, ignore_errors=True)
+
+    # 3. Control flow de-flattening and constant arithmetic
+    code = bytes([0x10, 0x05, 0x10, 0x03, 0x82])  # 5 ^ 3
+    new_code, n = DF.simplify_constants(code)
+    check("constant folding simplified ixor", n == 1 and new_code[0] == 0x10 and new_code[1] == 6)
+
+    code_add = bytes([0x10, 0x0A, 0x10, 0x14, 0x60])  # 10 + 20
+    new_code_add, n_add = DF.simplify_constants(code_add)
+    check("constant folding simplified iadd", n_add == 1 and new_code_add[0] == 0x10 and new_code_add[1] == 30)
+
+    # Switch at pc 1 with low=1, high=3 (count=3)
+    switch_code = bytearray([0x1b, 0xaa, 0, 0] + list(struct.pack('>iiiii', 0, 1, 3, 27, 34)) + list(struct.pack('>i', 35)))
+    switch_code += bytearray([0x10, 0x02, 0x3c, 0xa7]) + bytearray(struct.pack('>h', -31))
+    switch_code += bytearray([0x00, 0xb1])
+    deflat_res, n_unflat = DF.deflat_code(bytes(switch_code))
+    check("deflat unflattened switch transition", n_unflat >= 1)
+
+    # Test deflat_class with a synthetically embedded Code attribute
+    with zipfile.ZipFile(SAMPLE) as zf:
+        sample_cls_data = zf.read(zf.namelist()[0])
+    cf_sample = CF.parse(sample_cls_data)
+    # deflat_class should safely scan methods without crashing
+    edits = DF.deflat_class(cf_sample)
+    check("deflat_class runs on ClassFile", edits >= 0)
+    roundtrip = cf_sample.serialize()
+    check("ClassFile round-trips after deflat_class", len(roundtrip) > 0)
+
+    # 4. Semantic renaming and LLM prompt export
+    tmp_ren = Path(tempfile.mkdtemp(prefix="jdec_test_ren_"))
+    try:
+        sample_java = tmp_ren / "TestMixin.java"
+        sample_java.write_text(
+            'package demo;\n'
+            'public class TestMixin {\n'
+            '    @Inject(method = "tick")\n'
+            '    public void a(int x) {\n'
+            '        String s = "Connecting to socket";\n'
+            '    }\n'
+            '}\n',
+            encoding="utf-8"
+        )
+        cands = RN.scan_source_file(sample_java)
+        check("rename candidate found", len(cands) == 1 and cands[0].member_name == "a")
+        check("rename suggestion inferred from mixin", cands[0].suggested_name == "onTick")
+
+        prompt = RN.export_llm_prompt(cands)
+        check("LLM prompt contains candidate", "onTick" in prompt)
+
+        out_map = tmp_ren / "mapping.txt"
+        n_rules = RN.write_proguard_mapping(cands, out_map)
+        check("ProGuard mapping exported", n_rules == 1 and out_map.exists())
+        map_content = out_map.read_text(encoding="utf-8")
+        check("ProGuard parameter signature formatted", "void a(int) -> onTick" in map_content, map_content)
+    finally:
+        shutil.rmtree(tmp_ren, ignore_errors=True)
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -1421,6 +1517,7 @@ def main() -> int:
     test_native_elf_and_ghidra_annotate()
     test_score_and_signal_enhancements()
     test_multimodule_enhancements()
+    test_advanced_roadmap_features()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")
