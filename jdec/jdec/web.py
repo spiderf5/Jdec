@@ -663,7 +663,7 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
 
     eng_key = engine.lower().strip()
     if eng_key in ("final", "current", ""):
-        if str(target_path).startswith(str(src_dir)) and target_path.is_file():
+        if target_path.is_relative_to(src_dir) and target_path.is_file():
             try:
                 return target_path.read_text(encoding="utf-8", errors="replace")
             except Exception as e:
@@ -673,7 +673,7 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     # 1. Check existing engine directory: engines/<engine>/<rel_name>
     eng_dir = (work_dir / "engines" / eng_key).resolve()
     eng_target = (eng_dir / rel_name).resolve()
-    if str(eng_target).startswith(str(eng_dir)) and eng_target.is_file():
+    if eng_target.is_relative_to(eng_dir) and eng_target.is_file():
         try:
             return eng_target.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
@@ -682,7 +682,7 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     # 2. Check engine cache: _engines_cache/<engine>/<rel_name>
     cache_dir = (work_dir / "_engines_cache" / eng_key).resolve()
     cache_target = (cache_dir / rel_name).resolve()
-    if str(cache_target).startswith(str(cache_dir)) and cache_target.is_file():
+    if cache_target.is_relative_to(cache_dir) and cache_target.is_file():
         try:
             return cache_target.read_text(encoding="utf-8", errors="replace")
         except Exception as e:

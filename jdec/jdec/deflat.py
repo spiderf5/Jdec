@@ -639,6 +639,76 @@ def deflat_class(cf: CF.ClassFile) -> int:
     return changes
 
 
+def _strip_smt_from_code(cf: CF.ClassFile, payload: bytes) -> bytes | None:
+    """从 Code 属性负载里剥掉 StackMapTable 内嵌属性;没有则返回 None。"""
+    import struct as _s
+    try:
+        o = 4                                   # max_stack u2 + max_locals u2
+        code_len = _s.unpack_from(">I", payload, o)[0]
+        o += 4 + code_len
+        exc_n = _s.unpack_from(">H", payload, o)[0]
+        o += 2 + 8 * exc_n
+        tbl_start = o                    # 内嵌属性表起点（attr_count 字段处）
+        attr_n = _s.unpack_from(">H", payload, o)[0]
+        o += 2
+        entries, had = [], False
+        for _ in range(attr_n):
+            ni = _s.unpack_from(">H", payload, o)[0]
+            ln = _s.unpack_from(">I", payload, o + 2)[0]
+            data = payload[o + 6:o + 6 + ln]
+            o += 6 + ln
+            if cf.utf8(ni) == "StackMapTable":
+                had = True
+                continue
+            entries.append((ni, data))
+        if not had:
+            return None
+        out = bytearray(payload[:tbl_start])
+        out += _s.pack(">H", len(entries))
+        for ni, data in entries:
+            out += _s.pack(">HI", ni, len(data)) + data
+        return bytes(out)
+    except Exception:
+        return None
+
+
+def _strip_stackmaps(cf: CF.ClassFile) -> int:
+    """反平坦化后原 StackMapTable 帧全部失效（原地改写不更新帧），
+    陈旧帧会让下游反编译器在这些类上出错误标记（EdNaven 实测掉档
+    46 个类）。剥帧后 CFR/Vineflower 自行重算分析。返回处理的方法数。"""
+    import struct as _s
+    n = 0
+    for m in cf.methods:
+        blob = m.attrs_blob
+        if len(blob) < 2:
+            continue
+        try:
+            cnt = _s.unpack_from(">H", blob, 0)[0]
+            o = 2
+            entries, changed = [], False
+            for _ in range(cnt):
+                ni = _s.unpack_from(">H", blob, o)[0]
+                ln = _s.unpack_from(">I", blob, o + 2)[0]
+                data = blob[o + 6:o + 6 + ln]
+                o += 6 + ln
+                if cf.utf8(ni) == "Code":
+                    new = _strip_smt_from_code(cf, data)
+                    if new is not None:
+                        entries.append((ni, new))
+                        changed = True
+                        continue
+                entries.append((ni, data))
+            if changed:
+                out = bytearray(_s.pack(">H", cnt))
+                for ni, data in entries:
+                    out += _s.pack(">HI", ni, len(data)) + data
+                m.attrs_blob = bytes(out)
+                n += 1
+        except Exception:
+            continue
+    return n
+
+
 def deflat_jar(jar_in: Path, jar_out: Path) -> dict:
     """Rewrite flattened control flow and prune bytecode traps across an entire jar."""
     stats = {"classes": 0, "methods_unflattened": 0, "traps_pruned": 0}
@@ -654,6 +724,7 @@ def deflat_jar(jar_in: Path, jar_out: Path) -> dict:
                     if edits > 0:
                         stats["methods_unflattened"] += edits
                         stats["traps_pruned"] += edits
+                        _strip_stackmaps(cf)     # 陈旧帧必须剥掉,否则下游反编译掉档
                         data = cf.serialize()
                 except Exception:
                     pass

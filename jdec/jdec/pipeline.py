@@ -196,6 +196,7 @@ def run_pipeline(
     clean_work: bool = False,
     export_project: bool = False,
     compile_verify: bool = False,
+    cp_file: Path | None = None,
 ) -> PipelineResult:
     """Execute end-to-end deobfuscation and triage pipeline."""
     t0 = time.time()
@@ -221,7 +222,8 @@ def run_pipeline(
         print(f"      minecraft: {prof.mc_flavor} {prof.mc_version or 'unknown version'}")
 
     current_jar = target
-    unflattened_count = 0
+    original_jar = target      # Phase 5 的重放要和 classpath 同命名空间:
+    unflattened_count = 0      # 用户提供的 cp 对应原始 jar 的命名空间
 
     # Phase 2: Bytecode Pre-cleaning (CFG De-flattening)
     if not no_deflat:
@@ -232,7 +234,9 @@ def run_pipeline(
             unflattened_count = stats.get("methods_unflattened", 0)
             if unflattened_count > 0:
                 print(f"      unflattened {unflattened_count} method(s) across {stats.get('classes', 0)} class(es)")
-                current_jar = preclean_jar
+                # 不直接切 current_jar:反平坦化对某些目标(如 CFR 本就能
+                # 结构化的 ZKM goto 洪水)是净伤害。原 jar 先正常反编译,
+                # Phase 4 末尾按 clean 数对比决定是否采用 deflatted 版。
             else:
                 print("      no flattened switch dispatchers detected")
         except Exception as exc:
@@ -290,6 +294,38 @@ def run_pipeline(
     if rep.coverage_avg is not None:
         print(f"      member recovery coverage: {rep.coverage_avg * 100:.1f}%")
 
+    # Phase 4.5: deflat 抢救对比——原 jar 反编译若更差,采用 deflatted 版
+    if unflattened_count > 0 and not no_deflat:
+        preclean_jar = work_dir / "precleaned.jar"
+        if preclean_jar.is_file():
+            print("[4.5/7] trying de-flattened variant (rescue comparison) ...")
+            alt_dir = work_dir / "src_deflat"
+            try:
+                trial_jar = preclean_jar
+                if mapping_obj is not None and remapped_count > 0:
+                    # 对比必须同映射:原 jar 走了 remap,deflatted 也要走
+                    rj = work_dir / "precleaned_remapped.jar"
+                    rc2, tt2 = MP.remap_jar(preclean_jar, rj, mapping_obj)
+                    if rc2 > 0:
+                        trial_jar = rj
+                rep2 = DC.decompile(trial_jar, alt_dir, engines_dir=engines_dir,
+                                    jobs=jobs, timeout=timeout, verify_all=verify_all,
+                                    clean_work=False, limit=0)
+                print(f"      deflatted variant: {rep2.ok} clean, {rep2.partial} partial, "
+                      f"{rep2.failed + rep2.missing} failed")
+                if rep2.ok > rep.ok:
+                    shutil.rmtree(src_dir, ignore_errors=True)
+                    shutil.move(str(alt_dir / "src"), str(src_dir))
+                    shutil.copy2(alt_dir / "report.md", out_dir / "report.md")
+                    shutil.copy2(alt_dir / "report.json", out_dir / "report.json")
+                    rep = rep2
+                    print(f"      adopted de-flattened results (+{rep2.ok - rep.ok} clean)")
+                else:
+                    shutil.rmtree(alt_dir, ignore_errors=True)
+                    print("      kept original results (de-flattening did not help)")
+            except Exception as exc:
+                print(f"      ! rescue pass failed: {exc}")
+
     # Phase 5: Dynamic Decryption Replay (BSM Indy + Pool Recovery)
     indy_recovered = 0
     pool_recovered = 0
@@ -297,11 +333,13 @@ def run_pipeline(
         print("[5/7] Dynamic JVM replay string decryption ...")
         # 1. BSM Indy
         try:
-            census = BM.census_jar(current_jar)
-            if census.sites > 0:
-                print(f"      inspecting {census.sites} indy callsite(s) across {census.classes_with_sites} class(es) ...")
+            census = BM.scan_jar(current_jar)
+            st = census["stats"]
+            if st["sites"] > 0:
+                print(f"      inspecting {st['sites']} indy callsite(s) across {st['classes_with_sites']} class(es) ...")
                 rec_dir = work_dir / "recover"
-                rc_code = RC.recover(current_jar, rec_dir, timeout=120, with_stubs=with_stubs)
+                rc_code = RC.recover(original_jar, rec_dir, timeout=timeout,
+                                     with_stubs=with_stubs, cp_file=cp_file)
                 rec_tsv = rec_dir / "recovered.tsv"
                 if rec_tsv.is_file():
                     st_rw = RC.rewrite_sources(src_dir, rec_tsv)
@@ -313,12 +351,15 @@ def run_pipeline(
 
         # 2. String Pool
         try:
-            st_scan = PL.scan(src_dir)
+            pool_dir = work_dir / "pool"
+            pool_spec = pool_dir / "pool_spec.tsv"
+            st_scan = PL.scan_spec(src_dir, pool_spec)
             if st_scan.get("accessors", 0) > 0 and st_scan.get("unique", 0) > 0:
                 print(f"      inspecting {st_scan['unique']} pool site(s) across {st_scan['pool_classes']} accessor class(es) ...")
-                pool_dir = work_dir / "pool"
                 harvest_tsv = pool_dir / "pool_harvest.tsv"
-                PL.harvest(st_scan["spec"], harvest_tsv, pool_dir, timeout=120, with_stubs=with_stubs)
+                PL.harvest(pool_spec, harvest_tsv, pool_dir, timeout=timeout,
+                           with_stubs=with_stubs, cp=str(original_jar),
+                           cp_file=cp_file)
                 if harvest_tsv.is_file():
                     tmp_pool = work_dir / "src_pool"
                     st_apply = PL.apply(src_dir, harvest_tsv, tmp_pool)
