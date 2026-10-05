@@ -349,6 +349,29 @@ def scan_binary_jni_descriptors(data: bytes) -> list[dict]:
     return out
 
 
+def triage_raw(path: Path, out_dir: Path) -> Triage:
+    """Triage a single raw PE/ELF file (e.g. a DLL dumped by engines/frida)."""
+    data = path.read_bytes()
+    tri = Triage(libs=[])
+    lib = NativeLib(name=path.name, size=len(data), format=detect_format(data))
+    if lib.format == "PE":
+        lib.exports = parse_pe_exports(data)
+        lib.jni_exports = [s for s in lib.exports
+                           if s.startswith("Java_") or s.startswith("JNI_On")]
+    elif lib.format == "ELF":
+        lib.exports = parse_elf_exports(data)
+        lib.jni_exports = [s for s in lib.exports
+                           if s.startswith("Java_") or s.startswith("JNI_On")]
+    else:
+        lib.error = "PE / ELF 以外的格式仅提取不解析"
+    lib.strings = scan_strings(data)
+    lib.dynamic_methods = scan_binary_jni_descriptors(data)
+    tri.libs.append(lib)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / path.name).write_bytes(data)
+    return tri
+
+
 def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
     from . import classfile as CF       # 延迟导入：仅 jar 路径才付出解析成本
 

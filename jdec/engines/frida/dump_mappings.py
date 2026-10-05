@@ -38,6 +38,11 @@ def main() -> int:
     ap.add_argument("--script", required=True)
     ap.add_argument("--out", default="mappings.tsv")
     ap.add_argument("--jni-out")
+    ap.add_argument("--payload-out", default=None,
+                    help="copy dropped native libraries here")
+    ap.add_argument("--stdout-markers", default=None,
+                    help="capture the target's stdout (ENTER/EXIT markers "
+                         "from the harness) to this file, in true order")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--attach-name", default="java",
                     help="process-name prefix to race-attach")
@@ -55,7 +60,9 @@ def main() -> int:
         if message.get("type") == "send":
             rows.append(message["payload"])
             p = message["payload"]
-            if p.get("type") == "info":
+            if p.get("type") == "payload":
+                print(f"[payload] {p.get('path')}", file=sys.stderr)
+            elif p.get("type") == "info":
                 print(f"[info] {p.get('msg')}", file=sys.stderr)
             elif p.get("type") == "error":
                 print(f"[script-error] {p.get('msg')}", file=sys.stderr)
@@ -85,7 +92,12 @@ def main() -> int:
         except Exception:
             return False
 
-    popen = subprocess.Popen([args.java] + java_args)
+    stdout_file = None
+    stdout_thread = None
+    popen = subprocess.Popen(
+        [args.java] + java_args,
+        stdout=(open(args.stdout_markers, "w", encoding="utf-8")
+                if args.stdout_markers else None))
     pids.add(popen.pid)
     instrument(popen.pid, "target")
     print(f"[info] launched pid={popen.pid}, pumping + racing "
@@ -125,6 +137,21 @@ def main() -> int:
                                capture_output=True, timeout=10)
             except Exception:
                 pass
+
+    if args.payload_out:
+        import os
+        import shutil
+        os.makedirs(args.payload_out, exist_ok=True)
+        for r in rows:
+            if r.get("type") == "payload":
+                src = r["path"]
+                if os.path.exists(src):
+                    dst = os.path.join(args.payload_out, os.path.basename(src))
+                    try:
+                        shutil.copy2(src, dst)
+                        print(f"[payload] copied {src} -> {dst}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[warn] copy {src}: {e}", file=sys.stderr)
 
     nat = [r for r in rows if r.get("type") == "regnatives"]
     jni = [r for r in rows if r.get("type") == "jni"]

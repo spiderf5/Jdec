@@ -265,7 +265,12 @@ def cmd_natives(args: argparse.Namespace) -> int:
         print(f"no such file: {raw}")
         return 2
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_natives")
-    tri = NS.triage(raw, out_dir, collect_decl=not args.no_decl)
+    is_zip = raw.read_bytes()[:2] == b"PK"
+    if is_zip:
+        tri = NS.triage(raw, out_dir, collect_decl=not args.no_decl)
+    else:
+        # raw PE/ELF file (e.g. a DLL dumped by engines/frida payload dump)
+        tri = NS.triage_raw(raw, out_dir)
 
     decompiled_info = None
     if getattr(args, "decompile", False):
