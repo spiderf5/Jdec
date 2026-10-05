@@ -95,6 +95,8 @@ class JarProfile:
     signatures: list[str] = field(default_factory=list)
     sample_classes: list[str] = field(default_factory=list)
     structural: list[str] = field(default_factory=list)
+    # BytecodeVM watermark: decoded key/values + "_class" carrier name
+    watermark: dict[str, str] | None = None
 
     def summary(self) -> str:
         lines = [
@@ -116,6 +118,10 @@ class JarProfile:
                 f"{p} ({c})" for p, c in self.top_packages[:5]))
         if self.structural:
             lines.append("structure      : " + "; ".join(self.structural[:4]))
+        if self.watermark:
+            wm = ", ".join(f"{k}={v}" for k, v in self.watermark.items()
+                           if not k.startswith("_"))
+            lines.append(f"watermark      : BytecodeVM ({wm})")
         if self.signatures:
             lines.append("signatures     : " + "; ".join(self.signatures[:4]))
         return "\n".join(lines)
@@ -245,19 +251,33 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
                 prof.signatures.append(f"obfuscator package {marker}")
                 break
 
-    # bytecode versions across everything (cheap: header only)
+    # bytecode versions + BytecodeVM watermark scan across everything.
+    # Full entry bytes in the SAME pass as the header read (one open per
+    # class either way); the watermark gate is an 8-byte raw substring.
     from .classfile import java_version_of
+    from . import bvmw
     versions: dict[str, int] = {}
     for n in class_names:
         try:
             with zf.open(n) as f:
-                head = f.read(8)
+                head = f.read()
         except Exception:
             continue
         mj = _major_version(head)
         if mj:
             versions[java_version_of(mj)] = versions.get(java_version_of(mj), 0) + 1
+        if prof.watermark is None:
+            wm = bvmw.find_watermark(head)
+            if wm:
+                prof.watermark = {**wm, "_class": n}
     prof.java_versions = versions
+
+    if prof.watermark:
+        detail = ", ".join(
+            f"{k}={v}" for k, v in prof.watermark.items() if not k.startswith("_"))
+        prof.signatures.append(f"BytecodeVM watermark ({detail})")
+        if prof.obfuscator is None:
+            prof.obfuscator = "BytecodeVM"
 
     # deep sample for naming statistics
     step = max(1, len(class_names) // sample)

@@ -438,3 +438,40 @@ recover 驱动 6 轮（Method.invokeWithArguments 不存在 → bootstrap/dynami
 `git revert <对应提交>`；deobf_scan 行为变化集中在 collect_classes/返回
 值结构（调用方仅 main），revert 即回旧行为；新子命令为纯新增，无兼容
 影响。junction/双写拷贝已同步。
+
+---
+
+## 2026-10-05 晚：BytecodeVM 水印静态解码 + 指纹库迭代（study/ 标本馆第一批落地）
+
+### 任务目标
+
+用 study/ 七仓（保护器源码/族谱）迭代 jdec：BytecodeVM 水印情报通道 + 指纹库扩充 + 真实样本回归。
+
+### 文件级变更
+
+- **新增 `jdec/bvmw.py`**：BytecodeVM 水印扫描/解码。常量池 Long `0x42564D57434F4445`("BVMWCODE") 标记 + CONSTANT_String 载体（base64(key16|nonce12|ct+tag16)）→ 纯 stdlib AES-128-GCM 解密（自实现 AES 核心经 FIPS-197 C.1 向量验证）+ payload（magic/version/len/body/sha256 + count×(len+key,len+value)）。格式逐字节对照 study/BytecodeVM SDK 源码（WatermarkCapsule/WatermarkCodec/WatermarkReader）。
+- **`jdec/probe.py`**：全类单遍扫描（头读改全量读，一次 open）接入 `find_watermark`；`JarProfile.watermark` 字段 + summary `watermark:` 行 + 归因 "BytecodeVM"（仅当无其他归因）+ signature 行。
+- **`jdec/jdec/fingerprints.json`**（33→36）：+BytecodeVM（nhcm/bytecodevm、$CodePool）、+native-obfuscator (radioegor146)（by/radioegor146）；Phantom Shield X 增 tech/skidonion 关键词 + tool 字段按源码重写（NativeObfuscation=字节码直译 C、单参访问器池、jphantom、验证服务端协议）。
+- **`jdec/tests/run_tests.py`**：+`test_bvmw_watermark`（FIPS 向量 + 真 SDK 胶囊常量回归 + javac 现 fixture 走 profile_jar 端到端），main 注册。
+- **`.gitignore`**：+`study/`（外部研究材料含 DMCA 敏感源码，永不入库）。
+
+### 执行的命令与结果
+
+- `python tests/run_tests.py` → **390 passed / 0 failed**（本轮 +5 checks）。
+- 回归：probe jnic-3.7.0.jar=98(JNIC)、myj2c.jar=0(MyJ2C)、Elowen=94(ZKM) 全部与改前一致；水印扫描三样本零误报。
+- 端到端：javac 编译 SDK 真 Watermark* 类生成真胶囊 → `bvmw.decode_capsule` 解出 owner/artifactId/builtAtUtc ✓。
+
+### 修复轮次
+
+1. 首版测试胶囊串凭记忆截断→发现后立即用真全文替换（教训：base64 密文材料绝不能手抄片段）。
+
+### 遗留风险 / 待办
+
+- pool.py 单参访问器（OPS 形态 `(C)Ljava/lang/Object;`）**未适配**——需先建 OPS 保护 fixture 再动 spec/driver/apply 三处口径，本轮刻意不动（防盲改）。
+- BytecodeVM 全量构建被 gradle 分发 TLS 代理拦断（腾讯镜像 8.14.3 bin.zip 已下载 /tmp/gradle.zip，可用其直接跑 gradle 绕 wrapper）——完整 protect fixture 的端到端留待下轮。
+- ZKM27 源码深读（flow/ReferenceObfuscator 2482/3976 行）刚开箱：StringEncryptionTechnique 七形态已确认（三已知形态全对上 + LOCAL_ARRAY_AND_INDEX 为工具树盲区），逐条对照 fingerprints/control-flow 结论待下轮。
+- README.md/change-report.md 再次出现编辑器 `\*\*` 转义+表格线污染，已 git restore（批次五同款）。
+
+### 回滚
+
+`git revert` 单提交即可；bvmw.py 独立新文件可整体删除，probe.py 改动集中在 watermark 块与 summary 行。
