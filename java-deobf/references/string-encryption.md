@@ -371,3 +371,30 @@ Elowen 的伪造 Firefox UA HTTP 客户端即此结局。
 **成绩对照**：最小 cp 196/366（254 条）→ 全量配方 365/366（1203 行/
 917 唯一），唯一剩 1 类 = clinit 取 mod 单例（`Elowen.S()` 为 null，
 需真机 mod 初始化，结构性）。
+
+### ZKM 七技术源码级对照（ZKM27 泄露源码 MethodBytecode.java:8214，2026-10-05）
+
+`StringEncryptionTechnique` 枚举即全部形态，发射逻辑唯一在 classfile/insn/MethodBytecode.java：
+
+| 技术 | 发射序列 | jdec 覆盖 |
+|---|---|---|
+| LOCAL_ARRAY_AND_INDEX | `aload N` [+idx, aaload]，明文在**方法局部数组**（clinit 解密后经参数传入或方法内重建） | ✗ 三路全盲——无 static 字段、无访问器、无 indy |
+| FIELD_ARRAY_AND_INDEX | `getstatic field` [+idx, aaload] | FieldDump ✓（Elowen 实证形态） |
+| SEPARATE_METHODS | `invokestatic a; invokestatic b` 双解密器链 | pool 近亲，待样本 |
+| LABEL_JUMP | `jsr/goto` 到解密块（lf21 form-A 内联单串即此） | recover 部分 |
+| LOOKUP_METHOD_AND_INDEX(_DES) | `push idx^key` [+long key, l2i] `invokestatic` | pool ✓（DES 变体解释实测 6 位随机 DES key） |
+| INDY_ENTRY_AND_INDEX | `push idx^key` + long key + invokedynamic | recover ✓ |
+
+所有技术经 `addSplitCodeInsertions` ——**参数常量被拆成两半分开插入**（flow 交联），
+这就是实测"goto 洪水里参数拆半"的源头。int/long 常量加密同构（StorageKind 5 种）。
+遇到三路全空的 ZKM 样本，先查 LOCAL_ARRAY_AND_INDEX：特征=方法内 aload 局部 Object[]
++ 索引 aaload，clinit/方法头有批量解密循环。
+
+### OPS（PhantomShield）字符串池静态解密配方（源码 100% 闭环，待真样本验证）
+
+加密：`[len_le16][utf8]...` → 追加 SHA-256(32B) → DES/CBC/PKCS5（key 随机 8B **内嵌为
+第二个 LDC**，IV=8×0）→ 随机置换 swp[256] 正向替换 → ISO-8859-1 大 LDC。
+解密（clinit 内生成 Java）：**tableswitch 256 case = swp 逆置换**（静态可抓）→ 逆置换 →
+DES 解密 → SHA-256 校验 → 按 len 切分入 Object[] 池。访问器 `(C)Ljava/lang/Object;`
+= GETSTATIC + ILOAD + AALOAD。静态解无需 JVM：抓两个 LDC + switch 表 → 逆置换 → DES
+（Windows 可用 bcrypt.dll CNG，ctypes 保零依赖）→ 校验 → 切分。
