@@ -1625,7 +1625,7 @@ def test_web_workbench_features() -> None:
         (work_dir / "pipeline_summary.md").write_text("# Pipeline Summary\nAutomated deobf successful.", encoding="utf-8")
 
         handler = lambda *args, **kwargs: WB.WorkbenchHandler(*args, work_dir=work_dir, **kwargs)
-        server = WB.HTTPServer(("127.0.0.1", 0), handler)
+        server = WB.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         port = server.server_address[1]
         srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
         srv_thread.start()

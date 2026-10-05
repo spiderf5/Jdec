@@ -28,8 +28,13 @@ _WS = "[ \t\r\n]*"
 _WS_PLUS = "[ \t\r\n]+"
 _WORD = "[A-Za-z0-9_$]"
 _TYPE_CHAR = "[][A-Za-z0-9_$<>, \t]"
+# 2026-10-05 事故修复：旧写法把 _WS_PLUS 塞进交替组再整体量化
+# （(?:public|...|_WS_PLUS)+）——不匹配的长行触发指数回溯，30KB 源文件
+# 卡死 40s+（web llm_prompt 端点挂起、单线程 server 全站瘫痪的根因）。
+# 重写为每个重复单元由字面修饰符词锚定，切分点无二义，线性回溯。
+_MOD = "public|protected|private|static|final|abstract|synchronized"
 _METHOD_DECL = re.compile(
-    '(?:public|protected|private|static|final|' + _WS_PLUS + ')+' + _WS_PLUS +
+    '(?:(?:' + _MOD + ')' + _WS_PLUS + ')+'
     '(' + _TYPE_CHAR + '+?)' + _WS_PLUS +
     '([A-Za-z_$]' + _WORD + '*)' + _WS +
     '[(]([^)]*)[)]' + _WS +

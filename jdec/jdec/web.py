@@ -22,7 +22,7 @@ import re
 import socketserver
 import sys
 import urllib.parse
-from http.server import SimpleHTTPRequestHandler, HTTPServer
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import webbrowser
 
@@ -1238,13 +1238,13 @@ def start_server(work_dir: Path, port: int = 8080, open_browser: bool = True) ->
     chosen_port = port
     for p in range(port, port + 10):
         try:
-            server = HTTPServer(("127.0.0.1", p), handler)
+            server = ThreadingHTTPServer(("127.0.0.1", p), handler)
             chosen_port = p
             break
         except OSError:
             continue
     if server is None:
-        server = HTTPServer(("127.0.0.1", port), handler)
+        server = ThreadingHTTPServer(("127.0.0.1", port), handler)
         chosen_port = port
 
     url = f"http://127.0.0.1:{chosen_port}"
