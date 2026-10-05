@@ -1538,6 +1538,7 @@ def test_pipeline_automation() -> None:
 
 def test_web_workbench_features() -> None:
     print("web: interactive workbench with diff, annotations and LLM assist")
+    import re
     from jdec import web as WB
     import urllib.request
     import threading
@@ -1610,7 +1611,7 @@ def test_web_workbench_features() -> None:
                 check("workbench home page returns 200", res.status == 200)
                 check("workbench HTML has interactive tabs", "Engine Diff" in html_body and "AI Semantic Rename" in html_body)
                 check("workbench HTML has clean benign tag", '<option value="benign">benign</option>' in html_body)
-                check("workbench HTML avoids emoji in select tags", '⚠️' not in html_body and '✅' not in html_body)
+                check("workbench HTML has zero emojis", not bool(re.search(r'[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\u2b50-\u2b55\u200d\ufe0f]', html_body)))
 
             # 2. Test GET /api/tree
             with urllib.request.urlopen(f"{base_url}/api/tree") as res:

@@ -563,7 +563,7 @@ def render_markdown(rep: ReachabilityReport, target_path: str | None = None) -> 
             for i, edge in enumerate(path_edges, 1):
                 md.append(f"{i}. `{edge.caller.display_name}` --(`{edge.opcode}`)--> `{edge.callee.display_name}`")
         else:
-            md.append(f"⚠️ Target `{target_path}` is **unreachable** from any discovered entrypoint (potential dead code or dynamic reflection).")
+            md.append(f"Target `{target_path}` is **unreachable** from any discovered entrypoint (potential dead code or dynamic reflection).")
 
     if rep.dead_classes:
         md.append("\n## Dead / Unreachable Classes (Sample Top 15)\n")

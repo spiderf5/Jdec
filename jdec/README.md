@@ -396,7 +396,7 @@ python jdec.py reach client.jar --dot callgraph.dot --json reach.json -o reach_r
 - **方法级字节码调用图与正向推演**：从入口点出发遍历全量方法调用（解析 `invokestatic`、`invokevirtual`、`invokespecial`、`invokeinterface`、`invokedynamic` 并处理多态虚分发），精确分离真正可能执行的代码与死代码/第三方冗余依赖。
 - **最短触发调用链回溯 (`--target`)**：逆向分析师指定可疑类或方法后，自动回溯输出从模组入口或 Hook 点到该目标的最短调用链路与调用指令（如 `ClientEntry.onInitializeClient() --(invokestatic)--> Licence.decode()`）。
 - **死代码与膨胀依赖裁剪 (`--prune`)**：一键生成剔除无用死代码与臃肿嵌入式依赖后的瘦身 jar 包，保留所有资源与可达类，大幅缩小逆向分析与二次构建开销。
-- **Web 工作台实时联动**：在 Web 工作台选中任意类，实时查看入向调用者 (Callers)、出向被调用者 (Callees)、可达性标签 (`🎯 Reachable` / `💤 Dead Code`) 以及端到端触发路径。
+- **Web 工作台实时联动**：在 Web 工作台选中任意类，实时查看入向调用者 (Callers)、出向被调用者 (Callees)、可达性标签 (`reachable` / `unreachable`) 以及端到端触发路径。
 
 ## 金标准还原：一键生成 IDE 可编译工程 (Project Export & Recompilability)
 
@@ -432,7 +432,7 @@ python jdec.py project client.jar -o client_project/ --compile
   - 调用本地 `javac`（自动追加 `-J-Duser.language=en` 实现跨语言跨系统诊断解析）；
   - 针对编译报错进行多轮闭环自愈修复：自动注释重名符号、智能根据 javac 候选类型将歧义 `null` 参数补全强转（如 `pick((String) null)`），直到达到最佳可编译状态并输出诊断报告。
 - **Web 工作台一键集成**：
-  - 在 Web 工作台标题栏提供「📦 Export IDE Project」按钮，一键从浏览器导出可以直接用 IDEA 打开的工程。
+  - 在 Web 工作台标题栏提供「Export IDE Project」按钮，一键从浏览器导出可以直接用 IDEA 打开的工程。
 
 ## 实测
 

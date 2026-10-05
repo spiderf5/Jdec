@@ -134,7 +134,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div id="target-summary" class="badge">Loading target ...</div>
     </div>
     <div style="display:flex; align-items:center; gap:8px;">
-      <button class="btn btn-primary" onclick="exportIdeProject()" style="padding:5px 12px; font-size:0.8rem; cursor:pointer;">📦 Export IDE Project</button>
+      <button class="btn btn-primary" onclick="exportIdeProject()" style="padding:5px 12px; font-size:0.8rem; cursor:pointer;">Export IDE Project</button>
     </div>
   </header>
   <div class="layout">
@@ -209,12 +209,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <textarea id="audit-note" rows="4" style="width:100%; background:var(--bg-dark); color:var(--text-main); border:1px solid var(--border); border-radius:4px; padding:6px; font-size:0.82rem; resize:vertical; outline:none;" placeholder="Write observations or notes (Ctrl+S to save)..."></textarea>
               </div>
               <div style="display:flex; justify-content:space-between; align-items:center;">
-                <button class="btn btn-primary" onclick="saveAuditNote()">💾 Save Note</button>
+                <button class="btn btn-primary" onclick="saveAuditNote()">Save Note</button>
                 <button class="btn btn-ghost" onclick="clearAuditNote()">Clear</button>
                 <span id="audit-status" style="font-size:0.75rem; color:var(--text-muted);"></span>
               </div>
             </div>
-            <button class="btn-ai" onclick="openLlmPromptModal()">🤖 AI Semantic Rename Prompt</button>
+            <button class="btn-ai" onclick="openLlmPromptModal()">AI Semantic Rename Prompt</button>
           </div>
           <div class="sec">
             <h3>Mixin Hooks</h3>
@@ -244,7 +244,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="modal-overlay" id="llm-modal">
     <div class="modal-box">
       <div class="modal-hdr">
-        <h2 id="llm-modal-title">🤖 AI Semantic Rename Prompt</h2>
+        <h2 id="llm-modal-title">AI Semantic Rename Prompt</h2>
         <button class="btn btn-ghost" onclick="closeLlmModal()">&times;</button>
       </div>
       <div class="modal-body">
@@ -254,8 +254,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <textarea id="llm-prompt-text" readonly></textarea>
       </div>
       <div class="modal-ftr">
-        <span id="copy-status" style="font-size:0.82rem; color:var(--success); display:none;">✓ Copied to clipboard!</span>
-        <button class="btn btn-primary" id="btn-copy-prompt" onclick="copyLlmPrompt()">📋 Copy Prompt</button>
+        <span id="copy-status" style="font-size:0.82rem; color:var(--success); display:none;">Copied to clipboard!</span>
+        <button class="btn btn-primary" id="btn-copy-prompt" onclick="copyLlmPrompt()">Copy Prompt</button>
         <button class="btn btn-ghost" onclick="closeLlmModal()">Close</button>
       </div>
     </div>
@@ -442,7 +442,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           let pathHtml = '<div style="font-weight:600; margin-bottom:4px; color:var(--accent-hover);">Execution Trigger Path:</div>';
           data.path.forEach((step, i) => {
             pathHtml += '<div style="margin-left:' + (i * 8) + 'px; margin-bottom:2px;">' +
-              (i === 0 ? '🏁 ' : '&bull; ') + '<code>' + esc(step.from) + '</code>' +
+              '&bull; <code>' + esc(step.from) + '</code>' +
               ' <span style="font-size:0.7rem; color:var(--text-muted);">(' + esc(step.opcode) + ')</span>' +
               ' &rarr; <code>' + esc(step.to) + '</code></div>';
           });
@@ -536,7 +536,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         if (data.identical) {
           statsBadge.innerText = 'Identical (0 diff)';
-          diffContent.innerHTML = '<div style="color:var(--success); padding:10px;">✓ Output from ' + esc(e1) + ' and ' + esc(e2) + ' are completely identical.</div>';
+          diffContent.innerHTML = '<div style="color:var(--success); padding:10px;">Output from ' + esc(e1) + ' and ' + esc(e2) + ' are completely identical.</div>';
           return;
         }
 
@@ -566,7 +566,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     async function openLlmPromptModal() {
       const cls = currentData.selected;
       if (!cls) return;
-      document.getElementById('llm-modal-title').innerText = '🤖 AI Semantic Rename: ' + cls;
+      document.getElementById('llm-modal-title').innerText = 'AI Semantic Rename: ' + cls;
       document.getElementById('llm-prompt-text').value = 'Generating prompt ...';
       document.getElementById('copy-status').style.display = 'none';
       document.getElementById('llm-modal').classList.add('active');
@@ -604,7 +604,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const res = await fetch('/api/export_project');
         const data = await res.json();
         if (data.ok) {
-          alert('✓ IDE Project generated successfully!\n\nTarget directory: ' + data.project_dir + '\n\nOpen in IntelliJ IDEA: File -> Open -> build.gradle');
+          alert('IDE Project generated successfully!\n\nTarget directory: ' + data.project_dir + '\n\nOpen in IntelliJ IDEA: File -> Open -> build.gradle');
         } else {
           alert('Project export error: ' + (data.error || 'Unknown failure'));
         }

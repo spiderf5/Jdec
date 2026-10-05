@@ -48,6 +48,8 @@ hs_err_pid*.log
 *_pool/
 scorecard.json
 scorecard.md
+out*/
+*_auto/
 
 # java compiled classes
 *.class
