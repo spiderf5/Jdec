@@ -53,13 +53,25 @@ python jdec.py engines
 
 ## 用法
 
+### 一键全自动端到端分析（推荐）
+
+一条命令全自动执行完整逆向分析流程：指纹探测 $\rightarrow$ 字节码平坦化消除 $\rightarrow$ 符号重映射 $\rightarrow$ 多引擎择优反编译 $\rightarrow$ 动态重放解密 $\rightarrow$ Native与行为审计 $\rightarrow$ 输出总览报告并可选启动 Web 工作台：
+
+```bash
+python jdec.py auto client.jar -o out --web
+```
+
+---
+
+### 分步执行命令
+
 先看一眼对面是什么，不反编译：
 
 ```bash
 python jdec.py probe client.jar
 ```
 
-反编译（检测到混淆的 Minecraft 会自动尝试反混淆）：
+普通反编译（检测到混淆的 Minecraft 会自动尝试反混淆）：
 
 ```bash
 python jdec.py decompile client.jar -o out
@@ -97,7 +109,8 @@ python jdec.py indy client.jar                 # indy 站点普查：4 万级站
 python jdec.py natives client.jar -o nat/      # 提取 native 库 + PE/ELF 导出表 + 动态 RegisterNatives 识别 +
                                                # 反向 JNI 调用图 (FindClass/GetMethodID) + Ghidra 逆向脚本
                                                # （加 --decompile 可自动调用内置 Ghidra 输出 C 伪代码）
-python jdec.py deflat client.jar -o deflat.jar # 字节码控制流平坦化消除 (CFG de-flattening) 与常量折叠
+python jdec.py deflat client.jar -o deflat.jar # 字节码控制流平坦化消除、不透明谓词剔除与反编译器陷阱死代码消除
+python jdec.py reach client.jar --prune slim.jar # 入口可达性分析、最短触发调用链回溯与死代码裁剪
 python jdec.py recover client.jar -o rec/      # 自洽重放：内置自动挂载 mc_stubs.jar 单例桩，
                                                # 消除 needs-instance / needs-bootstrap 连坐失效
 python jdec.py web out/                        # 启动本地多引擎交互式 Web 工作台 (代码对比/搜索/Hook浏览器)
@@ -318,17 +331,27 @@ recover them:
 - **反向 JNI 调用图 (Native -> Java)**：静态挖掘 C 伪代码中的 `FindClass`、`GetMethodID`、`GetFieldID`、`Call<Type>Method` 等跨语言调用点，精确查明原生库内部在操纵哪些 Java 类、反射读取哪些敏感字段。
 - **Ghidra 自动化注解脚本**：自动输出 `ghidra_annotate.py`，导入 Ghidra 即可一键恢复所有 JNI 函数名和数据类型。
 
-## 控制流平坦化消除 (CFG De-flattening)
+## 控制流平坦化消除与反编译器陷阱剔除 (CFG De-flattening & Trap Pruning)
 
-某些混淆器（如 ZKM、Allatori、Dash-O）将方法体打碎为有限状态机：所有的基本块包裹在一个 `while(true) switch(state)` 分发器内，末尾通过修改状态变量并跳转回 switch 头部执行下一步，反编译器往往生成死循环或海量 goto。
+商业混淆器（如 ZKM、Allatori、Dash-O、Stringer、Smoke）广泛部署多层底层字节码陷阱：
+1. **控制流平坦化 (Control Flow Flattening)**：将方法体拆解为状态机循环，基本块由 `tableswitch` / `lookupswitch` 调度分发，导致反编译器输出死循环或大面积嵌套 goto；
+2. **不透明谓词 (Opaque Predicates)**：插入运行时恒真/恒假的代数恒等式（如 `v == v`、`null != null`、`iconst_0 == 0`）作为跳转守卫；
+3. **反编译器崩溃陷阱 (Anti-Decompiler Traps)**：在不可达死代码分支内填充非法操作码、不平衡操作数栈、或恶意 `athrow` 故意导致 CFR / Vineflower 解析崩溃；
+4. **畸形异常表 (Malformed Exception Tables)**：构造 `start == end` 的零长度异常处理器或越界 handler 干扰反编译器控制流重构。
 
 ```bash
 python jdec.py deflat input.jar -o input_deflat.jar
 ```
 
-`deflat` 模块在字节码层工作：
-1. **常量折叠引擎**：化简异或混淆常数（如 `bipush 5 ^ bipush 3` 直接求值为 `6`）。
-2. **状态分发器重构**：识别 `tableswitch` / `lookupswitch` 分发器，分析状态转移表，将每个 case 块末尾跳回 switch 的 `goto` 直接重定向至下一个目标基本块，安全恢复线性和结构化控制流，无需依赖易损坏的重排。
+`deflat` 模块在纯字节码层进行三轮收敛级优化（**严格保持字节等长 NOP 填充，规避 StackMapTable 破坏与 VerifyError**）：
+1. **常量折叠引擎 (`simplify_constants`)**：自动识别并折叠常量算术与异或混淆常数（如 `bipush 5 ^ bipush 3` 直接求值为 `6`）。
+2. **不透明谓词消除 (`prune_opaque_predicates`)**：
+   - 恒真跳转自动转化为无条件 `goto`，恒假跳转及前序压栈指令直接抹平为 `nop`；
+   - 深度支持单目整数、双目整型比较、局部变量自等性（`iload_x == iload_x`）及引用判空（`ifnull / ifnonnull`）。
+3. **冗余自跳转消除 (`clean_redundant_jumps`)**：清理跳向紧邻后继指令的无效跳转（`goto next_pc` 转化为 `nop`）。
+4. **状态分发器重构 (`deflat_code`)**：分析 switch 状态转移表，将每个 case 块末尾跳回 switch 的 `goto` 直接重定向至下一个目标基本块，安全恢复线性和结构化控制流。
+5. **CFG 可达性分析与死代码剔除 (`prune_dead_code`)**：从方法入口点与真实触发异常入口进行广度优先可达性推演，不可达的反编译器陷阱死代码块 100% 安全抹平为 `nop`。
+6. **异常表净化 (`prune_exception_handlers`)**：精确剔除零长度、越界及作用域全为死代码的畸形异常处理器，自动重包 `Code` 属性头与子属性偏移。
 
 ## 交互式 Web 工作台与语义命名恢复
 
@@ -336,17 +359,38 @@ python jdec.py deflat input.jar -o input_deflat.jar
 python jdec.py web out/
 ```
 
-- **零依赖 Web 工作台**：单命令启动内置本地 Web 服务，多栏暗色界面，支持：
-  - 类目录树即时过滤与搜索。
-  - 多引擎反编译源码并排检视与差异对比。
-  - Mixin Hook 目标注入点快速定位。
-  - 恶意/高危威胁字符串（Webhook/C2/IP/凭据）按类汇总透视。
+- **零依赖 Web 逆向工作台**：单命令启动内置本地 Web 服务（纯标准库实现，无 node/pip 依赖），暗色专业研判界面：
+  - **类目录树与即时过滤**：支持包名/类名模糊检索，以及 `All / Tagged / ⚠️ Suspects` 快速标签筛选。
+  - **多引擎统一差异比对 (`Engine Diff`)**：支持在 Final (Winner)、CFR、Vineflower、Procyon 之间任意切换并排比对源码，自动生成 unified diff，精准高亮增加/删除差异行及区块变更统计。
+  - **交互式研判笔记与标记 (`Audit & Notes`)**：
+    - 支持为类添加研判标签：`⚠️ 存疑 (suspect)`、`🔒 核心 (core)`、`🌐 通信 (net)`、`💣 威胁 (threat)`、`🪝 Hook (hook)`、`✅ 正常 (benign)`。
+    - 侧边栏实时呈现彩色状态图标；提供富文本研判备忘录录入，支持 `Ctrl+S` 快捷保存，数据持久化存储于 `audit_notes.json`。
+  - **一键式 AI 语义重命名助手 (`AI Semantic Rename Prompt`)**：
+    - 一键提取当前类的 Mixin 注解、敏感字符串特征、参数签名及源码片段，生成结构化大模型 Prompt 弹窗；
+    - 支持一键复制至剪贴板，提示词直接引导 LLM 输出标准 ProGuard / TSV 格式的语义重命名规则。
+  - **Mixin Hook 目标注入点快速定位**：直接查看 `@Inject` / `@Overwrite` 的原版目标与参数。
+  - **威胁字符串与本地 C 伪代码内嵌查看**：无缝浏览 `strings.tsv` 恶意特征及 JNI 逆向报告。
 
 ```bash
 python jdec.py rename out/src/ -o llm_mappings.txt --prompt-out prompt.json
 ```
 
-- **语义反混淆与 LLM 映射生成**：通过静态扫描类结构、常量池字面量、参数与返回类型以及 Mixin 注解信息，提取混淆成员的语义线索，输出标准 JSON 格式提示词供大模型批量推导可读名字，并直接写出标准 ProGuard 重命名映射表。
+- **批量语义反混淆与 LLM 映射生成**：通过静态扫描类结构、常量池字面量、参数与返回类型以及 Mixin 注解信息，提取混淆成员的语义线索，输出标准 JSON 格式提示词供大模型批量推导可读名字，并直接写出标准 ProGuard 重命名映射表。
+
+## 入口可达性分析与调用图精简 (Reachability & Call Graph)
+
+```bash
+python jdec.py reach client.jar
+python jdec.py reach client.jar --target "demo/mixin/Licence"
+python jdec.py reach client.jar --prune client_pruned.jar
+python jdec.py reach client.jar --dot callgraph.dot --json reach.json -o reach_report.md
+```
+
+- **全自动入口点深度挖掘**：自动从 `fabric.mod.json`、`quilt.mod.json`、`mods.toml`、`@Mod` 类、`MANIFEST.MF`（Main-Class / Premain / Agent-Class）以及所有 `@Mixin` 类（`@Inject` / `@Overwrite` / `@Redirect`）提取真实生命周期入口。
+- **方法级字节码调用图与正向推演**：从入口点出发遍历全量方法调用（解析 `invokestatic`、`invokevirtual`、`invokespecial`、`invokeinterface`、`invokedynamic` 并处理多态虚分发），精确分离真正可能执行的代码与死代码/第三方冗余依赖。
+- **最短触发调用链回溯 (`--target`)**：逆向分析师指定可疑类或方法后，自动回溯输出从模组入口或 Hook 点到该目标的最短调用链路与调用指令（如 `ClientEntry.onInitializeClient() --(invokestatic)--> Licence.decode()`）。
+- **死代码与膨胀依赖裁剪 (`--prune`)**：一键生成剔除无用死代码与臃肿嵌入式依赖后的瘦身 jar 包，保留所有资源与可达类，大幅缩小逆向分析与二次构建开销。
+- **Web 工作台实时联动**：在 Web 工作台选中任意类，实时查看入向调用者 (Callers)、出向被调用者 (Callees)、可达性标签 (`🎯 Reachable` / `💤 Dead Code`) 以及端到端触发路径。
 
 ## 实测
 

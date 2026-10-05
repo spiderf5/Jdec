@@ -1424,6 +1424,362 @@ def test_advanced_roadmap_features() -> None:
         shutil.rmtree(tmp_ren, ignore_errors=True)
 
 
+def test_pipeline_automation() -> None:
+    print("pipeline: automated end-to-end deobfuscation and triage")
+    from jdec import pipeline as PL
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        out_dir = d / "auto_out"
+        res = PL.run_pipeline(
+            SAMPLE,
+            out_dir,
+            no_recover=True,
+            clean_work=False,
+        )
+        check("pipeline ran successfully", res.decompile_total > 0)
+        check("pipeline summary markdown exists", (out_dir / "pipeline_summary.md").is_file())
+        check("pipeline summary json exists", (out_dir / "pipeline_summary.json").is_file())
+        check("decompiled sources exist", (out_dir / "src").is_dir())
+        check("analysis markdown exists", (out_dir / "analysis.md").is_file())
+        check("strings tsv exists", (out_dir / "strings.tsv").is_file())
+        check("report markdown exists", (out_dir / "report.md").is_file())
+
+        json_data = json.loads((out_dir / "pipeline_summary.json").read_text(encoding="utf-8"))
+        check("summary json contains metrics", "metrics" in json_data and json_data["metrics"]["decompile_total"] > 0)
+        check("summary json contains profile", "profile" in json_data and json_data["profile"]["classes"] > 0)
+
+
+def test_web_workbench_features() -> None:
+    print("web: interactive workbench with diff, annotations and LLM assist")
+    from jdec import web as WB
+    import urllib.request
+    import threading
+
+    with tempfile.TemporaryDirectory() as td:
+        work_dir = Path(td)
+        src_dir = work_dir / "src" / "demo" / "obf"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        java_file = src_dir / "a.java"
+        java_file.write_text(
+            'package demo.obf;\n\n'
+            'public class a {\n'
+            '    public int x = 1;\n'
+            '    public void b() {\n'
+            '        System.out.println("Connecting to C2 host");\n'
+            '    }\n'
+            '}\n',
+            encoding="utf-8"
+        )
+
+        cfr_dir = work_dir / "engines" / "cfr" / "demo" / "obf"
+        cfr_dir.mkdir(parents=True, exist_ok=True)
+        (cfr_dir / "a.java").write_text(
+            'package demo.obf;\n\n'
+            'public class a {\n'
+            '    public int x = 1;\n'
+            '    public int y = 2;\n'
+            '    public void b() {\n'
+            '        System.out.println("Connecting to C2 host");\n'
+            '    }\n'
+            '}\n',
+            encoding="utf-8"
+        )
+
+        (work_dir / "report.json").write_text(json.dumps({
+            "target": "sample.jar",
+            "outcomes": {
+                "demo/obf/a": {
+                    "engine": "vineflower",
+                    "rel": "demo/obf/a.java",
+                    "quality": {"score": 96.5},
+                    "attempts": ["cfr", "vineflower"],
+                    "status": "ok"
+                }
+            }
+        }), encoding="utf-8")
+
+        (work_dir / "strings.json").write_text(json.dumps({
+            "strings": {
+                "demo/obf/a": [
+                    {"string": "Connecting to C2 host", "tags": ["c2-staging", "url"]}
+                ]
+            }
+        }), encoding="utf-8")
+
+        (work_dir / "pipeline_summary.md").write_text("# Pipeline Summary\nAutomated deobf successful.", encoding="utf-8")
+
+        handler = lambda *args, **kwargs: WB.WorkbenchHandler(*args, work_dir=work_dir, **kwargs)
+        server = WB.HTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        srv_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        srv_thread.start()
+
+        try:
+            base_url = f"http://127.0.0.1:{port}"
+
+            # 1. Test GET /
+            with urllib.request.urlopen(f"{base_url}/") as res:
+                html_body = res.read().decode("utf-8")
+                check("workbench home page returns 200", res.status == 200)
+                check("workbench HTML has interactive tabs", "Engine Diff" in html_body and "AI Semantic Rename" in html_body)
+
+            # 2. Test GET /api/tree
+            with urllib.request.urlopen(f"{base_url}/api/tree") as res:
+                tree_data = json.loads(res.read().decode("utf-8"))
+                check("tree contains demo/obf/a", "demo/obf/a" in tree_data.get("classes", []))
+
+            # 3. Test GET /api/source
+            with urllib.request.urlopen(f"{base_url}/api/source?class=demo/obf/a") as res:
+                source_code = res.read().decode("utf-8")
+                check("source endpoint returns code", "Connecting to C2" in source_code)
+
+            # 4. Test GET /api/class_info
+            with urllib.request.urlopen(f"{base_url}/api/class_info?class=demo/obf/a") as res:
+                cinfo = json.loads(res.read().decode("utf-8"))
+                check("class info has engine", cinfo.get("engine") == "vineflower")
+                check("class info has strings", len(cinfo.get("strings", [])) >= 1)
+
+            # 5. Test GET /api/report
+            with urllib.request.urlopen(f"{base_url}/api/report") as res:
+                rep_text = res.read().decode("utf-8")
+                check("report returns pipeline summary", "Pipeline Summary" in rep_text)
+
+            # 6. Test GET & POST /api/annotations
+            with urllib.request.urlopen(f"{base_url}/api/annotations") as res:
+                empty_anns = json.loads(res.read().decode("utf-8"))
+                check("initial annotations are empty", len(empty_anns) == 0)
+
+            post_data = json.dumps({
+                "class": "demo/obf/a",
+                "tag": "threat",
+                "note": "Suspicious C2 beacon string"
+            }).encode("utf-8")
+            req = urllib.request.Request(f"{base_url}/api/annotations", data=post_data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as res:
+                post_res = json.loads(res.read().decode("utf-8"))
+                check("annotation save succeeded", post_res.get("ok") is True)
+                check("annotation returned has tag", post_res.get("annotations", {}).get("demo/obf/a", {}).get("tag") == "threat")
+
+            notes_file = work_dir / "audit_notes.json"
+            check("audit_notes.json written to disk", notes_file.is_file())
+            saved_notes = json.loads(notes_file.read_text(encoding="utf-8"))
+            check("saved notes contains tag and note", saved_notes.get("demo/obf/a", {}).get("note") == "Suspicious C2 beacon string")
+
+            # 7. Test GET /api/diff (Final vs CFR)
+            with urllib.request.urlopen(f"{base_url}/api/diff?class=demo/obf/a&e1=final&e2=cfr") as res:
+                diff_data = json.loads(res.read().decode("utf-8"))
+                check("diff is not identical", diff_data.get("identical") is False)
+                check("diff has added/removed stats", diff_data.get("stats", {}).get("added", 0) > 0)
+                check("diff text contains unified diff marker", "+++" in diff_data.get("diff", ""))
+
+            with urllib.request.urlopen(f"{base_url}/api/diff?class=demo/obf/a&e1=final&e2=final") as res:
+                diff_same = json.loads(res.read().decode("utf-8"))
+                check("diff between same engine is identical", diff_same.get("identical") is True)
+
+            # 8. Test GET /api/llm_prompt
+            with urllib.request.urlopen(f"{base_url}/api/llm_prompt?class=demo/obf/a") as res:
+                prompt_data = json.loads(res.read().decode("utf-8"))
+                prompt_text = prompt_data.get("prompt", "")
+                check("LLM prompt contains class", "demo.obf.a" in prompt_text)
+                check("LLM prompt contains candidate member", "b(" in prompt_text or "x" in prompt_text)
+                check("LLM prompt requests ProGuard format", "```proguard" in prompt_text)
+
+            # 9. Test GET /api/callgraph
+            with urllib.request.urlopen(f"{base_url}/api/callgraph?class=demo/obf/a") as res:
+                cg_api_data = json.loads(res.read().decode("utf-8"))
+                check("callgraph endpoint responds", "callers" in cg_api_data and "callees" in cg_api_data)
+
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+def test_callgraph_and_reachability() -> None:
+    print("callgraph: entrypoint reachability, path tracing and jar pruning")
+    from jdec import callgraph as CG
+
+    # 1. Custom entrypoint on sample.jar
+    cg_sample = CG.build_callgraph(SAMPLE, custom_entrypoints=["demo/modern/Showcase"])
+    check("sample.jar classes indexed", len(cg_sample.classes) == 10)
+    rep_sample = CG.compute_reachability(cg_sample)
+    check("showcase reachability computed", rep_sample.reachability_pct == 30.0, str(rep_sample.reachability_pct))
+    check("dead classes identified in sample", "demo/obf/a" in rep_sample.dead_classes)
+    check("showcase shapes reachable", "demo/modern/Showcase$Circle" in rep_sample.reachable_classes)
+
+    # 2. Automated Mod/Mixin entrypoints on mixin.jar
+    if MIXIN.exists():
+        cg_mixin = CG.build_callgraph(MIXIN)
+        check("mixin entrypoints discovered", len(cg_mixin.entrypoints) >= 5, str(len(cg_mixin.entrypoints)))
+        rep_mixin = CG.compute_reachability(cg_mixin)
+        check("mixin reachability computed", rep_mixin.reachability_pct == 40.0, str(rep_mixin.reachability_pct))
+        check("licence class is reachable", "demo/mixin/Licence" in rep_mixin.reachable_classes)
+
+        # 3. Shortest path finding
+        path = CG.find_path(rep_mixin, "demo/mixin/Licence")
+        check("trigger path to licence found", path is not None and len(path) == 1, str(path))
+        check("trigger path caller is ClientEntry", path[0].caller.display_name == "ClientEntry.onInitializeClient()")
+        check("trigger path callee is Licence.decode", path[0].callee.display_name == "Licence.decode()")
+        check("trigger path opcode is invokestatic", path[0].opcode == "invokestatic")
+
+        # 4. Jar pruning
+        with tempfile.TemporaryDirectory() as td:
+            pruned_jar = Path(td) / "pruned.jar"
+            kept, dropped, saved = CG.prune_jar(MIXIN, pruned_jar, rep_mixin.reachable_classes)
+            check("pruning kept reachable classes", kept == 4, str(kept))
+            check("pruning dropped dead classes", dropped == 6, str(dropped))
+            check("pruned jar is valid zip", zipfile.is_zipfile(pruned_jar))
+
+        # 5. DOT and JSON export
+        dot_str = CG.export_dot(cg_mixin, rep_mixin.reachable_methods)
+        check("DOT output contains digraph", "digraph CallGraph" in dot_str)
+        json_data = CG.export_json(rep_mixin)
+        check("JSON export contains reachable classes count", json_data["summary"]["reachable_classes"] == 4)
+        md_report = CG.render_markdown(rep_mixin, target_path="demo/mixin/Licence")
+        check("markdown report mentions path", "ClientEntry.onInitializeClient()" in md_report)
+
+
+def test_decompiler_trap_pruning() -> None:
+    print("deflat: anti-decompiler trap pruning, opaque predicates and CFG reachability")
+    from jdec import deflat as DF
+
+    # 1. Constant folding
+    code_const = bytes([0x10, 0x0A, 0x10, 0x14, 0x60])  # bipush 10, bipush 20, iadd
+    folded, n_folded = DF.simplify_constants(code_const)
+    check("constant folding simplifies bipush sum", n_folded == 1 and folded[:2] == bytes([0x10, 0x1E]))
+    check("constant folding preserves byte length with NOPs", len(folded) == len(code_const) and folded[2:] == bytes([0, 0, 0]))
+
+    # 2. Opaque predicates
+    # 2a. Unary constant: iconst_0 (0x03), ifeq +5 (0x99, 0x00, 0x05), return (0xb1) -> always taken -> goto
+    code_p1_taken = bytes([0x03, 0x99, 0x00, 0x05, 0xB1])
+    res_p1t, n_p1t = DF.prune_opaque_predicates(code_p1_taken)
+    check("opaque predicate unary always-taken becomes goto", n_p1t == 1 and res_p1t[0] == 0x00 and res_p1t[1] == 0xA7)
+
+    # 2b. Unary constant: iconst_1 (0x04), ifeq +5 -> never taken -> NOPs
+    code_p1_not = bytes([0x04, 0x99, 0x00, 0x05, 0xB1])
+    res_p1n, n_p1n = DF.prune_opaque_predicates(code_p1_not)
+    check("opaque predicate unary never-taken eliminated", n_p1n == 1 and res_p1n[:4] == bytes([0, 0, 0, 0]))
+
+    # 2c. Identity: iload_1 (0x1b), iload_1 (0x1b), if_icmpeq +5 -> always taken -> goto
+    code_p3_taken = bytes([0x1B, 0x1B, 0x9F, 0x00, 0x05, 0xB1])
+    res_p3t, n_p3t = DF.prune_opaque_predicates(code_p3_taken)
+    check("opaque predicate identity always-taken becomes goto", n_p3t == 1 and res_p3t[2] == 0xA7)
+
+    # 2d. Identity: iload_2 (0x1c), iload_2 (0x1c), if_icmpne +5 -> never taken -> NOPs
+    code_p3_not = bytes([0x1C, 0x1C, 0xA0, 0x00, 0x05, 0xB1])
+    res_p3n, n_p3n = DF.prune_opaque_predicates(code_p3_not)
+    check("opaque predicate identity never-taken eliminated", n_p3n == 1 and res_p3n[:5] == bytes([0, 0, 0, 0, 0]))
+
+    # 2e. Null check: aconst_null (0x01), ifnull +5 -> always taken -> goto
+    code_null_taken = bytes([0x01, 0xC6, 0x00, 0x05, 0xB1])
+    res_nt, n_nt = DF.prune_opaque_predicates(code_null_taken)
+    check("opaque predicate null-check always-taken becomes goto", n_nt == 1 and res_nt[1] == 0xA7)
+
+    # 2f. Null check: aconst_null (0x01), ifnonnull +5 -> never taken -> NOPs
+    code_null_not = bytes([0x01, 0xC7, 0x00, 0x05, 0xB1])
+    res_nn, n_nn = DF.prune_opaque_predicates(code_null_not)
+    check("opaque predicate null-check never-taken eliminated", n_nn == 1 and res_nn[:4] == bytes([0, 0, 0, 0]))
+
+    # 2g. Object reference identity: aload_0 (0x2a), aload_0 (0x2a), if_acmpeq +5 -> always taken -> goto
+    code_aload_taken = bytes([0x2A, 0x2A, 0xA5, 0x00, 0x05, 0xB1])
+    res_at, n_at = DF.prune_opaque_predicates(code_aload_taken)
+    check("opaque predicate aload reference identity always-taken becomes goto", n_at == 1 and res_at[2] == 0xA7)
+
+    # 2h. Object reference identity: aload_1 (0x2b), aload_1 (0x2b), if_acmpne +5 -> never taken -> NOPs
+    code_aload_not = bytes([0x2B, 0x2B, 0xA6, 0x00, 0x05, 0xB1])
+    res_an, n_an = DF.prune_opaque_predicates(code_aload_not)
+    check("opaque predicate aload reference identity never-taken eliminated", n_an == 1 and res_an[:5] == bytes([0, 0, 0, 0, 0]))
+
+    # 3. Redundant jump elimination & trampoline threading
+    code_rj = bytes([0xA7, 0x00, 0x03, 0xB1])  # goto +3 -> next pc
+    res_rj, n_rj = DF.clean_redundant_jumps(code_rj)
+    check("redundant self-fallthrough goto eliminated", n_rj == 1 and res_rj[:3] == bytes([0, 0, 0]))
+
+    # Redundant goto through NOP padding
+    code_rjn = bytes([0xA7, 0x00, 0x05, 0x00, 0x00, 0xB1])
+    res_rjn, n_rjn = DF.clean_redundant_jumps(code_rjn)
+    check("redundant goto through NOP padding eliminated", n_rjn == 1 and res_rjn[:3] == bytes([0, 0, 0]))
+
+    # Trampoline jump threading: goto 7 -> pc 7: goto 5 -> target pc 12
+    code_tramp = bytes([
+        0xA7, 0x00, 0x07,  # pc 0: goto +7
+        0x10, 0x02,        # pc 3: bipush 2
+        0x00, 0x00,        # pc 5: nops
+        0xA7, 0x00, 0x05,  # pc 7: goto +5 -> jumps to pc 12
+        0x00, 0x00,        # pc 10: nops
+        0xB1,              # pc 12: return
+    ])
+    res_tramp, n_tramp = DF.clean_redundant_jumps(code_tramp)
+    check("trampoline jump threaded directly to final target", n_tramp >= 1 and struct.unpack_from(">h", res_tramp, 1)[0] == 12)
+
+    # 1-byte iconst constant folding: iconst_1 (0x04) + iconst_2 (0x05) + iadd (0x60) -> iconst_3 (0x06)
+    code_ic = bytes([0x04, 0x05, 0x60])
+    res_ic, n_ic = DF.simplify_constants(code_ic)
+    check("constant folding simplifies small sum to iconst", n_ic == 1 and res_ic[0] == 0x06 and res_ic[1:] == bytes([0, 0]))
+
+    # 4. Dead code & anti-decompiler trap pruning
+    # pc 0: goto +6 (0xa7, 0x00, 0x06); pc 3: bipush 42 (0x10, 0x2a); pc 5: athrow (0xbf); pc 6: return (0xb1)
+    code_trap = bytes([0xA7, 0x00, 0x06, 0x10, 0x2A, 0xBF, 0xB1])
+    res_trap, n_trap = DF.prune_dead_code(code_trap)
+    check("dead bytecode trap instructions pruned", n_trap == 2)
+    check("dead trap converted to NOPs", res_trap[3:6] == bytes([0, 0, 0]))
+    check("reachable instructions untouched", res_trap[0] == 0xA7 and res_trap[6] == 0xB1)
+
+    # 5. Exception handler sanitization
+    handlers = [
+        BC.Handler(10, 10, 20, 0),    # zero-length trap (start == end)
+        BC.Handler(0, 10, 5, 0),      # valid handler
+        BC.Handler(0, 50, 10, 0),     # out of bounds (len > 30)
+        BC.Handler(20, 25, 26, 0),    # dead handler (no reachable pcs in range)
+    ]
+    reachable_pcs = {0, 1, 2, 5}
+    sanitized_h, dropped_h = DF.prune_exception_handlers(handlers, code_len=30, reachable_pcs=reachable_pcs)
+    check("malformed and dead exception handlers pruned", dropped_h == 3)
+    check("valid exception handler preserved", len(sanitized_h) == 1 and sanitized_h[0].start_pc == 0)
+
+    # 6. Master optimize_code pass
+    combined_code = bytes([
+        0x10, 0x05, 0x10, 0x03, 0x60,         # pc 0: bipush 5, bipush 3, iadd -> simplifies to bipush 8
+        0x3B,                                 # pc 5: istore_0
+        0x04, 0x99, 0x00, 0x06,               # pc 6: iconst_1, ifeq +6 -> never taken, eliminated
+        0xA7, 0x00, 0x03,                     # pc 10: goto +3 -> redundant goto eliminated
+        0xB1,                                 # pc 13: return
+        0x10, 0x63, 0xBF,                     # pc 14: bipush 99, athrow -> dead trap eliminated
+    ])
+    combined_handlers = [BC.Handler(5, 5, 10, 0)]  # zero-length handler
+    opt_code, opt_h, stats = DF.optimize_code(combined_code, combined_handlers)
+    check("master optimizer preserves code length", len(opt_code) == len(combined_code))
+    check("master optimizer eliminated zero-length handler", len(opt_h) == 0 and stats["handlers_pruned"] == 1)
+    check("master optimizer recorded multiple passes", stats["total"] >= 4, str(stats))
+    check("dead code block at end of method NOPed out", opt_code[14:] == bytes([0, 0, 0]))
+
+    # 7. Whole-jar deflat_jar integration on SAMPLE
+    with tempfile.TemporaryDirectory() as td:
+        out_deflat = Path(td) / "deflat_sample.jar"
+        jar_stats = DF.deflat_jar(SAMPLE, out_deflat)
+        check("deflat_jar processed classes", jar_stats["classes"] == 11)
+        check("deflat output jar exists and is valid zip", out_deflat.exists() and zipfile.is_zipfile(out_deflat))
+        with zipfile.ZipFile(out_deflat) as zout:
+            for n in zout.namelist():
+                if n.endswith(".class") and n != BROKEN_SAMPLE:
+                    cdata = zout.read(n)
+                    cf = CF.parse(cdata)
+                    check(f"deflat class {n} parses cleanly", cf.name is not None)
+
+    # 8. Regression test: pipeline with no_natives=True (verifies UnboundLocalError fix)
+    from jdec import pipeline as PL_MOD
+    with tempfile.TemporaryDirectory() as td:
+        out_pipe = Path(td) / "pipe_nonat"
+        res_pipe = PL_MOD.run_pipeline(
+            SAMPLE, out_pipe,
+            no_natives=True,
+            no_deflat=True,
+            no_recover=True,
+            mapping_set="none",
+            jobs=1,
+        )
+        check("pipeline runs cleanly with no_natives=True", res_pipe.native_libs_count == 0 and res_pipe.mixin_hooks_count >= 0)
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -1518,6 +1874,10 @@ def main() -> int:
     test_score_and_signal_enhancements()
     test_multimodule_enhancements()
     test_advanced_roadmap_features()
+    test_pipeline_automation()
+    test_web_workbench_features()
+    test_callgraph_and_reachability()
+    test_decompiler_trap_pruning()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

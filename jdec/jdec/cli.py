@@ -490,6 +490,106 @@ def cmd_deflat(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto(args: argparse.Namespace) -> int:
+    from . import pipeline
+    raw = Path(args.input)
+    if not raw.exists():
+        print(f"no such file or directory: {raw}")
+        return 2
+
+    input_path, tmp = _resolve_input(raw)
+    out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_auto")
+    engines_dir = Path(args.engines_dir)
+
+    try:
+        pipeline.run_pipeline(
+            target=input_path,
+            out_dir=out_dir,
+            engines_dir=engines_dir,
+            mc_version=args.mc_version,
+            mapping_set=args.mapping_set,
+            mappings_file=Path(args.mappings) if args.mappings else None,
+            no_deflat=args.no_deflat,
+            no_recover=args.no_recover,
+            with_stubs=getattr(args, "with_stubs", True),
+            no_natives=args.no_natives,
+            no_analyze=args.no_analyze,
+            jobs=args.jobs,
+            timeout=args.timeout,
+            verify_all=args.verify_all,
+            launch_web=args.web,
+            web_port=args.port,
+            clean_work=args.clean_work,
+        )
+        return 0
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def cmd_reach(args: argparse.Namespace) -> int:
+    from . import callgraph
+    raw = Path(args.input)
+    if not raw.exists():
+        print(f"no such file or directory: {raw}")
+        return 2
+
+    custom_eps = [e.strip() for e in args.entrypoints.split(",")] if getattr(args, "entrypoints", None) else None
+    print(f"analyzing call graph: {raw.name} ...")
+    cg = callgraph.build_callgraph(raw, custom_entrypoints=custom_eps)
+    rep = callgraph.compute_reachability(cg)
+
+    print(f"classes      : {rep.total_classes} total -> {len(rep.reachable_classes)} reachable ({rep.reachability_pct}%), {len(rep.dead_classes)} dead/unused ({rep.dead_classes_pct}%)")
+    print(f"methods      : {rep.total_methods} declared -> {len(rep.reachable_methods)} reachable, {len(rep.dead_methods)} dead")
+    print(f"entrypoints  : {len(rep.entrypoints)} discovered")
+    for ep in rep.entrypoints[:6]:
+        print(f"  [{ep.kind}] {ep.method.display_name} - {ep.description}")
+    if len(rep.entrypoints) > 6:
+        print(f"  ... and {len(rep.entrypoints) - 6} more")
+
+    target = getattr(args, "target", None)
+    if target:
+        path_edges = callgraph.find_path(rep, target)
+        print(f"\ntrigger path to '{target}':")
+        if path_edges:
+            for i, edge in enumerate(path_edges, 1):
+                print(f"  {i}. {edge.caller.display_name} --({edge.opcode})--> {edge.callee.display_name}")
+        else:
+            print(f"  ! Target '{target}' is unreachable from any discovered entrypoint.")
+
+    prune_out = getattr(args, "prune", None)
+    if prune_out and raw.is_file():
+        p_out = Path(prune_out)
+        kept, dropped, saved = callgraph.prune_jar(raw, p_out, rep.reachable_classes)
+        print(f"\npruned jar   : {p_out}")
+        print(f"  kept {kept} reachable class(es), dropped {dropped} dead class(es), saved {saved // 1024} KB")
+
+    dot_out = getattr(args, "dot", None)
+    if dot_out:
+        d_out = Path(dot_out)
+        d_out.parent.mkdir(parents=True, exist_ok=True)
+        dot_str = callgraph.export_dot(cg, rep.reachable_methods)
+        d_out.write_text(dot_str, encoding="utf-8")
+        print(f"graphviz dot : {d_out}")
+
+    json_out = getattr(args, "json", None)
+    if json_out:
+        j_out = Path(json_out)
+        j_out.parent.mkdir(parents=True, exist_ok=True)
+        j_data = callgraph.export_json(rep)
+        j_out.write_text(json.dumps(j_data, indent=2), encoding="utf-8")
+        print(f"json export  : {j_out}")
+
+    if args.output:
+        md_out = Path(args.output)
+        md_out.parent.mkdir(parents=True, exist_ok=True)
+        md_content = callgraph.render_markdown(rep, target_path=target)
+        md_out.write_text(md_content, encoding="utf-8")
+        print(f"report       : {md_out}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jdec",
@@ -695,6 +795,61 @@ def build_parser() -> argparse.ArgumentParser:
     sdef.add_argument("-o", "--output", default=None,
                       help="output jar path (default: <input>_deflat.jar)")
     sdef.set_defaults(func=cmd_deflat)
+
+    def _add_auto_args(parser):
+        parser.add_argument("input", help="target jar or directory")
+        parser.add_argument("-o", "--output", default=None,
+                            help="output workspace directory (default: <input>_auto)")
+        parser.add_argument("--mc-version", default=None, help="Minecraft version (e.g. 1.20.4, 1.8.9)")
+        parser.add_argument("--mapping-set", default="auto",
+                            choices=["auto", "mojang", "yarn", "mcp", "official-srg", "none"],
+                            help="mapping set for deobfuscation (default: auto)")
+        parser.add_argument("--mappings", default=None, help="custom mapping file (proguard/tiny/tsrg)")
+        parser.add_argument("--no-deflat", action="store_true", help="skip control flow unflattening")
+        parser.add_argument("--no-recover", action="store_true", help="skip dynamic replay string decryption")
+        parser.add_argument("--no-stubs", dest="with_stubs", action="store_false", default=True,
+                            help="do not inject synthetic Minecraft runtime stubs into replay classpath")
+        parser.add_argument("--no-natives", action="store_true", help="skip native library triage")
+        parser.add_argument("--no-analyze", action="store_true", help="skip behavioral analysis / Mixin scan")
+        parser.add_argument("-j", "--jobs", type=int, default=0, help="parallel JVMs (0 = auto)")
+        parser.add_argument("--timeout", type=int, default=1800, help="decompile timeout in seconds")
+        parser.add_argument("--verify-all", action="store_true", help="verify all classes against bytecode")
+        parser.add_argument("--web", action="store_true", help="launch Web Workbench on completion")
+        parser.add_argument("--port", type=int, default=8080, help="Web Workbench port (default: 8080)")
+        parser.add_argument("--clean-work", action="store_true", help="delete intermediate _work directory")
+        parser.set_defaults(func=cmd_auto)
+
+    sauto = sub.add_parser("auto",
+                           help="fully automated end-to-end deobfuscation and triage pipeline")
+    _add_auto_args(sauto)
+
+    spipe = sub.add_parser("pipeline",
+                           help="alias for 'auto' pipeline")
+    _add_auto_args(spipe)
+
+    def _add_reach_args(parser):
+        parser.add_argument("input", help="target jar or directory")
+        parser.add_argument("-e", "--entrypoints", default=None,
+                            help="comma-separated custom entrypoint classes or methods (e.g. com/example/Mod:init)")
+        parser.add_argument("-t", "--target", default=None,
+                            help="target class or method to trace shortest execution path from entrypoints")
+        parser.add_argument("--prune", default=None,
+                            help="output slimmed jar containing only reachable classes")
+        parser.add_argument("--dot", default=None,
+                            help="export call graph in Graphviz DOT format")
+        parser.add_argument("--json", default=None,
+                            help="export reachability metrics to JSON")
+        parser.add_argument("-o", "--output", default=None,
+                            help="export markdown reachability audit report")
+        parser.set_defaults(func=cmd_reach)
+
+    sreach = sub.add_parser("reach",
+                            help="entrypoint reachability analysis, call graph and dead code pruning")
+    _add_reach_args(sreach)
+
+    scg = sub.add_parser("callgraph",
+                         help="alias for 'reach' call graph analysis")
+    _add_reach_args(scg)
 
     return p
 
