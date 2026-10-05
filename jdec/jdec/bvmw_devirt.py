@@ -13,6 +13,15 @@ What it does (prototype scope, corpus = fixtures/dec):
 
 NOT done yet (next steps): operand/layout semantics per opcode, CONSTANTS
 decoding, super-instruction recipe expansion, full lift to Java.
+
+架构图（fixtures/dec 深读结论，2026-10-05）：
+  主循环(dispatch, BytecodeVM$0.java:3085+) → 解密 recipe 编号 n2
+    (operand 解密链, featureFlags &2/&4 门控) → superInstructionChunk$N(..., recipe, blockIdx)
+  chunk 内：layoutStream[idx*9 + k] 按 4 种变体解密（~/~^/~ mix(methodKey^stateKey, idx, variant, -1606612877)）
+  → syncState: stateKey = layoutValue(next, 8, stateKey ^ integrityKey) 滚动
+  → integrityKey 来自 Integrity VM（Polymorphic Shard 0..N，嵌套虚拟化）
+  ⇒ 静态全解码需先复刻 Integrity VM；运行时替代路径=插桩重编译
+  （注意：CFR 反编译树 22070 编译错误，不可直接 javac——需 jdec project 导出模式或手修）。
 """
 
 from __future__ import annotations
@@ -30,16 +39,23 @@ def _i32(x: int) -> int:
 
 
 def mix(n: int, n2: int, n3: int, n4: int) -> int:
-    """CodePool.mix — Java int semantics throughout."""
-    n5 = n ^ 0x31001553
-    n5 = _i32(n5 ^ _i32(n2 + -1679048790 + _i32((n5 << 6) & M32) + (n5 & M32) >> 2))
-    n5 = _i32(n5 ^ _i32(n3 + 1424382671 + _i32((n5 << 6) & M32) + (n5 & M32) >> 2))
-    n5 = _i32(n5 ^ _i32(n4 + 333759693 + _i32((n5 << 6) & M32) + (n5 & M32) >> 2))
-    n5 = _i32(n5 ^ (n5 & M32) >> 16)
+    """CodePool.mix — Java int semantics throughout.
+    注意：python 的 + 优先级高于 >>，Java 的 n5>>>2 只作用于 n5——
+    必须显式分组，否则对拍 0/1048（真 Java 实现校准抓出）。"""
+    def ushr(x: int, k: int) -> int:
+        return (x & M32) >> k
+    def shl6(x: int) -> int:
+        return _i32((x << 6) & M32)
+
+    n5 = _i32(n ^ 0x31001553)
+    n5 = _i32(n5 ^ _i32(_i32(n2 + -1679048790 + shl6(n5)) + ushr(n5, 2)))
+    n5 = _i32(n5 ^ _i32(_i32(n3 + 1424382671 + shl6(n5)) + ushr(n5, 2)))
+    n5 = _i32(n5 ^ _i32(_i32(n4 + 333759693 + shl6(n5)) + ushr(n5, 2)))
+    n5 = _i32(n5 ^ ushr(n5, 16))
     n5 = _i32(n5 * 1861620505)
-    n5 = _i32(n5 ^ (n5 & M32) >> 15)
+    n5 = _i32(n5 ^ ushr(n5, 15))
     n5 = _i32(n5 * 1321811161)
-    n5 = _i32(n5 ^ (n5 & M32) >> 16)
+    n5 = _i32(n5 ^ ushr(n5, 16))
     return n5
 
 

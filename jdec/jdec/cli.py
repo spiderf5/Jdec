@@ -769,6 +769,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="automatically download Ghidra into engines/ghidra if not present")
     snv.set_defaults(func=cmd_natives)
 
+    sdb = sub.add_parser("nativedb",
+                         help="build & query an analysis bundle for a dumped "
+                              "native library (the IDA+MCP discipline, jdec flavor)")
+    sdb.add_argument("input")
+    sdb.add_argument("--build", metavar="OUTDIR")
+    sdb.add_argument("--search", default=None)
+    sdb.add_argument("--strings", action="store_true")
+    sdb.set_defaults(func=lambda a: __import__("jdec.nativedb", fromlist=["nativedb"]).main(
+        [a.input] + (["--build", a.build] if a.build else []) +
+        ([ "--search", a.search] if a.search else []) +
+        (["--strings"] if a.strings else [])))
+
     sop = sub.add_parser("opspool",
                          help="statically decrypt PhantomShield-family "
                               "string pools (DES/CBC + swp inverse, no JVM)")
