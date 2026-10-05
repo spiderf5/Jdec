@@ -604,7 +604,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const res = await fetch('/api/export_project');
         const data = await res.json();
         if (data.ok) {
-          alert('IDE Project generated successfully!\n\nTarget directory: ' + data.project_dir + '\n\nOpen in IntelliJ IDEA: File -> Open -> build.gradle');
+          alert('IDE Project generated successfully!\\n\\nTarget directory: ' + data.project_dir + '\\n\\nOpen in IntelliJ IDEA: File -> Open -> build.gradle');
         } else {
           alert('Project export error: ' + (data.error || 'Unknown failure'));
         }

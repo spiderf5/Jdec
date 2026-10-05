@@ -1133,6 +1133,34 @@ def test_pool_roundtrip() -> None:
               "Sample.a(11, 22)" not in utxt and "a(33, 44)" not in stxt)
 
 
+def test_web_template_js() -> None:
+    print("web: HTML_TEMPLATE inline JS parses (node --check)")
+    import re as _re
+    import shutil as _sh
+    try:
+        from jdec import web as WB
+    except Exception as exc:  # noqa: BLE001
+        print(f"skipping: jdec.web import failed: {exc}")
+        return
+    node = _sh.which("node")
+    if not node:
+        print("skipping: node not on PATH")
+        return
+    blocks = _re.findall("<script>(.*?)</script>", WB.HTML_TEMPLATE, _re.S)
+    check("template has an inline script block", len(blocks) >= 1)
+    js = "\n".join(blocks)
+    # 2026-10-04 事故：模板非 raw，JS 字符串里的 \n 被 Python 编译期吃成
+    # 真实换行，alert('...') 字符串断裂 -> 整个 script 解析失败、工作台瘫痪。
+    # 硬校验：内联 JS 必须整体语法合法（node --check）。
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "inline.js"
+        p.write_text(js, encoding="utf-8")
+        r = subprocess.run([node, "--check", str(p)],
+                           capture_output=True, text=True)
+        check("inline JS is syntactically valid", r.returncode == 0,
+              (r.stderr or r.stdout or "")[-400:])
+
+
 def test_pool_qualified_and_full_string() -> None:
     print("pool: handles java.lang.String return type and package-qualified calls")
     from jdec import pool as PL
@@ -2125,6 +2153,7 @@ def main() -> int:
     test_resource_anomaly()
     test_scorecard_smoke()
     test_pool_roundtrip()
+    test_web_template_js()
     test_pool_qualified_and_full_string()
     test_probe_fingerprints_json()
     test_ghidra_integration()
