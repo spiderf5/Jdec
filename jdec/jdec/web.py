@@ -145,7 +145,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="filter-pills">
         <button class="pill active" id="pill-all" onclick="setTreeFilter('all')">All</button>
         <button class="pill" id="pill-tagged" onclick="setTreeFilter('tagged')">Tagged</button>
-        <button class="pill" id="pill-suspect" onclick="setTreeFilter('suspect')">⚠️ Suspects</button>
+        <button class="pill" id="pill-suspect" onclick="setTreeFilter('suspect')">Suspects</button>
       </div>
       <div class="tree-list" id="class-tree"></div>
     </div>
@@ -196,12 +196,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <label style="font-size:0.75rem; color:var(--text-muted); display:block; margin-bottom:3px;">TAG</label>
                 <select id="audit-tag" style="width:100%; background:var(--bg-dark); color:var(--text-main); border:1px solid var(--border); border-radius:4px; padding:4px 6px; font-size:0.82rem; outline:none;">
                   <option value="">-- No Tag --</option>
-                  <option value="suspect">⚠️ Suspect (存疑)</option>
-                  <option value="core">🔒 Core Logic (核心)</option>
-                  <option value="net">🌐 Network / C2 (通信)</option>
-                  <option value="threat">💣 Threat / Malicious (恶意)</option>
-                  <option value="hook">🪝 Mixin / Hook (挂钩)</option>
-                  <option value="benign">✅ Benign / Normal (正常)</option>
+                  <option value="benign">benign</option>
+                  <option value="suspect">suspect</option>
+                  <option value="threat">threat</option>
+                  <option value="core">core</option>
+                  <option value="net">net</option>
+                  <option value="hook">hook</option>
                 </select>
               </div>
               <div style="margin-bottom:8px;">
@@ -271,12 +271,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     };
 
     const TAG_MAP = {
-      'suspect': { icon: '⚠️', label: '存疑', cls: 'tag-suspect' },
-      'threat':  { icon: '💣', label: '恶意', cls: 'tag-threat' },
-      'core':    { icon: '🔒', label: '核心', cls: 'tag-core' },
-      'net':     { icon: '🌐', label: '通信', cls: 'tag-net' },
-      'hook':    { icon: '🪝', label: 'Hook', cls: 'tag-hook' },
-      'benign':  { icon: '✅', label: '正常', cls: 'tag-benign' }
+      'benign':  { label: 'benign',  cls: 'tag-benign' },
+      'suspect': { label: 'suspect', cls: 'tag-suspect' },
+      'threat':  { label: 'threat',  cls: 'tag-threat' },
+      'core':    { label: 'core',    cls: 'tag-core' },
+      'net':     { label: 'net',     cls: 'tag-net' },
+      'hook':    { label: 'hook',    cls: 'tag-hook' }
     };
 
     async function loadTree() {
@@ -337,7 +337,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           const tagInfo = TAG_MAP[ann.tag];
           const badge = document.createElement('span');
           badge.className = 'tag-badge ' + tagInfo.cls;
-          badge.innerText = tagInfo.icon + ' ' + tagInfo.label;
+          badge.innerText = tagInfo.label;
           el.appendChild(badge);
         }
 
@@ -357,7 +357,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     async function selectClass(cls) {
       currentData.selected = cls;
       filterAndRenderTree();
-      document.getElementById('class-meta').innerHTML = '<b>' + esc(cls) + '</b>';
+      const ann = currentData.annotations[cls];
+      let metaHtml = '<b>' + esc(cls) + '</b>';
+      if (ann && ann.tag && TAG_MAP[ann.tag]) {
+        const tagInfo = TAG_MAP[ann.tag];
+        metaHtml += ' <span class="tag-badge ' + tagInfo.cls + '" style="font-size:0.75rem; padding:2px 7px;">' + esc(tagInfo.label) + '</span>';
+      }
+      document.getElementById('class-meta').innerHTML = metaHtml;
 
       // Load audit annotations
       const noteData = currentData.annotations[cls] || {};
@@ -423,10 +429,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const res = await fetch('/api/callgraph?class=' + encodeURIComponent(cls));
         const data = await res.json();
         if (data.reachable === true) {
-          badgeEl.innerHTML = '<span class="tag-badge tag-benign" style="font-size:0.76rem; padding:2px 7px;">🎯 Reachable from Entrypoint</span>' +
+          badgeEl.innerHTML = '<span class="tag-badge tag-benign" style="font-size:0.76rem; padding:2px 7px;">reachable</span>' +
             '<div style="font-size:0.74rem; color:var(--text-muted); margin-top:3px;">Triggerable from ' + (data.entrypoints_count || 1) + ' entrypoint(s)</div>';
         } else if (data.reachable === false) {
-          badgeEl.innerHTML = '<span class="tag-badge tag-suspect" style="font-size:0.76rem; padding:2px 7px;">💤 Unreachable / Dead Code</span>' +
+          badgeEl.innerHTML = '<span class="tag-badge tag-suspect" style="font-size:0.76rem; padding:2px 7px;">unreachable</span>' +
             '<div style="font-size:0.74rem; color:var(--text-muted); margin-top:3px;">No execution path found from mod/mixin entrypoints</div>';
         } else {
           badgeEl.innerHTML = '<span style="font-size:0.76rem; color:var(--text-muted);">No entrypoints defined for target</span>';
@@ -487,10 +493,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           currentData.annotations = resData.annotations || {};
           statusEl.innerText = 'Saved!';
           filterAndRenderTree();
+          const cur = currentData.annotations[cls];
+          let metaHtml = '<b>' + esc(cls) + '</b>';
+          if (cur && cur.tag && TAG_MAP[cur.tag]) {
+            const tagInfo = TAG_MAP[cur.tag];
+            metaHtml += ' <span class="tag-badge ' + tagInfo.cls + '" style="font-size:0.75rem; padding:2px 7px;">' + esc(tagInfo.label) + '</span>';
+          }
+          document.getElementById('class-meta').innerHTML = metaHtml;
           setTimeout(() => {
-            const cur = currentData.annotations[cls];
-            if (cur && cur.updated_at) {
-              statusEl.innerText = 'Saved ' + cur.updated_at.split(' ')[1];
+            const latest = currentData.annotations[cls];
+            if (latest && latest.updated_at) {
+              statusEl.innerText = 'Saved ' + latest.updated_at.split(' ')[1];
             }
           }, 1500);
         } else {

@@ -1609,6 +1609,8 @@ def test_web_workbench_features() -> None:
                 html_body = res.read().decode("utf-8")
                 check("workbench home page returns 200", res.status == 200)
                 check("workbench HTML has interactive tabs", "Engine Diff" in html_body and "AI Semantic Rename" in html_body)
+                check("workbench HTML has clean benign tag", '<option value="benign">benign</option>' in html_body)
+                check("workbench HTML avoids emoji in select tags", '⚠️' not in html_body and '✅' not in html_body)
 
             # 2. Test GET /api/tree
             with urllib.request.urlopen(f"{base_url}/api/tree") as res:

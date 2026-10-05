@@ -29,18 +29,18 @@ jdec 的价值在引擎之外：**调度、验证、反混淆**。
    同一个输出目录时后者会覆盖前者，而按输出路径反推类名会把幸存的那份**同时  
    记到两个类头上**，被覆盖的那个类凭空"恢复"了。
 
-   jdec 会先检出这些冲突组，按**组内序号**分桶：第 i 个桶拿所有组的第 i 个
-   成员，各桶一个独立输出目录、一次引擎跑完整个桶——同组类永不与同桶其他类
-   撞名，隔离开销也从每类一次 JVM 降到每桶一次。结果再写到不会撞名的路径下
-   （大写字母做百分号编码，`myau/A` → `myau/%41.java`）。因此
+   jdec 会先检出这些冲突组，按**组内序号**分桶：第 i 个桶拿所有组的第 i 个     
+   成员，各桶一个独立输出目录、一次引擎跑完整个桶——同组类永不与同桶其他类     
+   撞名，隔离开销也从每类一次 JVM 降到每桶一次。结果再写到不会撞名的路径下     
+   （大写字母做百分号编码，`myau/A` → `myau/%41.java`）。因此     
    `Myau0729-obf.jar` 的 723 个类能产出 723 个互不覆盖的源文件，而不是 637 个。
 4. **坏类隔离**  
    Vineflower 遇到一个读不了的类会让整次运行崩溃。jdec 预先校验每个类，  
    读不了的隔离掉，不让它拖垮其余 7786 个类。
 5. **Minecraft 反混淆**  
    `brc` → `CreeperEntity`。支持 Mojang 官方映射（1.14+）、Fabric  
-   Intermediary+Yarn、旧版 MCP/tsrg（1.7-1.12）、现代 Forge TSRG v2（含命名空间与多级参数过滤）
-   以及 modern Forge (1.16+) 的 `official-srg` 双命名空间组合映射。
+   Intermediary+Yarn、旧版 MCP/tsrg（1.7-1.12）、现代 Forge TSRG v2（含命名空间与多级参数过滤）     
+   以及 modern Forge (1.16+) 的 `official-srg` 双命名空间组合映射。     
    重映射在字节码层完成，声明处和**所有调用点**一起改名，产出的 jar 类名与路径一致，能被 JVM 加载。
 
 ## 安装
@@ -79,17 +79,17 @@ python jdec.py decompile client.jar -o out
 
 常用参数：
 
-| 参数                                      | 作用                                |
-| --------------------------------------- | --------------------------------- |
-| `-j N`                                  | 并行 JVM 数，默认按 CPU 自动               |
-| `--memory 4g`                           | 每个 JVM 的堆                         |
-| `--verify-all`                          | 逐个类对照字节码打分，出完整报告（慢一些）             |
-| `--limit 300`                           | 只处理前 N 个类，快速试跑                    |
-| `--mappings f.txt`                      | 映射文件（proguard / tiny / tsrg 自动识别） |
+| 参数                                                    | 作用                                       |
+| ----------------------------------------------------- | ---------------------------------------- |
+| `-j N`                                                | 并行 JVM 数，默认按 CPU 自动                      |
+| `--memory 4g`                                         | 每个 JVM 的堆                                |
+| `--verify-all`                                        | 逐个类对照字节码打分，出完整报告（慢一些）                    |
+| `--limit 300`                                         | 只处理前 N 个类，快速试跑                           |
+| `--mappings f.txt`                                    | 映射文件（proguard / tiny / tsrg 自动识别）        |
 | `--mapping-set mojang\|yarn\|mcp\|official-srg\|none` | 自动下载哪套映射（official-srg 专用于现代 Forge 1.16+） |
-| `--mc-version 1.20.4`                   | jar 里读不出版本时手动指定                   |
-| `-e cfr,vineflower`                     | 指定引擎顺序                            |
-| `--clean-work`                          | 结束后删除中间产物目录（可能有上千个文件，所以默认不删）      |
+| `--mc-version 1.20.4`                                 | jar 里读不出版本时手动指定                          |
+| `-e cfr,vineflower`                                   | 指定引擎顺序                                   |
+| `--clean-work`                                        | 结束后删除中间产物目录（可能有上千个文件，所以默认不删）             |
 
 输出：
 
@@ -118,9 +118,9 @@ python jdec.py project client.jar -o proj/ --compile # 一键生成 IDE 可直�
 python jdec.py engines --with-ghidra           # 一键自动下载并配置内置 Ghidra Headless 引擎
 ```
 
-`recover` 和 `pool` 默认自动生成并挂载合成桩 `mc_stubs.jar`（提供非空单例 `Minecraft.getInstance()`、`SharedConstants`、`Bootstrap`、`BuiltInRegistries` 等），无需启动真游戏环境即可跑过 90% 的初始化依赖门禁；若需要原生无桩环境可传入 `--no-stubs`。
-方法论与覆盖边界见 skill `references/string-encryption.md` 的
-「自洽重放」节——**解密器有跨类全局状态，静态重放求 key 必错，
+`recover` 和 `pool` 默认自动生成并挂载合成桩 `mc_stubs.jar`（提供非空单例 `Minecraft.getInstance()`、`SharedConstants`、`Bootstrap`、`BuiltInRegistries` 等），无需启动真游戏环境即可跑过 90% 的初始化依赖门禁；若需要原生无桩环境可传入 `--no-stubs`。  
+方法论与覆盖边界见 skill `references/string-encryption.md` 的  
+「自洽重放」节——**解密器有跨类全局状态，静态重放求 key 必错，  
 必须单 JVM 内初始化→读真值→现场求 key**。
 
 ## 分析：它改了游戏哪里
@@ -233,61 +233,64 @@ python jdec.py strings client.jar --grep api         # 只留含某个词的
 
 ### 运行时捕获：不用懂密钥的那条路（已走通）
 
-静态还原 ZKM 27 的字符串要跨三层（indy 引导的 session key → 常量折叠引擎 →
-DES），逐版本易变，不划算。`engines/tap/` 是独立实验：**让混淆器自己解，我们只
+静态还原 ZKM 27 的字符串要跨三层（indy 引导的 session key → 常量折叠引擎 →  
+DES），逐版本易变，不划算。`engines/tap/` 是独立实验：**让混淆器自己解，我们只  
 盯着出口**。整条链路最终全部打通，按演进顺序：
 
 **第一层：纯解密器重放（119/136 类）。**
+
 - `scan_targets.py` — 常量池静态分类：解密器 / 危险类（native、System.load）/ 安全类。
-- `tap_extract.py` — 解码指令流，抽取每个调用点 `A.a(int,int)` / `b(int,long)` 的
-  硬编码参数 → `calls.tsv`（14216 调用点 / 315 类）。关键坑：BIPUSH/SIPUSH 的
+- `tap_extract.py` — 解码指令流，抽取每个调用点 `A.a(int,int)` / `b(int,long)` 的    
+  硬编码参数 → `calls.tsv`（14216 调用点 / 315 类）。关键坑：BIPUSH/SIPUSH 的    
   arg 存的是无符号值，要手动符号回绕。
-- `Reflect.java` — 按类分组重放：`getDeclaredMethod` + `invoke`，逐条落盘。
+- `Reflect.java` — 按类分组重放：`getDeclaredMethod` + `invoke`，逐条落盘。    
   裸 JVM 缺依赖就补：loom 缓存的 `minecraft-srg.jar`（1.8.9 notch→SRG 已重映射）
-  + log4j 2.0-beta9 + launchwrapper + vineflower。log4j 一补，
-  56 个 "Could not initialize class net.minecraft.client.Minecraft" 连坐失败
-  一次性消失——很多"本质限制"其实只是缺 jar。
+  - log4j 2.0-beta9 + launchwrapper + vineflower。log4j 一补，      
+    56 个 "Could not initialize class net.minecraft.client.Minecraft" 连坐失败      
+    一次性消失——很多"本质限制"其实只是缺 jar。
 
-**第二层：毒类之谜 = native 保护壳（noexit agent）。**
-27 个类让 JVM 三秒静默退出（exit 127）或 native 崩溃，且无 hs_err——每个都有
-SHA1 哈希名的 native 方法（如 `3f343b3c87f0…`），`<clinit>` 里经
-`antiLeak-…/Loader.registerNativesForClass` 绑定并做完整性校验。
+**第二层：毒类之谜 = native 保护壳（noexit agent）。**  
+27 个类让 JVM 三秒静默退出（exit 127）或 native 崩溃，且无 hs_err——每个都有  
+SHA1 哈希名的 native 方法（如 `3f343b3c87f0…`），`<clinit>` 里经  
+`antiLeak-…/Loader.registerNativesForClass` 绑定并做完整性校验。  
 `NoExit.java` agent 在加载期改写字节码：
-- `antiLeak*` 类**全部方法**桩化为按描述符返回零值（native 去 native 化；
-  构造器补 `aload_0; invokespecial super.<init>()V; return` 过验证器）；
-- `myau/*` 类**只桩化 native 方法**——解密逻辑是纯 Java，桩化必须止步于此，
-  否则 `<clinit>` 不执行、密文表全 null、解密器返回垃圾。
-结果：40 个毒类一个 JVM 全过，零毒类。myau 覆盖 124/136 类，
-13144 条独立解密结果（3112 字符串 + 10032 long 常量）。
-坑：`attribute_length` 是 u4 不是 u2；myau 类全桩化会让 `<clinit>` 变 `return`
-——看起来"解密成功"其实全是桩返回的常数。
 
-**第三层：s3 名字映射表（撞表）。**
-s3 是 ZKM 的反射名翻译层：11 条 16KB base36 blob =
-`SHA-512(key) → XOR(SHA-512(key+"SHA-512"), 名字)`，key 就是混淆名本身，
-盐 `"SHA-512"`、分隔符 `\b` 全在 `<clinit>` 里明文。`gen_namekeys.py` 用 jar 里
-全部类/方法/字段名生成 34714 个候选 key，`DumpTable.java` 在 JVM 里反射调 s3
-自己的私有查表函数——零语义偏差。101 条命中：**映射的是"上一代混淆名 → 本代
+- `antiLeak*` 类**全部方法**桩化为按描述符返回零值（native 去 native 化；    
+  构造器补 `aload_0; invokespecial super.<init>()V; return` 过验证器）；
+- `myau/*` 类**只桩化 native 方法**——解密逻辑是纯 Java，桩化必须止步于此，    
+  否则 `<clinit>` 不执行、密文表全 null、解密器返回垃圾。    
+  结果：40 个毒类一个 JVM 全过，零毒类。myau 覆盖 124/136 类，    
+  13144 条独立解密结果（3112 字符串 + 10032 long 常量）。    
+  坑：`attribute_length` 是 u4 不是 u2；myau 类全桩化会让 `<clinit>` 变 `return`    
+  ——看起来"解密成功"其实全是桩返回的常数。
+
+
+**第三层：s3 名字映射表（撞表）。**  
+s3 是 ZKM 的反射名翻译层：11 条 16KB base36 blob =  
+`SHA-512(key) → XOR(SHA-512(key+"SHA-512"), 名字)`，key 就是混淆名本身，  
+盐 `"SHA-512"`、分隔符 `\b` 全在 `<clinit>` 里明文。`gen_namekeys.py` 用 jar 里  
+全部类/方法/字段名生成 34714 个候选 key，`DumpTable.java` 在 JVM 里反射调 s3  
+自己的私有查表函数——零语义偏差。101 条命中：**映射的是"上一代混淆名 → 本代  
 混淆名"（myau/A → myau/KO），不是原始名**。撞表链路本身值得复用。
 
-**第四层：真环境倾倒（最终答案）。**
-模块名的密文表由 native 经 JNI 填充（putstatic 只有 `a`/`d` 是 Java 做的），
-静态解密到此为止。终极方案：**在真实 Forge 1.8.9 里跑 mod**——
-发行版要加载破解包自带的 `agent.dll`（JVMTI，骗过授权校验），我们的
-`DumpAgent.java`（`--release 8` 重编）定时醒来：枚举已加载的 myau.V 子类 →
-registry 为空就主动实例化 → 读模块名 + 全部设置项名 → halt。
-240 秒延迟（等 FML + 混淆器去重）。产出 `dump_modules.tsv`：
-**58 个模块全名 + 设置项全表**（KillAura/Velocity/Scaffold/BedNuker/Xray…，
-含每项设置的名字）。坑：`--gameDir` 下 mods/ 目录不存在会静默不加载；
+**第四层：真环境倾倒（最终答案）。**  
+模块名的密文表由 native 经 JNI 填充（putstatic 只有 `a`/`d` 是 Java 做的），  
+静态解密到此为止。终极方案：**在真实 Forge 1.8.9 里跑 mod**——  
+发行版要加载破解包自带的 `agent.dll`（JVMTI，骗过授权校验），我们的  
+`DumpAgent.java`（`--release 8` 重编）定时醒来：枚举已加载的 myau.V 子类 →  
+registry 为空就主动实例化 → 读模块名 + 全部设置项名 → halt。  
+240 秒延迟（等 FML + 混淆器去重）。产出 `dump_modules.tsv`：  
+**58 个模块全名 + 设置项全表**（KillAura/Velocity/Scaffold/BedNuker/Xray…，  
+含每项设置的名字）。坑：`--gameDir` 下 mods/ 目录不存在会静默不加载；  
 native 校验必须真环境过，noexit 在真环境反而会坏事。
 
-**意外的第五份证据（交叉验证）。** 游戏运行时在 `--gameDir` 下自己序列化写出了
-`config/Myau/default.json`——**59 个模块、358 个设置项的名字与默认值**，
-是客户端亲手写的全量配置。与反射 dump 交叉验证：**58/59 模块一致，全部共有
-模块的 358 个设置项名字逐一对上**（两条独立路径：DumpAgent 反射读 Java 字段
-vs 游戏 Gson 序列化设置对象）。唯一差异 `ESP`：json 里有、registry dump 里
-没有（对应 dump 头 `modules=59` 与实名 58 的差 1，该模块名字未读出）。
-**模块全表以 default.json 的 59 个为准**（AimAssist…Xray：BedWars 向作弊客户端，
+**意外的第五份证据（交叉验证）。** 游戏运行时在 `--gameDir` 下自己序列化写出了  
+`config/Myau/default.json`——**59 个模块、358 个设置项的名字与默认值**，  
+是客户端亲手写的全量配置。与反射 dump 交叉验证：**58/59 模块一致，全部共有  
+模块的 358 个设置项名字逐一对上**（两条独立路径：DumpAgent 反射读 Java 字段  
+vs 游戏 Gson 序列化设置对象）。唯一差异 `ESP`：json 里有、registry dump 里  
+没有（对应 dump 头 `modules=59` 与实名 58 的差 1，该模块名字未读出）。  
+**模块全表以 default.json 的 59 个为准**（AimAssist…Xray：BedWars 向作弊客户端，  
 含 KillAura 38 项、BedNuker 12 项、Xray 26 项等完整默认参数）。
 
 复用顺序建议：先 1（零环境），再 2（毒类），4 才是拿"给人看的功能名"的终点。
@@ -316,17 +319,18 @@ recover them:
 
 撞上 native 墙后的三条路（按成本排序）：
 
-1. **静态侧榨干**：`recover` 把字节码层能解的字符串/常量全收掉（native
+1. **静态侧榨干**：`recover` 把字节码层能解的字符串/常量全收掉（native     
    门控的除外）；`natives` 产出给 Ghidra 分析师的任务清单。成本最低。
-2. **真机运行时捕获**：真跑游戏 + agent 挂钩收出口明文，覆盖最全
-   （native 填的表、运行期解的密都能拿到）；前提是目标能激活、
+2. **真机运行时捕获**：真跑游戏 + agent 挂钩收出口明文，覆盖最全     
+   （native 填的表、运行期解的密都能拿到）；前提是目标能激活、     
    授权校验必须真过，且捕获工具链要适配当前加载器/版本。
-3. **native 反汇编**：Ghidra/IDA 分析 DLL 本体——虚拟化保护下是按周
+3. **native 反汇编**：Ghidra/IDA 分析 DLL 本体——虚拟化保护下是按周     
    计的手工活，只在确需 native 内部算法时上。
 
 ### 原生深度分析：动态注册与反向 JNI 调用图
 
 针对现代 Native 加壳（如使用 `JNI_OnLoad` + `RegisterNatives` 隐藏真实符号）：
+
 - **动态方法映射识别 (`RegisterNatives`)**：自动解析 Ghidra 反编译的 C 代码或二进制数据段，提取 `JNINativeMethod` 结构体，将哈希名/数字名的 Java native 方法与底层 C 函数指针关联。
 - **反向 JNI 调用图 (Native -> Java)**：静态挖掘 C 伪代码中的 `FindClass`、`GetMethodID`、`GetFieldID`、`Call<Type>Method` 等跨语言调用点，精确查明原生库内部在操纵哪些 Java 类、反射读取哪些敏感字段。
 - **Ghidra 自动化注解脚本**：自动输出 `ghidra_annotate.py`，导入 Ghidra 即可一键恢复所有 JNI 函数名和数据类型。
@@ -334,6 +338,7 @@ recover them:
 ## 控制流平坦化消除与反编译器陷阱剔除 (CFG De-flattening & Trap Pruning)
 
 商业混淆器（如 ZKM、Allatori、Dash-O、Stringer、Smoke）广泛部署多层底层字节码陷阱：
+
 1. **控制流平坦化 (Control Flow Flattening)**：将方法体拆解为状态机循环，基本块由 `tableswitch` / `lookupswitch` 调度分发，导致反编译器输出死循环或大面积嵌套 goto；
 2. **不透明谓词 (Opaque Predicates)**：插入运行时恒真/恒假的代数恒等式（如 `v == v`、`null != null`、`iconst_0 == 0`）作为跳转守卫；
 3. **反编译器崩溃陷阱 (Anti-Decompiler Traps)**：在不可达死代码分支内填充非法操作码、不平衡操作数栈、或恶意 `athrow` 故意导致 CFR / Vineflower 解析崩溃；
@@ -344,6 +349,7 @@ python jdec.py deflat input.jar -o input_deflat.jar
 ```
 
 `deflat` 模块在纯字节码层进行三轮收敛级优化（**严格保持字节等长 NOP 填充，规避 StackMapTable 破坏与 VerifyError**）：
+
 1. **常量折叠引擎 (`simplify_constants`)**：自动识别并折叠常量算术与异或混淆常数（如 `bipush 5 ^ bipush 3` 直接求值为 `6`）。
 2. **不透明谓词消除 (`prune_opaque_predicates`)**：
    - 恒真跳转自动转化为无条件 `goto`，恒假跳转及前序压栈指令直接抹平为 `nop`；
@@ -360,11 +366,11 @@ python jdec.py web out/
 ```
 
 - **零依赖 Web 逆向工作台**：单命令启动内置本地 Web 服务（纯标准库实现，无 node/pip 依赖），暗色专业研判界面：
-  - **类目录树与即时过滤**：支持包名/类名模糊检索，以及 `All / Tagged / ⚠️ Suspects` 快速标签筛选。
+  - **类目录树与即时过滤**：支持包名/类名模糊检索，以及 `All / Tagged / Suspects` 快速标签筛选。
   - **多引擎统一差异比对 (`Engine Diff`)**：支持在 Final (Winner)、CFR、Vineflower、Procyon 之间任意切换并排比对源码，自动生成 unified diff，精准高亮增加/删除差异行及区块变更统计。
   - **交互式研判笔记与标记 (`Audit & Notes`)**：
-    - 支持为类添加研判标签：`⚠️ 存疑 (suspect)`、`🔒 核心 (core)`、`🌐 通信 (net)`、`💣 威胁 (threat)`、`🪝 Hook (hook)`、`✅ 正常 (benign)`。
-    - 侧边栏实时呈现彩色状态图标；提供富文本研判备忘录录入，支持 `Ctrl+S` 快捷保存，数据持久化存储于 `audit_notes.json`。
+    - 支持为类添加研判标签：`benign` (正常/绿色)、`suspect` (存疑/黄色)、`threat` (威胁/红色)、`core` (核心/蓝色)、`net` (通信/紫色)、`hook` (挂钩/青色)。
+    - 侧边栏与类信息栏实时呈现高对比度彩色标签；提供富文本研判备忘录录入，支持 `Ctrl+S` 快捷保存，数据持久化存储于 `audit_notes.json`。
   - **一键式 AI 语义重命名助手 (`AI Semantic Rename Prompt`)**：
     - 一键提取当前类的 Mixin 注解、敏感字符串特征、参数签名及源码片段，生成结构化大模型 Prompt 弹窗；
     - 支持一键复制至剪贴板，提示词直接引导 LLM 输出标准 ProGuard / TSV 格式的语义重命名规则。
@@ -397,6 +403,7 @@ python jdec.py reach client.jar --dot callgraph.dot --json reach.json -o reach_r
 检验逆向与反混淆工具的**终极金标准**，是能否将一个闭源混淆的 Jar 包**完整还原为一个可以直接放入 IntelliJ IDEA / Eclipse 构建并重新编译的工程**。
 
 由于 JVM 字节码规范与 Java 语言规范 (JLS) 之间存在天然鸿沟，普通反编译器导出的源码丢进 IDE 往往会遭遇海量红字：
+
 1. **合成桥接方法 (Synthetic Bridge Methods)**：泛型擦除产生的 `ACC_BRIDGE` 方法与主方法签名只差返回值类型，在 Java 源码中会导致 `method is already defined in class` 冲突报错；
 2. **混淆器关键字保留字重用**：将变量名或形参名命名为 `goto`、`default`、`const` 等 Java 保留字；
 3. **未类型化的 null 重载歧义**：多重载方法调用传入裸 `null`，导致 JLS 报告 `reference to ... is ambiguous`；
@@ -440,14 +447,14 @@ Minecraft 1.20.4 客户端（7787 个类，Java 17，官方混淆）：
 
 `env` → `com.mojang.blaze3d.audio.Channel`，字段 `a/b/c` → `LOGGER/source`。
 
-真实 ZKM 27 样本 `Myau0729-obf.jar`（723 类，其中 84 组是只靠大小写区分的
+真实 ZKM 27 样本 `Myau0729-obf.jar`（723 类，其中 84 组是只靠大小写区分的  
 孪生类）：
 
-| 指标       | 结果                                            |
-| -------- | --------------------------------------------- |
-| 反编译      | **723 clean / 0 partial / 0 failed**，成员覆盖 100%，175s |
-| 冲突类      | 孪生类各自独立还原，磁盘上 723 个源文件互不覆盖（修复前 637 个）          |
-| 逐类独立验证   | 84 组冲突两两 sha256 全不同；抽查命中率 100%；无任何类 score < 40 |
+| 指标     | 结果                                                  |
+| ------ | --------------------------------------------------- |
+| 反编译    | **723 clean / 0 partial / 0 failed**，成员覆盖 100%，175s |
+| 冲突类    | 孪生类各自独立还原，磁盘上 723 个源文件互不覆盖（修复前 637 个）               |
+| 逐类独立验证 | 84 组冲突两两 sha256 全不同；抽查命中率 100%；无任何类 score < 40      |
 
 ## 测试
 
@@ -456,8 +463,8 @@ python tests/run_tests.py             # 核心
 python tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 tests/mc/ 样本）
 ```
 
-**真实样本外置**：工具树里不放真实混淆样本。`--with-mc` 里的 ZKM 归因测试
-会依次在 `JDEC_SAMPLE_DIR` 环境变量、jdec 上一级目录、`D:/MC/samples/` 找
+**真实样本外置**：工具树里不放真实混淆样本。`--with-mc` 里的 ZKM 归因测试  
+会依次在 `JDEC_SAMPLE_DIR` 环境变量、jdec 上一级目录、`D:/MC/samples/` 找  
 `Myau0729-obf.jar`；都不在则该项跳过（其余 115 项照常），放回去即恢复。
 
 关键断言：parse→serialize 字节级一致（否则重映射会静默损坏每个类）、  
