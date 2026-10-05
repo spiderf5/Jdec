@@ -13,6 +13,7 @@ That keeps JVM startups proportional to *chunks*, not to class count.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import zipfile
@@ -37,6 +38,11 @@ _ARTIFACTS: dict[str, list[tuple[str, str]]] = {
 
 
 def find_java() -> str | None:
+    jh = os.environ.get("JAVA_HOME")
+    if jh:
+        candidate = Path(jh) / "bin" / ("java.exe" if os.name == "nt" else "java")
+        if candidate.is_file():
+            return str(candidate)
     exe = shutil.which("java")
     if exe:
         return exe
@@ -44,6 +50,9 @@ def find_java() -> str | None:
         r"C:\Program Files\Java\jdk-21\bin\java.exe",
         r"C:\Program Files\Zulu\zulu-21\bin\java.exe",
         r"C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe",
+        r"C:\Program Files\Java\jdk-17\bin\java.exe",
+        r"C:\Program Files\Zulu\zulu-17\bin\java.exe",
+        r"C:\Program Files\Eclipse Adoptium\jdk-17\bin\java.exe",
     ):
         if Path(c).exists():
             return c

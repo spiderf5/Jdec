@@ -194,6 +194,8 @@ def run_pipeline(
     launch_web: bool = False,
     web_port: int = 8080,
     clean_work: bool = False,
+    export_project: bool = False,
+    compile_verify: bool = False,
 ) -> PipelineResult:
     """Execute end-to-end deobfuscation and triage pipeline."""
     t0 = time.time()
@@ -419,6 +421,24 @@ def run_pipeline(
     print(f"      summary: {md_sum}")
     print(f"      json   : {json_sum}")
     print(f"=== Pipeline finished in {elapsed:.2f}s ===")
+
+    # Phase 8: Automated IDE Project Export
+    if export_project:
+        print("\n[8/8] Exporting complete IDE Gradle project ...")
+        from . import project as PJ
+        proj_dir = out_dir / "project"
+        p_stats = PJ.export_project(
+            source_jar=target,
+            out_dir=proj_dir,
+            src_dir=out_dir / "src",
+            mc_version=prof.mc_version,
+            with_stubs=True,
+        )
+        print(f"      project: {proj_dir} ({p_stats['java_files']} sources, {p_stats['files_repaired']} repaired)")
+        if compile_verify:
+            print("      running javac compilation verification ...")
+            c_rep = PJ.verify_compilation(proj_dir)
+            print(f"      {c_rep.summary()}")
 
     if clean_work:
         shutil.rmtree(work_dir, ignore_errors=True)

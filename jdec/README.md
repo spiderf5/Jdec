@@ -114,7 +114,7 @@ python jdec.py reach client.jar --prune slim.jar # 入口可达性分析、最�
 python jdec.py recover client.jar -o rec/      # 自洽重放：内置自动挂载 mc_stubs.jar 单例桩，
                                                # 消除 needs-instance / needs-bootstrap 连坐失效
 python jdec.py web out/                        # 启动本地多引擎交互式 Web 工作台 (代码对比/搜索/Hook浏览器)
-python jdec.py rename out/src/ -o map.txt      # 提取混淆标识符上下文，生成 ProGuard 映射与 LLM 重命名提示词
+python jdec.py project client.jar -o proj/ --compile # 一键生成 IDE 可直接构建的完整 Gradle 工程并运行自愈编译验证循环
 python jdec.py engines --with-ghidra           # 一键自动下载并配置内置 Ghidra Headless 引擎
 ```
 
@@ -391,6 +391,41 @@ python jdec.py reach client.jar --dot callgraph.dot --json reach.json -o reach_r
 - **最短触发调用链回溯 (`--target`)**：逆向分析师指定可疑类或方法后，自动回溯输出从模组入口或 Hook 点到该目标的最短调用链路与调用指令（如 `ClientEntry.onInitializeClient() --(invokestatic)--> Licence.decode()`）。
 - **死代码与膨胀依赖裁剪 (`--prune`)**：一键生成剔除无用死代码与臃肿嵌入式依赖后的瘦身 jar 包，保留所有资源与可达类，大幅缩小逆向分析与二次构建开销。
 - **Web 工作台实时联动**：在 Web 工作台选中任意类，实时查看入向调用者 (Callers)、出向被调用者 (Callees)、可达性标签 (`🎯 Reachable` / `💤 Dead Code`) 以及端到端触发路径。
+
+## 金标准还原：一键生成 IDE 可编译工程 (Project Export & Recompilability)
+
+检验逆向与反混淆工具的**终极金标准**，是能否将一个闭源混淆的 Jar 包**完整还原为一个可以直接放入 IntelliJ IDEA / Eclipse 构建并重新编译的工程**。
+
+由于 JVM 字节码规范与 Java 语言规范 (JLS) 之间存在天然鸿沟，普通反编译器导出的源码丢进 IDE 往往会遭遇海量红字：
+1. **合成桥接方法 (Synthetic Bridge Methods)**：泛型擦除产生的 `ACC_BRIDGE` 方法与主方法签名只差返回值类型，在 Java 源码中会导致 `method is already defined in class` 冲突报错；
+2. **混淆器关键字保留字重用**：将变量名或形参名命名为 `goto`、`default`、`const` 等 Java 保留字；
+3. **未类型化的 null 重载歧义**：多重载方法调用传入裸 `null`，导致 JLS 报告 `reference to ... is ambiguous`；
+4. **缺失构建脚手架与运行时环境**：缺乏 `build.gradle`、`settings.gradle`，且缺乏游戏核心单例依赖导致上千处 `cannot find symbol`。
+
+```bash
+# 一键导出为完整可编译 Gradle 工程（包含脚手架、单例桩库、资源提取与语法修复）
+python jdec.py project client.jar -o client_project/
+
+# 导出并运行自愈式 javac 编译验证循环
+python jdec.py project client.jar -o client_project/ --compile
+```
+
+### 核心能力与自动化机制：
+
+- **开箱即用的 Gradle 工程脚手架 (`generate_gradle_scaffold`)**：
+  - 自动根据目标字节码版本匹配现代 Java 工具链（Java 8 / 17 / 21）；
+  - 自动生成支持 Minecraft 仓库、Mixin、Guava、Gson、Netty、Log4j 的 `build.gradle`；
+  - 自动绑定 `libs/*.jar` 依赖树与编码参数 (`-encoding UTF-8 -Xlint:none`)；
+  - 自动附带 `README.md`，提供 IntelliJ IDEA 与 VS Code 导入指引。
+- **关键字与标识符安全转义 (`sanitize_keyword_identifiers`)**：
+  - 全局识别形参、局部变量及字段声明中的非法保留字并自动转义（如 `int goto` → `int goto_`、`String default` → `String default_`、`const` → `const_`），避免 IDE 语法解析器阻断。
+- **合成桥接方法智能剔除 (`prune_duplicate_bridge_methods`)**：
+  - 自动识别由于泛型协变返回类型生成的合成桥接方法，精准注释或折叠只含 `return this.xxx()` 转发的重复声明，消除重复方法定义。
+- **自适应 javac 编译验证与自愈循环 (`verify_compilation`)**：
+  - 调用本地 `javac`（自动追加 `-J-Duser.language=en` 实现跨语言跨系统诊断解析）；
+  - 针对编译报错进行多轮闭环自愈修复：自动注释重名符号、智能根据 javac 候选类型将歧义 `null` 参数补全强转（如 `pick((String) null)`），直到达到最佳可编译状态并输出诊断报告。
+- **Web 工作台一键集成**：
+  - 在 Web 工作台标题栏提供「📦 Export IDE Project」按钮，一键从浏览器导出可以直接用 IDEA 打开的工程。
 
 ## 实测
 

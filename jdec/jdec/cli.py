@@ -520,6 +520,8 @@ def cmd_auto(args: argparse.Namespace) -> int:
             launch_web=args.web,
             web_port=args.port,
             clean_work=args.clean_work,
+            export_project=getattr(args, "export_project", False),
+            compile_verify=getattr(args, "compile", False),
         )
         return 0
     finally:
@@ -587,6 +589,61 @@ def cmd_reach(args: argparse.Namespace) -> int:
         md_out.write_text(md_content, encoding="utf-8")
         print(f"report       : {md_out}")
 
+    return 0
+
+
+def cmd_project(args: argparse.Namespace) -> int:
+    from . import project
+    raw = Path(args.input)
+    if not raw.exists():
+        print(f"no such file or directory: {raw}")
+        return 2
+
+    out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_project")
+    src_dir = Path(args.src) if getattr(args, "src", None) else None
+
+    # If src_dir not specified, look for candidate decompiled directories
+    if src_dir is None:
+        cand1 = raw.parent / (raw.stem + "_out") / "src"
+        cand2 = raw.parent / (raw.stem + "_auto") / "src"
+        cand3 = raw.parent / "src"
+        if cand1.is_dir():
+            src_dir = cand1
+        elif cand2.is_dir():
+            src_dir = cand2
+        elif cand3.is_dir():
+            src_dir = cand3
+        else:
+            print("note: source directory not specified; running multi-engine decompilation first ...")
+            from . import decompile as DC
+            tmp_decomp = Path(tempfile.mkdtemp(prefix="jdec_decomp_for_proj_"))
+            rep = DC.decompile(raw, tmp_decomp, engines_dir=Path(args.engines_dir))
+            DC.write_report(rep, tmp_decomp)
+            src_dir = tmp_decomp / "src"
+
+    print(f"project export: {raw.name} -> {out_dir}")
+    stats = project.export_project(
+        source_jar=raw,
+        out_dir=out_dir,
+        src_dir=src_dir,
+        mc_version=getattr(args, "mc_version", None),
+        with_stubs=not getattr(args, "no_stubs", False),
+    )
+    print(f"  java sources   : {stats['java_files']} file(s) ({stats['files_repaired']} repaired for recompilation)")
+    print(f"  resources      : {stats['resources_copied']} file(s) extracted")
+    print(f"  stubs bundled  : {stats['stubs_bundled']} mock library(ies)")
+    print(f"  scaffold       : build.gradle, settings.gradle, gradle.properties, README.md")
+
+    if getattr(args, "compile", False):
+        print("\nrunning javac verification loop ...")
+        rep = project.verify_compilation(out_dir)
+        print(rep.summary())
+        if not rep.success and rep.issues:
+            print(f"  remaining compilation issues ({len(rep.issues)}):")
+            for iss in rep.issues[:5]:
+                print(f"    - {iss.file_path.name}:{iss.line_number}: {iss.message}")
+
+    print(f"\nProject is ready! Open with IntelliJ IDEA: File -> Open -> {out_dir / 'build.gradle'}")
     return 0
 
 
@@ -817,6 +874,10 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--web", action="store_true", help="launch Web Workbench on completion")
         parser.add_argument("--port", type=int, default=8080, help="Web Workbench port (default: 8080)")
         parser.add_argument("--clean-work", action="store_true", help="delete intermediate _work directory")
+        parser.add_argument("--export-project", action="store_true",
+                            help="export complete IDE Gradle project after pipeline")
+        parser.add_argument("--compile", action="store_true",
+                            help="run javac compilation verification loop after project export")
         parser.set_defaults(func=cmd_auto)
 
     sauto = sub.add_parser("auto",
@@ -850,6 +911,28 @@ def build_parser() -> argparse.ArgumentParser:
     scg = sub.add_parser("callgraph",
                          help="alias for 'reach' call graph analysis")
     _add_reach_args(scg)
+
+    def _add_project_args(parser):
+        parser.add_argument("input", help="target jar to projectize")
+        parser.add_argument("-o", "--output", default=None,
+                            help="output project directory (default: <input>_project)")
+        parser.add_argument("--src", default=None,
+                            help="pre-existing decompiled source directory (default: auto-detected or decompiles)")
+        parser.add_argument("--mc-version", default=None,
+                            help="Minecraft version target (e.g. 1.20.4, 1.8.9)")
+        parser.add_argument("--no-stubs", action="store_true",
+                            help="skip bundling mc_stubs.jar into libs/")
+        parser.add_argument("--compile", action="store_true",
+                            help="run javac compilation diagnostic and auto-repair loop")
+        parser.set_defaults(func=cmd_project)
+
+    sproj = sub.add_parser("project",
+                           help="export decompiled code as a complete IDE-ready Gradle project")
+    _add_project_args(sproj)
+
+    sexp = sub.add_parser("export",
+                          help="alias for 'project' IDE project export")
+    _add_project_args(sexp)
 
     return p
 

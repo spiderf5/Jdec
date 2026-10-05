@@ -41,6 +41,7 @@ from jdec import cli as CL           # noqa: E402
 from jdec import mappings as MP       # noqa: E402
 from jdec import mcmod as MM          # noqa: E402
 from jdec import obf as OB            # noqa: E402
+from jdec import project as PJ        # noqa: E402
 from jdec import strings as ST        # noqa: E402
 from jdec.decompile import _iso_buckets, decompile, write_report  # noqa: E402
 from jdec.probe import profile_jar    # noqa: E402
@@ -1780,6 +1781,159 @@ def test_decompiler_trap_pruning() -> None:
         check("pipeline runs cleanly with no_natives=True", res_pipe.native_libs_count == 0 and res_pipe.mixin_hooks_count >= 0)
 
 
+def test_project_export_and_recompilability() -> None:
+    print("project: automated IDE project generation, syntax repair, and javac recompilation loop")
+
+    # 1. Keyword identifier sanitization
+    raw_kw_java = "\n".join([
+        "package demo.obf;",
+        "public class KeywordTest {",
+        "    private int goto = 10;",
+        "    public String default = \"test\";",
+        "    private final Object const = null;",
+        "    public void compute(int goto, String default) {",
+        "        this.goto = goto;",
+        "        System.out.println(goto);",
+        "    }",
+        "}",
+    ])
+    cleaned_kw, kw_edits = PJ.sanitize_keyword_identifiers(raw_kw_java)
+    check("escaped reserved keyword identifiers", kw_edits >= 4, f"edits={kw_edits}")
+    check("goto escaped to goto_", "goto_" in cleaned_kw and "int goto " not in cleaned_kw)
+    check("default escaped to default_", "default_" in cleaned_kw and "String default " not in cleaned_kw)
+    check("const escaped to const_", "const_" in cleaned_kw and "Object const " not in cleaned_kw)
+
+    # 2. Prune duplicate bridge methods
+    bridge_java = "\n".join([
+        "package demo.bridge;",
+        "public class BridgeTest {",
+        "    public String getValue() {",
+        "        return \"real\";",
+        "    }",
+        "    // bridge method",
+        "    public Object getValue() {",
+        "        return this.getValue();",
+        "    }",
+        "}",
+    ])
+    cleaned_br, br_edits = PJ.prune_duplicate_bridge_methods(bridge_java)
+    check("pruned duplicate synthetic bridge method", br_edits == 1, f"edits={br_edits}")
+    check("duplicate bridge method commented out", "// [jdec: stripped duplicate bridge method]" in cleaned_br)
+    check("original method kept intact", "public String getValue() {" in cleaned_br)
+
+    # 3. Master clean_source_for_compilation pass
+    no_pkg_java = "public class Orphan\u200bTrap { int goto = 1; \ufeff}"
+    cleaned_src, chgs = PJ.clean_source_for_compilation(no_pkg_java, expected_package="com.example.orphan")
+    check("clean_source added missing package declaration", any("package com.example.orphan" in c for c in chgs))
+    check("clean_source escaped keywords", any("keyword" in c for c in chgs))
+    check("clean_source stripped zero-width obfuscator traps", "\u200b" not in cleaned_src and "\ufeff" not in cleaned_src)
+    check("clean_source output begins with package", cleaned_src.startswith("package com.example.orphan;"))
+
+    # 4. Gradle scaffold generation
+    with tempfile.TemporaryDirectory() as td:
+        proj_dir = Path(td) / "TestScaffold"
+        PJ.generate_gradle_scaffold(
+            proj_dir,
+            project_name="MyTestProject",
+            java_version="21",
+            mc_version="1.20.4",
+            mc_flavor="fabric",
+        )
+        check("scaffold generated build.gradle", (proj_dir / "build.gradle").is_file())
+        check("scaffold generated settings.gradle", (proj_dir / "settings.gradle").is_file())
+        check("scaffold generated gradle.properties", (proj_dir / "gradle.properties").is_file())
+        check("scaffold generated README.md", (proj_dir / "README.md").is_file())
+        check("scaffold generated .gitignore", (proj_dir / ".gitignore").is_file())
+        check("scaffold generated gradlew.bat", (proj_dir / "gradlew.bat").is_file())
+        check("scaffold generated gradlew", (proj_dir / "gradlew").is_file())
+
+        bg_text = (proj_dir / "build.gradle").read_text(encoding="utf-8")
+        check("build.gradle includes libs tree dependency", "fileTree(dir: 'libs'" in bg_text)
+        check("build.gradle sets Java 21 compatibility", "JavaVersion.toVersion('21')" in bg_text)
+
+        gp_text = (proj_dir / "gradle.properties").read_text(encoding="utf-8")
+        check("gradle.properties specifies minecraft_version", "minecraft_version=1.20.4" in gp_text)
+
+        rm_text = (proj_dir / "README.md").read_text(encoding="utf-8")
+        check("README provides IntelliJ IDEA instructions", "IntelliJ IDEA" in rm_text)
+
+    # 5. Whole project export from SAMPLE & Windows reserved device name escaping
+    with tempfile.TemporaryDirectory() as td:
+        exp_dir = Path(td) / "sample_exported_proj"
+        mock_src = Path(td) / "mock_src"
+        mock_src.mkdir(parents=True, exist_ok=True)
+        # Create an aux.java file (Windows reserved device name)
+        (mock_src / "aux.java").write_text("public class aux { public int val = 42; }", encoding="utf-8")
+        stats = PJ.export_project(SAMPLE, exp_dir, src_dir=mock_src, mc_version="1.20.4", with_stubs=True)
+        check("export created src/main/java directory", (exp_dir / "src" / "main" / "java").is_dir())
+        check("export escaped Windows reserved name aux.java -> _aux.java", (exp_dir / "src" / "main" / "java" / "_aux.java").is_file())
+        check("export bundled mc_stubs.jar into libs/", (exp_dir / "libs" / "mc_stubs.jar").is_file())
+        check("export extracted resources to src/main/resources", stats["resources_copied"] >= 1)
+        check("export generated build.gradle", (exp_dir / "build.gradle").is_file())
+
+    # 6. Deep javac compile self-healing loop: 5 simultaneous error types
+    with tempfile.TemporaryDirectory() as td:
+        c_proj = Path(td) / "compile_project"
+        PJ.generate_gradle_scaffold(c_proj, "CompileVerify")
+        src_root = c_proj / "src" / "main" / "java" / "test"
+        src_root.mkdir(parents=True, exist_ok=True)
+
+        # Inject:
+        # 1. Duplicate method declaration
+        # 2. Ambiguous null overload
+        # 3. Unreachable statement
+        # 4. Missing return statement
+        # 5. Missing external library class import
+        buggy_java = src_root / "Buggy.java"
+        buggy_java.write_text("\n".join([
+            "package test;",
+            "import ext.unknown.Helper;",
+            "public class Buggy {",
+            "    public void run() {",
+            "        System.out.println(1);",
+            "    }",
+            "    public void run() {",
+            "        System.out.println(2);",
+            "    }",
+            "    public static void pick(String s) {}",
+            "    public static void pick(Integer i) {}",
+            "    public int compute(int x) {",
+            "        if (x > 0) return 10;",
+            "    }",
+            "    public void deadCode() {",
+            "        return;",
+            "        System.out.println(999);",
+            "    }",
+            "    public static void main(String[] args) {",
+            "        pick(null);",
+            "        Helper h = null;",
+            "    }",
+            "}",
+        ]), encoding="utf-8")
+
+        rep = PJ.verify_compilation(c_proj, max_repair_passes=4)
+        check("deep self-healing loop repaired multiple simultaneous error types", rep.repaired_count >= 4, f"repaired={rep.repaired_count}")
+        check("deep self-healing loop achieved 100% clean compilation", rep.success is True, rep.summary())
+        check("deep self-healing loop compiled all files cleanly", rep.compiled_files == rep.total_files and rep.total_files >= 1)
+
+    # 7. CLI project subcommand smoke test
+    with tempfile.TemporaryDirectory() as td:
+        cli_out = Path(td) / "cli_sample_project"
+        cli_args = SimpleNamespace(
+            input=str(SAMPLE),
+            output=str(cli_out),
+            src=None,
+            mc_version="1.20.4",
+            no_stubs=False,
+            compile=False,
+            engines_dir=str(ROOT / "engines"),
+        )
+        res = CL.cmd_project(cli_args)
+        check("cmd_project returned 0", res == 0)
+        check("cmd_project created output project", (cli_out / "build.gradle").is_file())
+        check("cmd_project bundled libs", (cli_out / "libs" / "mc_stubs.jar").is_file())
+
+
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
     print("mappings: remap rewrites declarations *and* every call site")
@@ -1878,6 +2032,7 @@ def main() -> int:
     test_web_workbench_features()
     test_callgraph_and_reachability()
     test_decompiler_trap_pruning()
+    test_project_export_and_recompilability()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

@@ -129,8 +129,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <h1><span>jdec</span> Workbench</h1>
-    <div id="target-summary" class="badge">Loading target ...</div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <h1><span>jdec</span> Workbench</h1>
+      <div id="target-summary" class="badge">Loading target ...</div>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <button class="btn btn-primary" onclick="exportIdeProject()" style="padding:5px 12px; font-size:0.8rem; cursor:pointer;">📦 Export IDE Project</button>
+    </div>
   </header>
   <div class="layout">
     <div class="sidebar">
@@ -575,6 +580,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         setTimeout(() => { status.style.display = 'none'; }, 2500);
       } catch (e) {
         alert('Copy failed: ' + e);
+      }
+    }
+
+    async function exportIdeProject() {
+      if (!confirm('Export decompiled source as an IDE-ready Gradle project (with build.gradle, stubs, and resources)?')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/export_project');
+        const data = await res.json();
+        if (data.ok) {
+          alert('✓ IDE Project generated successfully!\n\nTarget directory: ' + data.project_dir + '\n\nOpen in IntelliJ IDEA: File -> Open -> build.gradle');
+        } else {
+          alert('Project export error: ' + (data.error || 'Unknown failure'));
+        }
+      } catch (e) {
+        alert('Failed to connect to export endpoint: ' + e);
       }
     }
 
@@ -1151,6 +1173,29 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
                 tsv = self.work_dir.parent / (self.work_dir.name + "_strings") / "strings.tsv"
             content = tsv.read_text(encoding="utf-8", errors="replace") if tsv.is_file() else "# No strings.tsv found"
             self.send_text(content)
+            return
+
+        if path == "/api/export_project":
+            from . import project
+            out_proj = self.work_dir / "project"
+            src_dir = self.work_dir / "src"
+            target_jar = self.work_dir
+            if self.work_dir.is_dir():
+                rep_json = self.work_dir / "report.json"
+                if rep_json.is_file():
+                    try:
+                        r_data = json.loads(rep_json.read_text(encoding="utf-8"))
+                        inp = r_data.get("input")
+                        if inp and Path(inp).is_file():
+                            target_jar = Path(inp)
+                    except Exception:
+                        pass
+
+            try:
+                stats = project.export_project(target_jar, out_proj, src_dir=src_dir)
+                self.send_json({"ok": True, "project_dir": str(out_proj), "stats": stats})
+            except Exception as exc:
+                self.send_error(500, f"Failed to export project: {exc}")
             return
 
         self.send_error(404, "Not Found")
