@@ -177,10 +177,16 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
     work_dir.mkdir(parents=True, exist_ok=True)
     src = work_dir / "PoolDriver.java"
     src.write_text(DRIVER_JAVA, encoding="utf-8")
-    r = subprocess.run(["javac", "-d", str(work_dir), str(src)],
+    from . import stubs as SB
+    javac_cmd = SB._find_javac("javac")
+    r = subprocess.run([javac_cmd, "-d", str(work_dir), str(src)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError("javac failed: " + (r.stderr or r.stdout or "")[-2000:])
+
+    if java == "java":
+        from . import engines as EN
+        java = EN.find_java() or java
 
     sep = ";" if os.name == "nt" else ":"
     if with_stubs:

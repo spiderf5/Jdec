@@ -78,7 +78,13 @@ public class BuiltInRegistries {
 
 
 def _find_javac(bin_name: str = "javac") -> str:
-    """Find javac on PATH or in JAVA_HOME."""
+    """Find javac on PATH, in JAVA_HOME, or via engines detection."""
+    if bin_name != "javac" and Path(bin_name).is_file():
+        return bin_name
+    from . import engines
+    jc = engines.find_javac()
+    if jc:
+        return jc
     w = shutil.which(bin_name)
     if w:
         return w

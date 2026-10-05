@@ -196,6 +196,7 @@ def run_pipeline(
     clean_work: bool = False,
     export_project: bool = False,
     compile_verify: bool = False,
+    cp: str = "",
     cp_file: Path | None = None,
 ) -> PipelineResult:
     """Execute end-to-end deobfuscation and triage pipeline."""
@@ -337,9 +338,11 @@ def run_pipeline(
             st = census["stats"]
             if st["sites"] > 0:
                 print(f"      inspecting {st['sites']} indy callsite(s) across {st['classes_with_sites']} class(es) ...")
+                java_bin = EN.find_java() or "java"
                 rec_dir = work_dir / "recover"
                 rc_code = RC.recover(original_jar, rec_dir, timeout=timeout,
-                                     with_stubs=with_stubs, cp_file=cp_file)
+                                     with_stubs=with_stubs, cp=cp, cp_file=cp_file,
+                                     java=java_bin)
                 rec_tsv = rec_dir / "recovered.tsv"
                 if rec_tsv.is_file():
                     st_rw = RC.rewrite_sources(src_dir, rec_tsv)
@@ -357,9 +360,12 @@ def run_pipeline(
             if st_scan.get("accessors", 0) > 0 and st_scan.get("unique", 0) > 0:
                 print(f"      inspecting {st_scan['unique']} pool site(s) across {st_scan['pool_classes']} accessor class(es) ...")
                 harvest_tsv = pool_dir / "pool_harvest.tsv"
+                sep = ";" if sys.platform == "win32" else ":"
+                pool_cp = (str(original_jar) + (sep if cp else "") + cp) if original_jar else cp
+                java_bin = EN.find_java() or "java"
                 PL.harvest(pool_spec, harvest_tsv, pool_dir, timeout=timeout,
-                           with_stubs=with_stubs, cp=str(original_jar),
-                           cp_file=cp_file)
+                           with_stubs=with_stubs, cp=pool_cp,
+                           cp_file=cp_file, java=java_bin)
                 if harvest_tsv.is_file():
                     tmp_pool = work_dir / "src_pool"
                     st_apply = PL.apply(src_dir, harvest_tsv, tmp_pool)

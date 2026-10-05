@@ -59,6 +59,34 @@ def find_java() -> str | None:
     return None
 
 
+def find_javac() -> str | None:
+    jh = os.environ.get("JAVA_HOME")
+    if jh:
+        candidate = Path(jh) / "bin" / ("javac.exe" if os.name == "nt" else "javac")
+        if candidate.is_file():
+            return str(candidate)
+    exe = shutil.which("javac")
+    if exe:
+        return exe
+    j = find_java()
+    if j:
+        candidate = Path(j).parent / ("javac.exe" if os.name == "nt" else "javac")
+        if candidate.is_file():
+            return str(candidate)
+    for c in (
+        r"C:\Program Files\Java\jdk-21\bin\javac.exe",
+        r"C:\Program Files\Zulu\zulu-21\bin\javac.exe",
+        r"C:\Program Files\Eclipse Adoptium\jdk-21\bin\javac.exe",
+        r"C:\Program Files\Java\jdk-17\bin\javac.exe",
+        r"C:\Program Files\Zulu\zulu-17\bin\javac.exe",
+        r"C:\Program Files\Eclipse Adoptium\jdk-17\bin\javac.exe",
+    ):
+        if Path(c).exists():
+            return c
+    return None
+
+
+
 @dataclass
 class Engine:
     key: str

@@ -199,6 +199,12 @@ def decompile_library(
             "error": f"Ghidra analysis timed out after {timeout}s",
             "decompiled": [],
         }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"Ghidra execution failed: {exc}",
+            "decompiled": [],
+        }
     finally:
         if proj_dir.exists():
             shutil.rmtree(proj_dir, ignore_errors=True)

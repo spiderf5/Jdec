@@ -972,16 +972,17 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
                 except Exception:
                     pass
 
-            src_file = self.work_dir / "src" / rel_name
+            src_dir = (self.work_dir / "src").resolve()
+            src_file = (src_dir / rel_name).resolve()
             code = ""
-            if src_file.is_file():
+            if src_file.is_relative_to(src_dir) and src_file.is_file():
                 try:
                     code = src_file.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     code = ""
 
             candidates = []
-            if src_file.is_file():
+            if src_file.is_relative_to(src_dir) and src_file.is_file():
                 try:
                     candidates = RN.scan_source_file(src_file)
                 except Exception:

@@ -466,11 +466,17 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
 
     src = out_dir / "RecoverDriver.java"
     src.write_text(DRIVER_JAVA, encoding="utf-8")
-    r = subprocess.run(["javac", "-d", str(out_dir), str(src)],
+    from . import stubs as SB
+    javac_cmd = SB._find_javac("javac")
+    r = subprocess.run([javac_cmd, "-d", str(out_dir), str(src)],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print("javac failed:\n" + str(r.stderr or r.stdout or "")[-2000:])
         return 1
+
+    if java == "java":
+        from . import engines as EN
+        java = EN.find_java() or java
 
     classpath = sep.join([str(out_dir), cp, str(jar)]) if cp else \
         sep.join([str(out_dir), str(jar)])

@@ -522,6 +522,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
             clean_work=args.clean_work,
             export_project=getattr(args, "export_project", False),
             compile_verify=getattr(args, "compile", False),
+            cp=getattr(args, "cp", "") or "",
             cp_file=Path(args.cp_file) if getattr(args, "cp_file", None) else None,
         )
         return 0
@@ -879,6 +880,8 @@ def build_parser() -> argparse.ArgumentParser:
                             help="export complete IDE Gradle project after pipeline")
         parser.add_argument("--compile", action="store_true",
                             help="run javac compilation verification loop after project export")
+        parser.add_argument("--cp", default="",
+                            help="classpath entries for replay JVM")
         parser.add_argument("--cp-file", dest="cp_file", default=None,
                             help="file with classpath entries for the replay JVM "
                                  "(remapped MC + libraries) - boosts recovery yield")

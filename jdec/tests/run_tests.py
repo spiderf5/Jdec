@@ -1240,6 +1240,19 @@ def test_ghidra_integration() -> None:
         check("report contains decompiled section", "decompiled C sources (via Ghidra Headless)" in md)
         check("report lists decompiled function", "Java_com_x_Y_z" in md and "src/Java_com_x_Y_z.c" in md)
 
+    # 4. decompile_library exception resilience on invalid / mock binary
+    with tempfile.TemporaryDirectory() as td:
+        fake_gh = Path(td) / "fake_gh"
+        (fake_gh / "support").mkdir(parents=True)
+        bin_name = "analyzeHeadless.bat" if sys.platform == "win32" else "analyzeHeadless"
+        (fake_gh / "support" / bin_name).write_text("exit 1\n", encoding="utf-8")
+        dummy_dll = Path(td) / "dummy.dll"
+        dummy_dll.write_bytes(b"\x00" * 64)
+        out_c = Path(td) / "out_c"
+        res_dec = GE.decompile_library(fake_gh, dummy_dll, out_c, timeout=5, quiet=True)
+        check("decompile_library returns clean dict on error", isinstance(res_dec, dict) and "ok" in res_dec)
+
+
 
 def test_native_elf_and_ghidra_annotate() -> None:
     print("natives: ELF (.so) export parsing and Ghidra annotation script generation")
@@ -1416,6 +1429,13 @@ def test_advanced_roadmap_features() -> None:
         check("stubs has Launch", "net/minecraft/launchwrapper/Launch.class" in names)
         check("stubs has SharedConstants", "net/minecraft/SharedConstants.class" in names)
         check("stubs has BuiltInRegistries", "net/minecraft/core/registries/BuiltInRegistries.class" in names)
+
+        # 2.5 Javac compiler detection
+        from jdec import engines as EN
+        jc = EN.find_javac()
+        if jc is not None:
+            check("engines.find_javac found valid executable", Path(jc).is_file(), str(jc))
+            check("stubs._find_javac resolves javac", stubs._find_javac("javac") is not None)
     finally:
         shutil.rmtree(tmp_stubs, ignore_errors=True)
 
@@ -1655,6 +1675,15 @@ def test_web_workbench_features() -> None:
             with urllib.request.urlopen(f"{base_url}/api/callgraph?class=demo/obf/a") as res:
                 cg_api_data = json.loads(res.read().decode("utf-8"))
                 check("callgraph endpoint responds", "callers" in cg_api_data and "callees" in cg_api_data)
+
+            # 10. Test Path traversal defense on /api/source and /api/llm_prompt
+            with urllib.request.urlopen(f"{base_url}/api/source?class=../../secret") as res:
+                trav_source = res.read().decode("utf-8")
+                check("path traversal on /api/source blocked", "Source not found" in trav_source)
+
+            with urllib.request.urlopen(f"{base_url}/api/llm_prompt?class=../../secret") as res:
+                trav_prompt = json.loads(res.read().decode("utf-8"))
+                check("path traversal on /api/llm_prompt handled safely", "prompt" in trav_prompt)
 
         finally:
             server.shutdown()
