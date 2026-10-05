@@ -213,6 +213,26 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ops_pool(args: argparse.Namespace) -> int:
+    """Decrypt PhantomShield-family string pools statically (no JVM)."""
+    from . import ops_pool as OP
+
+    raw = Path(args.input)
+    if not raw.exists():
+        print(f"no such file: {raw}")
+        return 2
+    out_path = Path(args.output) if args.output else raw.parent / (raw.stem + "_ops_pool.tsv")
+    results = OP.scan_jar(str(raw))
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("class\tstrings\n")
+        for cls, strings, _entry in results:
+            f.write(f"{cls}\t" + "\t".join(strings) + "\n")
+    total = sum(len(s) for _c, s, _e in results)
+    print(f"classes with OPS pools: {len(results)}  strings: {total}")
+    print(f"output: {out_path}")
+    return 0 if results else 1
+
+
 def cmd_strings(args: argparse.Namespace) -> int:
     raw = Path(args.input)
     if not raw.exists():
@@ -743,6 +763,14 @@ def build_parser() -> argparse.ArgumentParser:
     snv.add_argument("--fetch-ghidra", action="store_true",
                      help="automatically download Ghidra into engines/ghidra if not present")
     snv.set_defaults(func=cmd_natives)
+
+    sop = sub.add_parser("opspool",
+                         help="statically decrypt PhantomShield-family "
+                              "string pools (DES/CBC + swp inverse, no JVM)")
+    sop.add_argument("input")
+    sop.add_argument("-o", "--output", default=None,
+                     help="output TSV (default: <stem>_ops_pool.tsv)")
+    sop.set_defaults(func=cmd_ops_pool)
 
     si = sub.add_parser("indy",
                         help="enumerate invokedynamic sites and BootstrapMethods")

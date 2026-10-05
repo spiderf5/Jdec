@@ -1304,6 +1304,35 @@ def test_bvmw_watermark() -> None:
               str(prof.signatures))
 
 
+
+def test_ops_pool() -> None:
+    print("opspool: PhantomShield string-pool static decrypt (DES via bundled _des)")
+    gen = Path(__file__).resolve().parent / "gen_ops_fixture.py"
+    javac = shutil.which("javac")
+    if javac is None:
+        print("skipping ops pool test: javac not on PATH")
+        return
+    from jdec import ops_pool as OP
+    OP  # noqa
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        r = subprocess.run([sys.executable, str(gen)], cwd=tdp,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            check("fixture generated", False, r.stderr[-200:])
+            return
+        r = subprocess.run([javac, "OpsPoolFixture.java"], cwd=tdp,
+                           capture_output=True, text=True)
+        check("fixture compiled", r.returncode == 0, r.stderr[-200:])
+        jar = tdp / "ops_fixture.jar"
+        subprocess.run(["jar", "cf", jar.name, "OpsPoolFixture.class"],
+                       cwd=tdp, capture_output=True)
+        results = OP.scan_jar(str(jar))
+        ok = any(s == ["alpha-secret-ONE", "bravo-secret-TWO",
+                       "charlie-secret-THREE"] for _c, s, _e in results)
+        check("static decrypt matches original strings", ok, str(results)[:200])
+
+
 def test_ghidra_integration() -> None:
     print("ghidra: engine detection, script validation, and report integration")
     import shutil
@@ -2239,6 +2268,7 @@ def main() -> int:
     test_pool_overload_dispatch()
     test_probe_fingerprints_json()
     test_bvmw_watermark()
+    test_ops_pool()
     test_ghidra_integration()
     test_native_elf_and_ghidra_annotate()
     test_score_and_signal_enhancements()
