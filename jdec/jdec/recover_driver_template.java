@@ -162,6 +162,9 @@ public class RecoverDriver {
                         if (cipher.equals("-") && st instanceof String s) cipher = s;
                         else if (seed.equals("-") && st instanceof Number n) seed = n.toString();
                     }
+                    System.out.println("SITEINFO\t" + siteName + "\t"
+                            + (dyn.length > 0 ? String.valueOf(dyn[0]) : "-") + "\t"
+                            + (dyn.length > 1 ? String.valueOf(dyn[1]) : "-"));
                     System.out.println("OK\t" + fqcn + "\t" + siteName + "\t"
                             + esc(cipher) + "\t" + seed + "\t" + esc(String.valueOf(out)));
                     ok++;

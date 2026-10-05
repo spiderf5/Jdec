@@ -238,7 +238,7 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
         for e in bsm:
             sa = _bsm_static_args(e)
             if sa is None:
-                spec.append(f"B\t{e.index}\t?\t?\t?\t0")
+                # 不可编码的 BSM 留空:其站点会 SKIP(no-bsm),不产生 FAIL 噪音
                 continue
             spec.append("\t".join(
                 ["B", str(e.index), (e.owner or "?").replace("/", "."),

@@ -41,7 +41,7 @@ _WS = "[" + _TAB + _LF + _CR + " ]*"
 _ID = "[A-Za-z_$][A-Za-z0-9_$]*"
 _HEX = "[0-9A-Fa-f]"
 # Java 整数字面量：十进制 / 0x 十六进制 / 前导 0 八进制，可选 L 后缀
-_NUM = "(?:0[xX][" + _HEX + "]+[Ll]?|[0-9]+[Ll]?)"
+_NUM = "(?:0[xX]" + _HEX + "+[Ll]?|[0-9]+[Ll]?)"   # _HEX 自带方括号,勿再包一层
 _SNUM = "(-?[ ]*" + _NUM + ")"
 
 # 访问器定义：static（可带 public/private/... 前缀）String name(两参)
