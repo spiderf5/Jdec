@@ -475,3 +475,45 @@ recover 驱动 6 轮（Method.invokeWithArguments 不存在 → bootstrap/dynami
 ### 回滚
 
 `git revert` 单提交即可；bvmw.py 独立新文件可整体删除，probe.py 改动集中在 watermark 块与 summary 行。
+
+---
+
+## 2026-10-05 深夜：engines/frida — native 方法运行时捕获管线（用户新增能力）
+
+### 任务目标
+
+Frida 动态调试回填 native 方法：RegisterNatives 全表 dump + JNI 调用面 trace + 伪 Java 回填，针对 JNIC/MyJ2C/native-obfuscator/PhantomShield 系"字节码→C"保护。
+
+### 文件级变更
+
+- **新增 `jdec/engines/frida/regnatives.js`**：hook JNIEnv 表槽 215，dump 类名/方法名/签名/函数指针。bridge-free（绕开 frida-java-bridge 在现代 JDK 上 "Java API only partially available" 拒初始化）。
+- **新增 `jdec/engines/frida/jnitrace.js`**：trace 槽 6/33/94/113/167/169（FindClass/GetMethodID/GetFieldID/GetStaticMethodID/NewStringUTF/GetStringUTFChars）= native 方法 IO 骨架。
+- **新增 `jdec/engines/frida/dump_mappings.py`**：启动+注入+泵驱动+采集→TSV。
+- **新增 `jdec/engines/frida/trace2java.py`**：trace→伪 Java 回填（FindClass→Class.forName、NewStringUTF→const-string…）。
+- **新增 `jdec/engines/frida/HarnessTemplate.java` + `README.md`**。
+
+### 实测结果（端到端）
+
+- **L2 真 JNIC 目标**：`jnic-3.7.0-YumeCloud.jar`（license 已补丁）→ **RegisterNatives 全表 247 行**：dev.jnic.be.main（main 本体在 native）、`$jnicClinit` 桥、indy CallSite 工厂、`a([B)Ljava/lang/String;` 字符串解密器、JDK Perf——方法↔native 地址 Rosetta Stone。
+- **jnitrace**：同目标 261 行 JNI IO 骨架（JDK 启动期网络 natives 语义序列）。
+- L1：JDK 自身 + HookProbe 探针（ MethodHandleNatives 路径）。
+
+### 踩坑全记录（连环 AV 的根因链，5 轮修复）
+
+1. frida 17 剥离脚本运行时的 Java 桥 → 降级 frida 16.7.19（桥内置）。
+2. frida-java-bridge 在 Zulu 21 上拒初始化（缺 VMThread::execute 等 Hotspot 内部符号）→ **弃桥**，经 jvm.dll 的 JNI_GetCreatedJavaVMs + AttachCurrentThread 拿 JNIEnv。
+3. `vm` 是 C++ JavaVM 对象，首字段才是 JNIInvokeInterface_ 表指针（直接读 vm 槽位全错位）。
+4. `env` 是"指向每线程 JNIEnv 变量"的指针，函数表要 `env.readPointer()` 再解一层；JNI 调用首参用 env 本身。
+5. **JS 定时器（setInterval）在这类目标从不触发**（顶级代码与 rpc 均正常）→ 改 python 泵驱动 `rpc.exports.tryinstall()`（注意 frida rpc 名字转换：python 蛇形→JS 驼峰、python 驼峰→JS 全小写，用全小写名最稳）。
+6. VM 启动中途 jvm.dll 已映射但 VM 对象半初始化 → acquireEnv 全防御化（槽位 3-7 校验+215 非空校验），任何怀疑返回 null 下轮重试，杜绝 AV。
+7. 短命目标（JNIC 无 Zig 2.4s 退出）→ 热循环只 pump 已知 pid（20ms），enumerate 降到 0.5s 一次。
+
+### 遗留 / 待办
+
+- `.dat` 内嵌 native payload 为加密压缩（高熵无 magic）——静态解需读 loader 算法（jnicinternal/ 296 类）；运行时侧可 hook 文件写入/内存 dump 拿解压后 DLL。
+- trace2java 的 markers 切段为 v1 近似（按顺序交错），ENTER/EXIT 精确对齐需 harness 与 trace 同流采集。
+- MethodHandleNatives 在 JDK21 不走 RegisterNatives（L1 rows=0 的解释；hook 机制本身由 L2 247 行验证）。
+
+### 回滚
+
+`git revert` 单提交；engines/frida/ 为全新目录可整体删除。
