@@ -142,7 +142,8 @@ python jdec.py decompile X.jar -o out --verify-all
 | 单参池形态：`(C)Ljava/lang/Object;` | `python jdec.py opspool X.jar`（纯静态 DES 解密） |
 | native 方法体在 PE/ELF 内 | `python jdec.py natives X.jar -o out`；裸 DLL 可直接作为输入 |
 | dumped 库的结构化查询 | `python jdec.py nativedb <lib> --build <dir>`；`nativedb <dir> --search <kw>` |
-| BytecodeVM 类虚拟化器的程序提取 | `jdec/bvmw_devirt.py`（原型） |
+| BytecodeVM 类虚拟化器：静态反虚拟化全链（提取→解码→路由→语义） | `python jdec.py bvmw X.jar`；`references/bytecode-vm.md` |
+| BytecodeVM 插桩对拍（运行时 trace vs 静态 decode） | `jdec/tests/bvmw/bvmtrace/run_bvmtrace.py`（ASM 注入 + 候选集校验） |
 
 ### 4.6 收尾核查
 
