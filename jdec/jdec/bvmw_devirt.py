@@ -1423,13 +1423,16 @@ def _aload_local(ins) -> int | None:
     return None
 
 
-def _extract_bucket_registry(cf_main) -> dict[int, tuple[int, int, int]]:
-    """Parse <clinit>'s DATA_FLOW_BUCKETS registration (3 build variants).
+def _extract_bucket_registry(cf_main) -> tuple[dict, dict]:
+    """Parse <clinit>'s DATA_FLOW_BUCKETS registration (build variants).
 
-    Returns {token: (bucket, shard_ordinal, seed)}.
+    Returns (entries, transitions):
+      entries: {token: (bucket, shard_ordinal, seed)}
+      transitions: {idx: (shard_ordinal, seed)} — FSM flavor handler array
       A (set0/set1): map.put(TOKEN, new Shard$N(SEED))
-      B (set2):      map.put(TOKEN, Integer.valueOf(K))  — K is a small
-                     handler id (shard=-1, seed=K)
+      B (set2):      map.put(TOKEN, Integer.valueOf(K))  — K is a symbol
+                     column into a second-level handler array (see
+                     transitions; the runtime row is bucket*span + K)
       C (set3):      aligned arrays int[] tokens / Object[] handlers:
                      tokens[i]=TOKEN (iastore) then handlers[i]=new
                      Shard$N(SEED) (aastore), interleaved.
@@ -1442,6 +1445,7 @@ def _extract_bucket_registry(cf_main) -> dict[int, tuple[int, int, int]]:
     insns = _code(cf_main, m).insns
     entries: dict[int, tuple[int, int, int]] = {}
     bucket_of_local: dict[int, int] = {}
+    transitions: dict[int, tuple[int, int]] = {}   # FSM fill: idx -> (shard, seed)
     raw_a: list[tuple[int, int, int, int]] = []          # (map_local, tok, shard, seed)
     last_local: int | None = None
     pending_token: int | None = None
@@ -1450,6 +1454,8 @@ def _extract_bucket_registry(cf_main) -> dict[int, tuple[int, int, int]]:
     pending_value: int | None = None
     last_token_store: tuple[int, int] | None = None      # (idx, token) @ iastore
     last_handler_store: tuple[int, int, int, int] | None = None  # (arr, idx, shard, seed)
+    arr_elems: dict[int, list[tuple[int, int, int]]] = {}  # arr local -> [(idx, shard, seed)]
+    token_handlers: dict[int, list[tuple[int, int]]] = {}  # token -> [(shard, seed)] (variant D arrays)
 
     def value_of(ins):
         return ins.op == 0xB8 and _target_desc(cf_main, ins) is not None \
@@ -1526,6 +1532,9 @@ def _extract_bucket_registry(cf_main) -> dict[int, tuple[int, int, int]]:
                             else:
                                 last_handler_store = (laj, iv, pending_shard,
                                                       pending_seed)
+                            transitions[iv] = (pending_shard, pending_seed)
+                            arr_elems.setdefault(laj, []).append(
+                                (iv, pending_shard, pending_seed))
                         break
             pending_token = pending_shard = pending_seed = pending_value = None
             continue
@@ -1539,6 +1548,9 @@ def _extract_bucket_registry(cf_main) -> dict[int, tuple[int, int, int]]:
                     entries[pending_token] = (
                         bucket_of_local.get(last_local, -1),
                         last_handler_store[2], last_handler_store[3])
+                    token_handlers[pending_token] = [
+                        (sh, sd) for _iv, sh, sd
+                        in arr_elems.get(last_local, [])]
                 else:                                 # token seen, value opaque
                     entries.setdefault(pending_token,
                                        (bucket_of_local.get(last_local, -1),
@@ -1554,17 +1566,30 @@ def _extract_bucket_registry(cf_main) -> dict[int, tuple[int, int, int]]:
     for map_local, tok, shard, seed in raw_a:
         entries.setdefault(tok, (bucket_of_local.get(map_local, -1),
                                  shard, seed))
-    return entries
+    return entries, transitions, token_handlers
 
 
 def extract_routing(cf_main) -> dict:
-    """dispatchKey consts + clinit bucket registry for one VM set."""
+    """dispatchKey consts + clinit bucket registry for one VM set.
+
+    "transitions" is the FSM flavor's flat handler table (idx -> (shard,
+    seed)); tokens for that flavor resolve via a two-level lookup (map to a
+    symbol column K, then the handler array at bucket*span + K), so the
+    verifier joins on the table contents instead of a single entry.
+    """
     k1, k2 = _extract_dispatch_consts(cf_main)
-    return {"k1": k1, "k2": k2, "entries": _extract_bucket_registry(cf_main)}
+    entries, transitions, token_handlers = _extract_bucket_registry(cf_main)
+    return {"k1": k1, "k2": k2, "entries": entries, "transitions": transitions,
+            "token_handlers": token_handlers}
 
 
 def annotate_routing(vs: VMSet, dec: VMMethodDecoded, routing: dict) -> None:
-    """Fill dispatch_token / bucket / shard / shard_seed per slot."""
+    """Fill dispatch_token / bucket / shard / shard_seed per slot.
+
+    For variant D tokens (map value is a handler array) the slot also gets
+    "handler_candidates": every (shard, seed) the array can yield at run
+    time, since the picked index is a runtime value.
+    """
     prof = vs.profile
     k1, k2 = routing["k1"], routing["k2"]
     use_dk = bool(dec.feature_flags & 8)
@@ -1579,3 +1604,5 @@ def annotate_routing(vs: VMSet, dec: VMMethodDecoded, routing: dict) -> None:
                 f"slot {rec['slot']}: dispatch token {tok} not in clinit registry")
         else:
             rec["bucket"], rec["shard"], rec["shard_seed"] = ent
+        cands = routing.get("token_handlers", {}).get(tok)
+        rec["handler_candidates"] = list(cands) if cands else None
