@@ -6,6 +6,8 @@ Checks:
   - set0 METHOD_KEYS == [0xc2f47ad9], FEATURE_FLAGS == [0x1f]
   - stream sizes sane; no unknown ops in the walker
   - decode_method() runs for every set/row without exceptions
+  - dispatch routing: every slot's token hits the clinit bucket registry
+    (unrouted == 0), with shard histogram per set
 """
 from __future__ import annotations
 
@@ -85,6 +87,45 @@ def main() -> int:
             except Exception as e:
                 print(f"set {vs.index} row {row}: DECODE FAILED: {e!r}")
                 fail += 1
+
+    print("\n--- dispatch routing (clinit registry cross-check)")
+    for vs in sets:
+        try:
+            routing = dv.extract_routing(vs.main_cf)
+        except Exception as e:
+            print(f"set {vs.index}: ROUTING EXTRACT FAILED: {e!r}")
+            fail += 1
+            continue
+        n_rows = len(vs.pool.single.get("METHOD_KEYS", []))
+        n_slots = 0
+        unrouted = 0
+        shard_hist: dict[tuple[int, int], int] = {}
+        warnings = 0
+        for row in range(n_rows):
+            try:
+                dec = dv.decode_method(vs, row)
+            except Exception as e:
+                print(f"set {vs.index} row {row}: DECODE FAILED: {e!r}")
+                fail += 1
+                continue
+            dv.annotate_routing(vs, dec, routing)
+            warnings += len(dec.warnings)
+            for s in dec.slots:
+                n_slots += 1
+                if s.get("shard") is None:
+                    unrouted += 1
+                else:
+                    k = (s["shard"], s["shard_seed"])
+                    shard_hist[k] = shard_hist.get(k, 0) + 1
+        print(f"set {vs.index}: registry={len(routing['entries'])} "
+              f"k1=0x{routing['k1'] & 0xffffffff:x} "
+              f"k2=0x{routing['k2'] & 0xffffffff:x} "
+              f"slots={n_slots} unrouted={unrouted} warnings={warnings}")
+        for (shard, seed), cnt in sorted(shard_hist.items(),
+                                         key=lambda t: -t[1]):
+            print(f"    shard={shard} seed=0x{seed & 0xffffffff:x}: {cnt} slots")
+        if unrouted or warnings:
+            fail += 1
 
     bridges = dv.scan_bridges(classes)
     print(f"\nbridges: {bridges}")

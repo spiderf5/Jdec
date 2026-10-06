@@ -186,10 +186,15 @@ def block_mix(prof, key, block_idx, fld) -> int:
 
 
 def opcode_mix(prof, key, sk, vpc, slot) -> int:
+    """scheduleReadyNode: opcodeStream[slot] ^ mix(key^sk, vpc, slot,
+    salt_opcode) — vpc is mix arg 'a', slot is arg 'b' (jar-verified,
+    brute-forced against the OPCODE_MAPS index range)."""
     return mix(prof, key ^ sk, vpc, slot, prof.salt_opcode)
 
 
 def opcode_map_mix(prof, key, virt) -> int:
+    """scheduleReadyNode: opcodeMap[v] ^ mix(methodKey, v, salt_opcode_map, 0)
+    — plain methodKey (no stateKey), jar-verified."""
     return mix(prof, key, virt, prof.salt_opcode_map, 0)
 
 
@@ -1376,3 +1381,201 @@ def _decode_payload(payload: list[int]):
     if tag == 6:
         return ("type", "".join(chr(c & 0xFFFF) for c in body))
     return ("tag?", tag, body)
+
+
+# ---------------------------------------------------------------------------
+# dispatch routing (jar-verified end-to-end)
+# ---------------------------------------------------------------------------
+#
+# Runtime route (scheduleReadyNode, set0 flags=0x1f):
+#   opcode  = opcodeStream[slot] ^ mix(key^sk, vpc, slot, salt_opcode)
+#   mapped  = opcodeMap[opcode]  ^ mix(key, opcode, salt_opcode_map, 0)
+#   token   = flags&8 ? dispatchKey(mapped) : mapped
+#             dispatchKey(x) = mix(K1, x, K2, 0)   (K1/K2 baked per set)
+#   handler = DATA_FLOW_BUCKETS[floorMod(token, 8)].get(token)
+# The bucket maps are baked in <clinit> as map.put(TOKEN, new
+# Shard$N(SEED)); the (Shard class, seed) pair is the semantic unit of
+# the compiled op.  End-to-end proof: dispatchKey of every decoded
+# mapped value lands on a baked bucket key.
+
+def _extract_dispatch_consts(cf_main) -> tuple[int, int]:
+    """(K1, K2) baked in dispatchKey(int): mix(K1, x, K2, 0)."""
+    m = _member(cf_main, "dispatchKey")
+    if m is None:
+        raise ValueError("dispatchKey method not found")
+    consts = [v for _pc, v in _int_pushes(cf_main, _code(cf_main, m).insns)]
+    if len(consts) < 2:
+        raise ValueError("dispatchKey constants not found")
+    return consts[0], consts[1]
+
+
+def _load_op(cf, ins) -> int | None:
+    if ins.op in (0x12, 0x13):                    # ldc / ldc_w
+        return _const_int(cf, ins)
+    return None
+
+
+def _aload_local(ins) -> int | None:
+    if ins.op == 0x19:                            # aload
+        return ins.arg
+    if 0x2A <= ins.op <= 0x2D:                    # aload_0..3
+        return ins.op - 0x2A
+    return None
+
+
+def _extract_bucket_registry(cf_main) -> dict[int, tuple[int, int, int]]:
+    """Parse <clinit>'s DATA_FLOW_BUCKETS registration (3 build variants).
+
+    Returns {token: (bucket, shard_ordinal, seed)}.
+      A (set0/set1): map.put(TOKEN, new Shard$N(SEED))
+      B (set2):      map.put(TOKEN, Integer.valueOf(K))  — K is a small
+                     handler id (shard=-1, seed=K)
+      C (set3):      aligned arrays int[] tokens / Object[] handlers:
+                     tokens[i]=TOKEN (iastore) then handlers[i]=new
+                     Shard$N(SEED) (aastore), interleaved.
+    Each HashMap variant is stored back with aload_<arr>; iconst_B;
+    aload <maplocal>; aastore, which yields the bucket index.
+    """
+    m = _member(cf_main, "<clinit>")
+    if m is None:
+        raise ValueError("main class <clinit> not found")
+    insns = _code(cf_main, m).insns
+    entries: dict[int, tuple[int, int, int]] = {}
+    bucket_of_local: dict[int, int] = {}
+    raw_a: list[tuple[int, int, int, int]] = []          # (map_local, tok, shard, seed)
+    last_local: int | None = None
+    pending_token: int | None = None
+    pending_shard: int | None = None
+    pending_seed: int | None = None
+    pending_value: int | None = None
+    last_token_store: tuple[int, int] | None = None      # (idx, token) @ iastore
+    last_handler_store: tuple[int, int, int, int] | None = None  # (arr, idx, shard, seed)
+
+    def value_of(ins):
+        return ins.op == 0xB8 and _target_desc(cf_main, ins) is not None \
+            and _target_desc(cf_main, ins)[1] == "valueOf"
+
+    def small_const(ins):
+        if 0x03 <= ins.op <= 0x08:
+            return ins.op - 0x03
+        if ins.op in (0x10, 0x11):
+            return ins.arg
+        if ins.op in (0x12, 0x13):
+            return _const_int(cf_main, ins)
+        return None
+
+    for i, ins in enumerate(insns):
+        loc = _aload_local(ins)
+        if loc is not None:
+            last_local = loc
+            continue
+        if ins.op in (0x12, 0x13):                    # ldc / ldc_w
+            v = _const_int(cf_main, ins)
+            if v is None:
+                continue
+            nxt = insns[i + 1] if i + 1 < len(insns) else None
+            if nxt is not None and value_of(nxt):
+                pending_token = v
+            elif pending_shard is not None and pending_seed is None:
+                pending_seed = v
+            continue
+        if ins.op == 0xBB:                            # new
+            cls = _cp_class_name(cf_main, ins.arg)
+            if cls and "Shard$" in cls:
+                try:
+                    pending_shard = int(cls.rsplit("$", 1)[-1])
+                except ValueError:
+                    pending_shard = None
+            continue
+        if ins.op == 0xB7:                            # invokespecial ctor
+            if pending_token is not None and pending_seed is not None \
+                    and pending_shard is not None and last_local is not None \
+                    and last_token_store is None:
+                raw_a.append((last_local, pending_token,
+                              pending_shard, pending_seed))
+                pending_token = pending_shard = pending_seed = None
+            # variant C/D: keep shard/seed state for the upcoming aastore
+            continue
+        if ins.op == 0x4F:                            # iastore (variant C)
+            if i >= 2:
+                bv = small_const(insns[i - 2])
+                tv = _const_int(cf_main, insns[i - 1])
+                if bv is not None and tv is not None:
+                    last_token_store = (bv, tv)
+            pending_token = pending_value = None
+            continue
+        if ins.op == 0x53:                            # aastore
+            a, b, c = insns[i - 3], insns[i - 2], insns[i - 1]
+            la, lc = _aload_local(a), _aload_local(c)
+            if la is not None and lc is not None:
+                bv = small_const(b)
+                if bv is not None:
+                    bucket_of_local[lc] = bv          # bucket triple
+            else:
+                # value built on the stack: scan back for (aload ARR, PUSH idx)
+                for j in range(i - 1, max(i - 12, 0), -1):
+                    iv = small_const(insns[j])
+                    laj = _aload_local(insns[j - 1]) if j >= 1 else None
+                    if iv is not None and laj is not None:
+                        if pending_shard is not None and pending_seed is not None:
+                            if last_token_store is not None \
+                                    and last_token_store[0] == iv:
+                                entries[last_token_store[1]] = (
+                                    -1, pending_shard, pending_seed)
+                                last_token_store = None
+                            else:
+                                last_handler_store = (laj, iv, pending_shard,
+                                                      pending_seed)
+                        break
+            pending_token = pending_shard = pending_seed = pending_value = None
+            continue
+        if ins.op == 0xB9:                            # invokeinterface put
+            if pending_token is not None and last_local is not None:
+                if pending_value is not None:         # variant B
+                    entries[pending_token] = (
+                        bucket_of_local.get(last_local, -1), -1, pending_value)
+                elif last_handler_store is not None \
+                        and last_handler_store[0] == last_local:   # variant D
+                    entries[pending_token] = (
+                        bucket_of_local.get(last_local, -1),
+                        last_handler_store[2], last_handler_store[3])
+                else:                                 # token seen, value opaque
+                    entries.setdefault(pending_token,
+                                       (bucket_of_local.get(last_local, -1),
+                                        -1, -1))
+            pending_token = pending_shard = pending_seed = pending_value = None
+            continue
+        k = small_const(ins)                          # variant B value push
+        if k is not None and pending_token is not None and pending_value is None:
+            nxt = insns[i + 1] if i + 1 < len(insns) else None
+            if nxt is not None and value_of(nxt):
+                pending_value = k
+    # resolve bucket indices for variant A map locals (assigned after puts)
+    for map_local, tok, shard, seed in raw_a:
+        entries.setdefault(tok, (bucket_of_local.get(map_local, -1),
+                                 shard, seed))
+    return entries
+
+
+def extract_routing(cf_main) -> dict:
+    """dispatchKey consts + clinit bucket registry for one VM set."""
+    k1, k2 = _extract_dispatch_consts(cf_main)
+    return {"k1": k1, "k2": k2, "entries": _extract_bucket_registry(cf_main)}
+
+
+def annotate_routing(vs: VMSet, dec: VMMethodDecoded, routing: dict) -> None:
+    """Fill dispatch_token / bucket / shard / shard_seed per slot."""
+    prof = vs.profile
+    k1, k2 = routing["k1"], routing["k2"]
+    use_dk = bool(dec.feature_flags & 8)
+    for rec in dec.slots:
+        mapped = rec["dispatch_opcode"]
+        tok = _i32(mix(prof, k1, mapped, k2, 0)) if use_dk else mapped
+        rec["dispatch_token"] = tok
+        ent = routing["entries"].get(tok)
+        if ent is None:
+            rec["bucket"] = rec["shard"] = rec["shard_seed"] = None
+            dec.warnings.append(
+                f"slot {rec['slot']}: dispatch token {tok} not in clinit registry")
+        else:
+            rec["bucket"], rec["shard"], rec["shard_seed"] = ent
