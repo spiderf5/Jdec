@@ -56,3 +56,5 @@ out*/
 
 # 外部研究材料（含 DMCA 敏感源码），永不入库
 study/
+# resident JDK for class v69 (installed via tsinghua adoptium mirror)
+jdk25/
