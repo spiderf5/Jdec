@@ -1,6 +1,6 @@
 """pool 子命令：字符串池加密（无 indy 形态）的自洽重放与回填。
 
-形态（lf21 实证，见 references/string-encryption.md 池 replay 节）：
+形态（真实样本实证，见 references/string-encryption.md 池 replay 节）：
 池类 clinit 把 packed 载体串切分 + XOR 建密文池；访问器
 `static String a(int idx, int seed)` 用类内常数定址 + 密文首字节查
 key 表 + seed 派生滚动 key——逐类常数全不同，静态移植不现实。
@@ -126,7 +126,7 @@ def _fqcn_of(f: Path, txt: str) -> str:
 def _acc_param_kinds(params: str):
     """访问器参数表 → (类型, 类型)（"int"/"long"）；形状不合返回 None。
 
-    2026-10-05 lf21 实测教训：一个池类里 String a(int,int) 与
+    2026-10-05 真实样本实测教训：一个池类里 String a(int,int) 与
     int a(int,long) 两套池共存（字符串池 + int 常量池），名字级白名单会把
     int 池的调用点也扫进 spec，driver 按字符串池语义传 idx → AIOOBE
     （Index 31158 = 772^0x7AB2）。签名级分派是唯一可靠判据。
@@ -282,7 +282,7 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
     log_path = work_dir / "driver.log"
     out_tsv.parent.mkdir(parents=True, exist_ok=True)
     timed_out = False
-    # stdout 直落盘：LF21 实战教训，管道缓冲+大输出会假死假象
+    # stdout 直落盘：真实样本实战教训，管道缓冲+大输出会假死假象
     with open(out_tsv, "wb") as fo, open(log_path, "wb") as fe:
         try:
             rc = subprocess.run([java, "@" + str(argsfile)],

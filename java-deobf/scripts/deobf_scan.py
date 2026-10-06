@@ -409,7 +409,7 @@ def collect_classes(target, max_classes):
     """返回 ({类名: 字节}, coverage)；coverage 记录总量/截断/嵌套 jar。
 
     统计数字会被当成全量事实使用——静默截断曾让 native 方法数少报 112 个
-    （EdNaven：525 类、上限 500，末尾 25 类里的 native 全部失踪）。
+    （真实样本：525 类、上限 500，末尾 25 类里的 native 全部失踪）。
     截断必须显式上报，让读者知道数字是部分数据。
     """
     path = Path(target)

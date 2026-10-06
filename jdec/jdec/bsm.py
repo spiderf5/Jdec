@@ -1,6 +1,6 @@
 """BootstrapMethods 解析与 invokedynamic 站点枚举。
 
-现代字符串加密（ZKM 27+ / EdNaven 实证）把密文、索引、密钥全部藏进
+现代字符串加密（ZKM 27+ 实证）把密文、索引、密钥全部藏进
 invokedynamic：每个调用点 = bootstrap 方法 + 动态参数（运行时才算出的
 常量表达式）。jdec 原先只有 superblaubeere27 一种专用编码（indy.py），
 这里补通用层：
@@ -90,7 +90,7 @@ def _arity(desc: str) -> int:
 
     D/J 在执行模型里占 2 槽，但在描述符**文本**里仍是 1 个字符——
     这里数的是参数个数，J 后只前进 1 字符。写成 i+=2 会把 ')' 甚至
-    返回类型一起吃掉：'(IJ)String' 被数成 3（EdNaven 1213 个字符串
+    返回类型一起吃掉：'(IJ)String' 被数成 3（真实样本 1213 个字符串
     站点的 idx 槽被 null 顶掉的根因，2026-10-04 实证）。"""
     n, i = 0, 1
     while i < len(desc) and desc[i] != ")":
@@ -210,7 +210,7 @@ def enum_sites(cf, bsm_cache: dict | None = None) -> list[IndySite]:
     cache = bsm_cache if bsm_cache is not None else {}
     bsm = _walk_bsm(cf, cache)
     sites = []
-    # 局部变量建模：ZKM 的 key 链普遍经过 lstore/lload（EdNaven 实证：
+    # 局部变量建模：ZKM 的 key 链普遍经过 lstore/lload（真实样本实证：
     # long l = a ^ 常量 的字段值会被存进局部槽再取用）
     for m in cf.methods:
         try:

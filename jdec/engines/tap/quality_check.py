@@ -16,7 +16,7 @@ TAP = r"D:/MC/Workbuddy/deobf/jdec/engines/tap"
 
 # 常见英文词 / Java / 混淆语境的判定片段
 TOKENS = (
-    "java", "lang", "net.minecraft", "myau", "the ", "ing ", "tion", "Exception",
+    "java", "lang", "net.minecraft", "the ", "ing ", "tion", "Exception",
     "Error", "java/", "org/", "com/", "invoke", "method", "class", "field",
     "String", "Object", "get", "set", "put", "add", "load", "init", "false",
     "true", "null", "this", "void", "int", "long", "render", "player", "world",

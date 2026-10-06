@@ -8,7 +8,7 @@ fixture 实测打通，395 静态 slot + 1713 运行时事件全部对拍）。�
 
 - `probe` 归因 `BytecodeVM`：类池出现 `BytecodeVM$N$CodePool`、
   `BytecodeVM$N$Frame`、`BytecodeVM$N$Program`、`Flavor$Shard$K` 家族；
-- 水印：`BVMW` marker + AES-GCM capsule（`jdec/bvmw.py` 静态解码
+- 水印：`BVMW` marker + AES-GCM capsule（key 内嵌，静态可解  
   owner/artifactId/protectedAt/inputSha256）；
 - 桥接形态：原方法体替换为装箱参数 →
   `BytecodeVM$N$Integrity.$vm$integrityEntry$K(Object, Object[])`；
@@ -71,25 +71,46 @@ ASM tree API 注入（COMPUTE_FRAMES 不需要：FrameNode 随指令流重定位
   （1:1/候选集/FSM 表三口径）→ next_pc 执行链（pc 域值，需 pc→slot
   反查后比对；分支跳转计入 divergence）。
 
-## 6. CLI 与测试
+## 6. 工具与测试（2026-10-07 起移出产品树）
 
-```
-python jdec.py bvmw X.jar [-v] [--top N]   # 每 set salts/layout/routing/直方图
-python tests/bvmw/verify_extract.py        # 阶段1/2 验收（含 unrouted==0）
-python tests/bvmw/compare_dump.py          # golden 运行时 FieldDump 对拍
-python tests/bvmw/bvmtrace/run_bvmtrace.py # 阶段3 插桩对拍（需 javac+ASM）
-```
+BytecodeVM 专属实现（静态反虚拟化器、水印解码器、插桩对拍工具）已从产品
+代码删除——现实目标几乎不使用该混淆器，专属工具不具通用价值；方法论保留
+于本 reference，可迁移至同构未知 VM（按 §1-§5 缩减尝试面）。原实现
+（`jdec/bvmw.py` / `bvmw_ops.py` / `bvmw_devirt.py`、`tests/bvmw/` fixture
+与对拍工具、`python jdec.py bvmw` CLI）可从 git 历史找回；验证数据与
+开发日志存工作区 memory。`probe` 对 `BytecodeVM` 的归因指纹（数据驱动，
+在 `fingerprints.json`）保留。
 
-run_tests.py：`test_bvmw_devirt`（纯静态）+ `test_bvmw_trace`
-（缺 javac/ASM 自动 skip）。
+其中的通用原语已抽出并以通用形态回归产品（`run_tests.py` 有 javac
+fixture 回归）：
 
-## 7. 已知边界
+- `jdec/jdec/jint.py` — Java 原语算术精确仿真（i32/i64 包装、>>> 无符号
+  移位、rotl32、运算符优先级坑），移植任何 Java 解密器/mixer 的前置件；
+- `jdec/jdec/clinit_sim.py` — clinit 建表的符号栈求值器（数组模型、
+  wide 展开、valueOf 直通、hooks 机制承载保护器私有解包 API、
+  unknown_ops 诚实上报不完整走查）——任何"clinit 静态建表"型保护的
+  静态解包引擎。
 
-- aux62（scheduleReadyNode arg4，循环内常量）语义未定（疑 integrity/XXH
-  nonce）；FSM 的运行时 bucket 选择函数已从 javap 人工确认但未进静态
-  模型；
-- Integrity 外壳 VM（1.1MB 完整二级 VM）未反虚拟化——引导/校验层，方法
-  语义在内层 VM；需要时可复用同一路线；
+## 7. 已知边界（2026-10-07 更新）
+
+生成器（study/BytecodeVM）100% 逐行后关闭三项（NOTES 批次九/十/十八，
+来源 = 生成器源码 InterpretContext / VMStructureGenerator / IntegrityGenerator）：
+
+- **aux62 = STRUCTURE_STATE**——InterpretContext 官方槽位表：dispatch 循环
+  内 local 4=OPCODE（对拍口径里的 "mapped"）、49=INSTRUCTION_INDEX（非
+  槽号）、62=STRUCTURE_STATE（结构状态机变量，FSM 状态、DataFlow
+  graphResult 均走它）；
+- **FSM bucket 进静态模型**：state = floorMod(structureState, stateCount)，
+  TRANSITIONS 两级查表 idx = bucket*symbolCount + K（fixture 里 9=
+  symbolCount）；
+- **Integrity 外壳 VM（1.1MB 二级 VM）信封代数全可逆**：`encoded =
+  rotl(cap ^ xorMask, rotation) * oddM + addend`（multiplier 强制奇数，
+  inverseOdd 牛顿迭代逆元），`envelope = encoded<<32 | (tag<<1|1)`；
+  hashResource 自实现可复算，布局常量全部 emitted 进 VM 代码——"不是
+  不能拆，是还没拆"，可复用同一套 17 结构工具链。
+
+仍开放：
+
 - handler 的 operand/constant 解密公式已定位（opnd ^ mix(..., vpc, opIdx,
   salt^pos)，arg4 经 lambda 适配层）但未逐 seed 语义化（每个 (Shard,seed)
   的算术行为需执行级 trace 才能命名）。

@@ -1,6 +1,6 @@
 """recover 子命令：自洽重放，解出 indy 字符串/常量加密。
 
-方法论（EdNaven 实证，见 references/string-encryption.md）：
+方法论（真实样本实证，见 references/string-encryption.md）：
 解密器有跨类全局状态，"静态重放求 key" 必错；但**同一轮 JVM 内自洽**——
 初始化目标类 → 反射读本轮真字段值 → 现场求 key → 调用目标类自己的
 bootstrap。本模块把该流程产品化：
@@ -31,7 +31,7 @@ DRIVER_JAVA = (Path(__file__).parent / "recover_driver_template.java").read_text
 
 
 # --------------------------------------------------------------------------
-# 失败归因。lf21 双管线对标（2026-10-04）的教训：failed 清单禁止用一句统一
+# 失败归因。真实样本双管线对标（2026-10-04）的教训：failed 清单禁止用一句统一
 # 叙事（如"结构性边界"）解释掉一批失败——11 个失败类里 4 个只是 classpath
 # 少了一罐 lwjgl 常量 jar。按根因自动分桶，每桶给可执行的处置建议。
 # --------------------------------------------------------------------------
@@ -49,7 +49,7 @@ _FAIL_BUCKETS: list[tuple[str, str, str, str]] = [
     ("native", r"UnsatisfiedLinkError",
      "缺真实 native 库",
      "该类 clinit 真调了 native 方法：单独认输，或补真实 native 后重跑。"
-     "不要因此把整个依赖族剔出 classpath——lf21 实测：全剔 lwjgl 错杀 4 个只摸常量的类"),
+     "不要因此把整个依赖族剔出 classpath——真实样本实测：全剔 lwjgl 错杀 4 个只摸常量的类"),
     ("lwjgl-constants", r"(?:NoClassDefFoundError|ClassNotFoundException):\s*org[./]lwjgl",
      "缺 lwjgl 常量类",
      "GLFW/GL 系**常量类加载是安全的**（加载 ≠ 调 native）：把 lwjgl-api jar 加回 "
@@ -210,7 +210,7 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
                 break
             classes.append((cf, bsm, sites))
 
-    # 形态分型（EdNaven 2026-10-04 实证）：
+    # 形态分型（真实样本 2026-10-04 实证）：
     # - REF 型（成员引用隐藏）：同一个三参 BSM 被**多种返回类型**的站点共用
     #   （字段 getter/setter、方法引用全部走它），站点 desc 尾部固定两个 long
     #   = 加密成员引用。driver 对它**不能执行**目标方法，只能解引用。
@@ -270,7 +270,7 @@ def java_escape(s: str) -> str:
 
     反斜杠一律用 chr(92) 构造——实证某些传输链路会把手写的反斜杠
     改写成斜杠，chr() 拼接免疫。
-    编码卫生（lf21 对标教训）：除 \t\n\r 外的所有控制字符与全部非 ASCII
+    编码卫生（真实样本对标教训）：除 \t\n\r 外的所有控制字符与全部非 ASCII
     一律转义成 uXXXX 形式——裸控制/高位字节会让下游 grep/diff 把文件判成
     binary，静默漏统计（实测 6902 被少算成 3221）。
     """

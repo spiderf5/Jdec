@@ -11,7 +11,7 @@ import java.util.*;
  * plaintext; the driver sees the timing. Everything recorded between the
  * start and the end of one Class.forName() belongs to that class.
  *
- * Crash protocol: a native crash (myau.r) kills the JVM without running any
+ * Crash protocol: a native crash kills the JVM without running any
  * shutdown hook. Two things keep the data alive:
  *   1. StringsSpy's append-on-record log (-Dstringspy.out) survives --
  *      plaintext without attribution.
@@ -44,7 +44,7 @@ public class Step {
 
         for (String cn : classes) {
             try {
-                // class list uses internal names (myau/A); forName wants dots
+                // class list uses internal names (pkg/A); forName wants dots
                 Class.forName(cn.replace('/', '.'), true, Step.class.getClassLoader());
                 ok++;
             } catch (Throwable t) {

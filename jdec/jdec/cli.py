@@ -447,82 +447,6 @@ def cmd_pool(args: argparse.Namespace) -> int:
     return 0 if st["replaced"] else 1
 
 
-def cmd_bvmw(args: argparse.Namespace) -> int:
-    """Static BytecodeVM devirtualizer report: VM sets, layout, routing."""
-    from . import bvmw_devirt as BV
-
-    p = Path(args.input)
-    if not p.exists():
-        print(f"no such file: {p}")
-        return 2
-    classes = BV.load_classes(p)
-    print(f"classes loaded: {len(classes)}")
-    sets = BV.discover_vm_sets(classes)
-    if not sets:
-        print("no BytecodeVM CodePool sets found (not a BytecodeVM jar?)")
-        return 1
-    print(f"VM sets: {len(sets)} "
-          f"({[s.pool_name.rsplit('$', 1)[-2] for s in sets]})")
-    fail = 0
-    for vs in sets:
-        prof = vs.profile
-        print(f"\n== set {vs.index}: {vs.pool_name}")
-        pd = prof.to_dict()
-        print("   salts: " + " ".join(
-            f"{k}=0x{v & 0xffffffff:x}" for k, v in pd.items()
-            if k != "layout_slots"))
-        print(f"   layout_slots={prof.layout_slots}")
-        if vs.pool.unknown_ops:
-            print(f"   UNKNOWN OPS: {vs.pool.unknown_ops}")
-            fail += 1
-        try:
-            routing = BV.extract_routing(vs.main_cf)
-        except Exception as e:
-            print(f"   routing extract FAILED: {e!r}")
-            fail += 1
-            continue
-        n_rows = len(vs.pool.single.get("METHOD_KEYS", []))
-        n_slots = unrouted = warnings = 0
-        shard_hist: dict[tuple[int, int], int] = {}
-        for row in range(n_rows):
-            try:
-                dec = BV.decode_method(vs, row)
-            except Exception as e:
-                print(f"   row {row}: DECODE FAILED: {e!r}")
-                fail += 1
-                continue
-            BV.annotate_routing(vs, dec, routing)
-            warnings += len(dec.warnings)
-            for s in dec.slots:
-                n_slots += 1
-                if s.get("shard") is None:
-                    unrouted += 1
-                else:
-                    k = (s["shard"], s["shard_seed"])
-                    shard_hist[k] = shard_hist.get(k, 0) + 1
-            if args.verbose:
-                print(f"   row {row}: key=0x{dec.method_key & 0xffffffff:08x} "
-                      f"flags={dec.feature_flags:#x} slots={len(dec.slots)} "
-                      f"blocks={len(dec.blocks)} handlers={len(dec.handlers)} "
-                      f"consts={len(dec.constants)}")
-        print(f"   routing: k1=0x{routing['k1'] & 0xffffffff:x} "
-              f"k2=0x{routing['k2'] & 0xffffffff:x} "
-              f"registry={len(routing['entries'])}")
-        print(f"   decoded: rows={n_rows} slots={n_slots} "
-              f"unrouted={unrouted} warnings={warnings}")
-        for (shard, seed), cnt in sorted(shard_hist.items(),
-                                         key=lambda t: -t[1])[:args.top]:
-            print(f"     shard={shard} seed=0x{seed & 0xffffffff:x}: {cnt} slots")
-        if unrouted or warnings:
-            fail += 1
-    bridges = BV.scan_bridges(classes)
-    print(f"\nbridges ({len(bridges)}):")
-    for cls, meth, row in bridges:
-        print(f"  {cls}.{meth} -> row {row}")
-    print("\nRESULT:", "FAIL" if fail else "PASS", f"({fail} problem set(s))")
-    return 1 if fail else 0
-
-
 def cmd_scorecard(args: argparse.Namespace) -> int:
     jars = SC.collect_jars(args.input)
     if not jars:
@@ -1068,16 +992,6 @@ def build_parser() -> argparse.ArgumentParser:
     sexp = sub.add_parser("export",
                           help="alias for 'project' IDE project export")
     _add_project_args(sexp)
-
-    sbv = sub.add_parser(
-        "bvmw",
-        help="static BytecodeVM devirtualizer report (profiles, layout, dispatch routing)")
-    sbv.add_argument("input", help="target jar protected by BytecodeVM")
-    sbv.add_argument("-v", "--verbose", action="store_true",
-                     help="print one line per decoded method row")
-    sbv.add_argument("--top", type=int, default=10,
-                     help="max shard histogram entries shown per set (default: 10)")
-    sbv.set_defaults(func=cmd_bvmw)
 
     return p
 

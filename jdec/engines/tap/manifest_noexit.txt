@@ -1,2 +1,0 @@
-Premain-Class: NoExit
-Can-Retransform-Classes: true

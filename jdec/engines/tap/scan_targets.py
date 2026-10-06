@@ -1,10 +1,9 @@
 """Pick what is safe to initialise, before pointing the tap agent at a jar.
 
 The tap agent captures plaintext when the obfuscator's own code runs, which
-means initialising target classes. On a cheat client some classes crash the
-JVM in native code the moment their <clinit> loads a shipped library (Myau:
-`myau.r` -> 30 MB JrPQMg.lib -> EXCEPTION_ACCESS_VIOLATION), so the batch must
-be split before anything runs:
+means initialising target classes. On protected targets some classes crash
+the JVM in native code the moment their <clinit> loads a shipped library, so
+the batch must be split before anything runs:
 
   decryptor  - constant pool references javax.crypto (the string decryptor)
   dangerous  - calls System.load / System.loadLibrary, or has native methods

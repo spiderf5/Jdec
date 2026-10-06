@@ -38,7 +38,7 @@ public class StringsSpy implements ClassFileTransformer {
     // Append-on-record log (-Dstringspy.out=<file>). A crash in native code
     // kills the JVM without running shutdown hooks, so anything only held in
     // PLAIN is lost; writing each plaintext the moment it appears is the only
-    // capture guarantee that survives myau.r-style native crashes.
+    // capture guarantee that survives native crashes in poison classes.
     private static PrintWriter tapFile;
     private static final Object TAP_LOCK = new Object();
 

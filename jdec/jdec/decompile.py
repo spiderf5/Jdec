@@ -143,10 +143,10 @@ def _chunks(items: list[str], n: int) -> list[list[str]]:
 def _case_collisions(names: list[str]) -> dict[str, list[str]]:
     """Group class names that differ only by letter case.
 
-    ZKM-style mangling happily emits `myau/A` and `myau/a` as two distinct
+    ZKM-style mangling happily emits `pkg/A` and `pkg/a` as two distinct
     classes. A zip is case-sensitive so both survive in the archive, but the
     decompiled output is written to a filesystem that is not: on Windows and
-    macOS `myau/A.java` and `myau/a.java` are one file, so whichever the engine
+    macOS `pkg/A.java` and `pkg/a.java` are one file, so whichever the engine
     writes second overwrites the first. Because the pipeline used to derive the
     class it had just written from the output path, the survivor was then
     credited to *both* classes and the victim was still reported as recovered.

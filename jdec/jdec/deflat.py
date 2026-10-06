@@ -674,7 +674,7 @@ def _strip_smt_from_code(cf: CF.ClassFile, payload: bytes) -> bytes | None:
 
 def _strip_stackmaps(cf: CF.ClassFile) -> int:
     """反平坦化后原 StackMapTable 帧全部失效（原地改写不更新帧），
-    陈旧帧会让下游反编译器在这些类上出错误标记（EdNaven 实测掉档
+    陈旧帧会让下游反编译器在这些类上出错误标记（真实样本实测掉档
     46 个类）。剥帧后 CFR/Vineflower 自行重算分析。返回处理的方法数。"""
     import struct as _s
     n = 0

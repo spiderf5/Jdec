@@ -71,7 +71,7 @@ class ModMeta:
 
 
 # --------------------------------------------------------------------------
-# MANIFEST.MF。lf21 教训（2026-10-04 对标）：Vendor、Premain/Agent-Class 声明
+# MANIFEST.MF。真实样本教训（2026-10-04 对标）：Vendor、Premain/Agent-Class 声明
 # 是最硬的身份情报，但只在 manifest 里——漏读它 = 漏掉"双模式 Java Agent"
 # 这种定性级结论。所以 manifest 是固定采集项，不是可选加餐。
 # --------------------------------------------------------------------------
@@ -137,7 +137,7 @@ def resource_inventory(jar: Path, limit: int = 10) -> dict:
     """非 class 条目粗分类：总数、顶层目录、扩展名分布。
 
     资源本身就是情报（assets/ 品牌、着色器、字体、配置模板），而且
-    ZKM 会改写资源内容（lf21 的 mods.toml 注释里全词 mod 被替换）——
+    ZKM 会改写资源内容（真实样本的 mods.toml 注释里全词 mod 被替换）——
     数量与分布先摆出来，人再去看内容。"""
     dirs: dict[str, int] = {}
     exts: dict[str, int] = {}
@@ -158,8 +158,8 @@ def resource_inventory(jar: Path, limit: int = 10) -> dict:
 
 
 # 标识符级混淆启发式的字典：MC/Fabric/Forge 生态高频词 + 通用编程词。
-# 检测的是"字典词被等长/近形随机串整体替换"的资源侧特征（lf21 实测：
-# mods.toml 里全词 mod → NS5Nc6，23 行命中——ZKM 资源处理物证）。
+# 检测的是"字典词被等长/近形随机串整体替换"的资源侧特征（真实样本实测：
+# mods.toml 里全词 mod → 随机串，23 行命中——ZKM 资源处理物证）。
 _KNOWN_WORDS = frozenset("""
 mod mods name names version versions description authors author credits
 license contact displayurl logo logofile url issues repository homepage
