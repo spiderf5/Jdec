@@ -65,6 +65,55 @@ ACC_SYNTHETIC = 0x1000
 ACC_BRIDGE = 0x0040
 ACC_NATIVE = 0x0100
 
+
+def decode_mutf8(data: bytes) -> str:
+    """JVM-spec modified UTF-8 decoder (JVMS 4.4.7).
+
+    Unlike plain utf-8, the class-file encoding permits unpaired surrogate
+    code points (a String's surrogate pair is stored as two 3-byte
+    sequences) and encodes NUL as C0 80.  The lenient decode("utf-8",
+    "replace") used by utf8() silently corrupts such constants into
+    U+FFFD, shifting every subsequent character — fatal for encrypted
+    string payloads where positions carry meaning.  decode_mutf8 keeps
+    the exact code-unit semantics of Java's String.charAt: one Python
+    code point per JVM char, including lone surrogates.
+    """
+    out: list[str] = []
+    i, n = 0, len(data)
+    while i < n:
+        b = data[i]
+        if b < 0x80:
+            out.append(chr(b))
+            i += 1
+        elif (b & 0xE0) == 0xC0:
+            if i + 1 < n and (data[i + 1] & 0xC0) == 0x80:
+                out.append(chr(((b & 0x1F) << 6) | (data[i + 1] & 0x3F)))
+                i += 2
+            else:
+                out.append("\ufffd")
+                i += 1
+        elif (b & 0xF0) == 0xE0:
+            if i + 2 < n and (data[i + 1] & 0xC0) == 0x80 \
+                    and (data[i + 2] & 0xC0) == 0x80:
+                out.append(chr(((b & 0x0F) << 12) | ((data[i + 1] & 0x3F) << 6)
+                               | (data[i + 2] & 0x3F)))
+                i += 3
+            else:
+                out.append("\ufffd")
+                i += 1
+        else:  # 4-byte sequences are not standard mUTF-8; be lenient
+            if b >= 0xF0 and i + 3 < n and (data[i + 1] & 0xC0) == 0x80 \
+                    and (data[i + 2] & 0xC0) == 0x80 \
+                    and (data[i + 3] & 0xC0) == 0x80:
+                out.append(chr(((b & 0x07) << 18) | ((data[i + 1] & 0x3F) << 12)
+                               | ((data[i + 2] & 0x3F) << 6)
+                               | (data[i + 3] & 0x3F)))
+                i += 4
+            else:
+                out.append("\ufffd")
+                i += 1
+    return "".join(out)
+
 # major version -> Java release
 _JAVA_MAJOR = {
     45: "1.1", 46: "1.2", 47: "1.3", 48: "1.4", 49: "5", 50: "6", 51: "7",
@@ -136,6 +185,14 @@ class ClassFile:
         if e[0] != C_UTF8:
             raise ClassFormatError(f"cp[{index}] is not Utf8")
         return e[1].decode("utf-8", "replace")
+
+    def utf8_strict(self, index: int) -> str:
+        """Modified-UTF-8-exact decode (see decode_mutf8). Use for
+        encrypted/packed string payloads where char positions matter."""
+        e = self.cp[index]
+        if e[0] != C_UTF8:
+            raise ClassFormatError(f"cp[{index}] is not Utf8")
+        return decode_mutf8(e[1])
 
     def utf8_raw(self, index: int) -> bytes:
         return self.cp[index][1]
