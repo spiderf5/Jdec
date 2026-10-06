@@ -408,7 +408,8 @@ def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
     return tri
 
 
-def decompile_libs(tri: Triage, out_dir: Path, ghidra_home: Path) -> dict:
+def decompile_libs(tri: Triage, out_dir: Path, ghidra_home: Path,
+                   mappings_tsv: Path | None = None) -> dict:
     """Run Ghidra Headless decompilation for each extracted library."""
     from . import ghidra_engine as GE
 
@@ -418,7 +419,10 @@ def decompile_libs(tri: Triage, out_dir: Path, ghidra_home: Path) -> dict:
         if not lib_path.is_file():
             continue
         lib_out = out_dir / (lib_path.stem + "_decompiled")
-        res = GE.decompile_library(ghidra_home, lib_path, lib_out)
+        # 地址表只对包含该函数地址的库有意义:全库逐个尝试,mappings 引用
+        # 的地址若不在库内,Ghidra 建不出函数,自然落空
+        res = GE.decompile_library(ghidra_home, lib_path, lib_out,
+                                   mappings_tsv=mappings_tsv)
         results[lib.name] = res
 
         # Scan decompiled C sources for reverse JNI calls and RegisterNatives

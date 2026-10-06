@@ -153,8 +153,13 @@ def decompile_library(
     filter_symbols: list[str] | None = None,
     timeout: int = 1800,
     quiet: bool = False,
+    mappings_tsv: Path | None = None,
 ) -> dict:
-    """Decompile JNI exports in lib_path into out_dir/src/*.c using Ghidra Headless."""
+    """Decompile JNI exports in lib_path into out_dir/src/*.c using Ghidra Headless.
+
+    mappings_tsv: frida regnatives 转储(每行 ``name\\truntimePtr(hex)``)——
+    动态注册(RegisterNatives)目标没有静态导出,worker 按模块基址偏移
+    建函数反编译。"""
     headless_cmd = get_headless_cmd(ghidra_home)
     lib_path = Path(lib_path).resolve()
     out_dir = Path(out_dir).resolve()
@@ -165,21 +170,32 @@ def decompile_library(
         filter_file = out_dir / "_filter_symbols.txt"
         filter_file.write_text("\n".join(filter_symbols) + "\n", encoding="utf-8")
 
+    mappings_file = None
+    if mappings_tsv and Path(mappings_tsv).is_file():
+        mappings_file = out_dir / "_addr_mappings.tsv"
+        mappings_file.write_text(
+            Path(mappings_tsv).read_text(encoding="utf-8"), encoding="utf-8")
+
     proj_dir = Path(tempfile.mkdtemp(prefix="jdec_ghidra_proj_"))
     proj_name = "JdecNative"
 
+    # Ghidra headless 不认绝对路径的 -postScript —— 用 -scriptPath 指目录
     cmd = [
         str(headless_cmd),
         str(proj_dir),
         proj_name,
         "-import",
         str(lib_path),
+        "-scriptPath",
+        str(WORKER_JAVA.parent),
         "-postScript",
-        str(WORKER_JAVA),
+        WORKER_JAVA.name,
         str(out_dir),
     ]
     if filter_file:
         cmd.append(str(filter_file))
+    if mappings_file:
+        cmd.append(str(mappings_file))
     cmd.append("-deleteProject")
 
     if not quiet:
@@ -210,6 +226,11 @@ def decompile_library(
             shutil.rmtree(proj_dir, ignore_errors=True)
         if filter_file and filter_file.exists():
             filter_file.unlink(missing_ok=True)
+
+    # headless 日志强制落盘:worker 脚本失败曾被静默吞掉(0 产出无报错)
+    (out_dir / "_ghidra_run.log").write_text(
+        (r.stdout or "") + "\n===== STDERR =====\n" + (r.stderr or ""),
+        encoding="utf-8", errors="replace")
 
     summary_json = out_dir / "decompiled_summary.json"
     if summary_json.exists():

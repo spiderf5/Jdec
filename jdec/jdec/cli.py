@@ -284,7 +284,9 @@ def cmd_natives(args: argparse.Namespace) -> int:
                 print(f"Failed to download Ghidra: {e}")
         if gh:
             print(f"ghidra engine: {gh}")
-            decompiled_info = NS.decompile_libs(tri, out_dir, gh)
+            decompiled_info = NS.decompile_libs(
+                tri, out_dir, gh,
+                mappings_tsv=Path(args.mappings_tsv) if getattr(args, 'mappings_tsv', None) else None)
             total_decomp = sum(d.get("decompiled_count", 0) for d in decompiled_info.values())
             print(f"decompiled   : {total_decomp} JNI function(s) exported to C pseudo-code")
         else:
@@ -843,6 +845,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="path to Ghidra installation directory (or set GHIDRA_HOME)")
     snv.add_argument("--fetch-ghidra", action="store_true",
                      help="automatically download Ghidra into engines/ghidra if not present")
+    snv.add_argument("--mappings", default=None, dest="mappings_tsv",
+                     help="frida regnatives TSV (cls, method, sig, ptr, [base, module]) - "
+                          "enables address-table mode for dynamically registered natives")
     snv.set_defaults(func=cmd_natives)
 
     sdb = sub.add_parser("nativedb",

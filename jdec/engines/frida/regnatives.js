@@ -101,14 +101,20 @@ function install(env) {
             }
             for (let i = 0; i < count; i++) {
                 const m = methods.add(i * 3 * PS);
-                let name = '?', sig = '?', fn = NULL;
+                let name = '?', sig = '?', fn = NULL, base = NULL, mod = '?';
                 try {
                     name = m.readPointer().readUtf8String();
                     sig = m.add(PS).readPointer().readUtf8String();
                     fn = m.add(2 * PS).readPointer();
+                    const range = Process.findRangeByAddress(fn);
+                    if (range) {
+                        base = range.base;
+                        if (range.file && range.file.path) mod = range.file.path;
+                    }
                 } catch (e) { }
                 send({ type: 'regnatives', cls: clsName, method: name,
-                       sig: sig, ptr: fn.toString() });
+                       sig: sig, ptr: fn.toString(),
+                       base: base === NULL ? '?' : base.toString(), mod: mod });
             }
         }
     });

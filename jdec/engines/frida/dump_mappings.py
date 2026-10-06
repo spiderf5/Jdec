@@ -157,7 +157,12 @@ def main() -> int:
     jni = [r for r in rows if r.get("type") == "jni"]
     with open(args.out, "w", encoding="utf-8") as f:
         for r in nat:
-            f.write(f"{r['cls']}\t{r['method']}\t{r['sig']}\t{r['ptr']}\n")
+            # 列: cls, method, sig, ptr, [base, module] —— 后两列供 Ghidra
+            # 地址表模式做基址换算(runtime ptr - runtime base + image base)
+            f.write(f"{r['cls']}\t{r['method']}\t{r['sig']}\t{r['ptr']}")
+            if r.get("base"):
+                f.write(f"\t{r['base']}\t{r.get('mod', '?')}")
+            f.write("\n")
     if args.jni_out:
         with open(args.jni_out, "w", encoding="utf-8") as f:
             for r in jni:
