@@ -32,8 +32,12 @@ python trace2java.py trace.tsv -o pseudo_java.txt
 
 ## 环境要求 / 已知坑（全部实测，2026-10-05）
 
-- **frida 必须用 16.x**（17.x 把 Java 桥从脚本运行时剥离且不再内置）；  
-  venv 安装：`pip install "frida==16.7.19" "frida-tools==13.7.1"`（清华镜像）。
+- **frida 16.x / 17.x 均可**。脚本不用 frida-java-bridge（现代 JDK 上它  
+  因缺少 Hotspot 内部符号拒绝初始化），直接 raw 访问 JNIEnv 表槽位，  
+  内存读写用方法式 API（`ptr.readByteArray()`），16/17 双兼容；  
+  17.x 移除的全局 `Memory.read*`、回调式枚举、内置 bridge 均未使用。  
+  实测基线：`pip install "frida==16.7.19" "frida-tools==13.7.1"`（清华镜像）；  
+  换 17.x（配 frida-tools 14+）后 attach 时序类经验值建议重测。
 - **现代 JDK launcher 单进程跑 JVM**（实测 Zulu 21：全程只有一个 java.exe），  
   但 **JS 定时器（setInterval）在此类目标里从不触发**——脚本一律通过  
   `rpc.exports.tryinstall()` 由 python 侧泵驱动，禁止依赖 JS 定时器。

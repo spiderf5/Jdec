@@ -146,7 +146,7 @@ function dumpLibModule() {
         const n = Math.min(CHUNK, lib.size - off);
         send({ type: 'memchunk', name: lib.name, base: lib.base.toString(),
                off: off, total: lib.size },
-             Memory.readByteArray(lib.base.add(off), n));
+             lib.base.add(off).readByteArray(n));
     }
     send({ type: 'memdump-done', name: lib.name, base: lib.base.toString(),
            size: lib.size });
