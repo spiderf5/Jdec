@@ -1304,6 +1304,47 @@ def test_bvmw_watermark() -> None:
               str(prof.signatures))
 
 
+def test_bvmw_devirt() -> None:
+    print("bvmw_devirt: static decode + dispatch routing on the calc fixture")
+    from jdec import bvmw_devirt as BV
+    jar = Path(__file__).resolve().parent / "bvmw" / "calc-bytecodevm.jar"
+    if not jar.exists():
+        print("  (skipped: fixture not present)")
+        return
+    classes = BV.load_classes(jar)
+    sets = BV.discover_vm_sets(classes)
+    check("4 VM sets discovered", len(sets) == 4, str(len(sets)))
+    expected_slots = {0: 13, 1: 155, 2: 5, 3: 222}
+    for vs in sets:
+        dec = BV.decode_method(vs, 0)
+        check(f"set{vs.index}: {expected_slots[vs.index]} slots decoded",
+              len(dec.slots) == expected_slots[vs.index], str(len(dec.slots)))
+        check(f"set{vs.index}: no decode warnings", not dec.warnings,
+              "; ".join(dec.warnings[:2]))
+        rt = BV.extract_routing(vs.main_cf)
+        BV.annotate_routing(vs, dec, rt)
+        unrouted = sum(1 for s in dec.slots if s.get("shard") is None)
+        check(f"set{vs.index}: routing registry non-empty",
+              len(rt["entries"]) > 0, str(len(rt["entries"])))
+        check(f"set{vs.index}: 0 unrouted slots", unrouted == 0, str(unrouted))
+
+
+def test_bvmw_trace() -> None:
+    print("bvmw_trace: stage-3 instrumented runtime trace vs static decode")
+    javac = shutil.which("javac")
+    java = shutil.which("java")
+    here = Path(__file__).resolve().parent
+    bvmtrace = here / "bvmw" / "bvmtrace"
+    asm_ok = all((here / "bvmw" / "lib" / n).exists()
+                 for n in ("asm-9.9.jar", "asm-tree-9.9.jar"))
+    if not (javac and java and asm_ok and (bvmtrace / "run_bvmtrace.py").exists()):
+        print("  (skipped: javac/java, ASM jars or bvmtrace driver missing)")
+        return
+    r = subprocess.run([sys.executable, str(bvmtrace / "run_bvmtrace.py")],
+                       capture_output=True, text=True, timeout=300)
+    tail = (r.stdout or r.stderr).strip().splitlines()[-1:] or ["<no output>"]
+    check("trace join PASS (exit 0)", r.returncode == 0, tail[0])
+
 
 def test_ops_pool() -> None:
     print("opspool: PhantomShield string-pool static decrypt (DES via bundled _des)")
@@ -2268,6 +2309,8 @@ def main() -> int:
     test_pool_overload_dispatch()
     test_probe_fingerprints_json()
     test_bvmw_watermark()
+    test_bvmw_devirt()
+    test_bvmw_trace()
     test_ops_pool()
     test_ghidra_integration()
     test_native_elf_and_ghidra_annotate()
