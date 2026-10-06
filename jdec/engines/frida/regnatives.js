@@ -112,6 +112,8 @@ function install(env) {
                         if (range.file && range.file.path) mod = range.file.path;
                     }
                 } catch (e) { }
+                regCount++;
+                lastRegAt = Date.now();
                 send({ type: 'regnatives', cls: clsName, method: name,
                        sig: sig, ptr: fn.toString(),
                        base: base === NULL ? '?' : base.toString(), mod: mod });
@@ -121,7 +123,42 @@ function install(env) {
     send({ type: 'info', msg: 'regnatives installed @ ' + rnPtr });
 }
 
-function acquireEnv() {
+// ---- runtime memory dump of the target .lib -------------------------------
+// antiLeak-style protectors decrypt function bodies lazily; the on-disk PE
+// stays encrypted. Once registration settles, snapshot the whole module.
+let regCount = 0, lastRegAt = 0, dumped = false;
+const CHUNK = 1 << 20;   // 1 MiB per send
+
+function dumpLibModule() {
+    if (dumped) return;
+    const mods = Process.enumerateModules();
+    let lib = null;
+    for (const m of mods) {
+        if (m.name.toLowerCase().endsWith('.lib') && m.size >= 0x1000000) {
+            lib = m; break;
+        }
+    }
+    if (!lib) return;
+    dumped = true;
+    send({ type: 'info', msg: 'dumping module ' + lib.name + ' @ ' +
+           lib.base + ' size=' + lib.size });
+    for (let off = 0; off < lib.size; off += CHUNK) {
+        const n = Math.min(CHUNK, lib.size - off);
+        send({ type: 'memchunk', name: lib.name, base: lib.base.toString(),
+               off: off, total: lib.size },
+             Memory.readByteArray(lib.base.add(off), n));
+    }
+    send({ type: 'memdump-done', name: lib.name, base: lib.base.toString(),
+           size: lib.size });
+}
+
+function maybeDump() {
+    // registration flow considered settled: >=30 rows and 8s of silence
+    if (!dumped && regCount >= 30 && lastRegAt > 0 &&
+        Date.now() - lastRegAt > 8000) {
+        dumpLibModule();
+    }
+}function acquireEnv() {
     // Fully defensive: during VM boot the module exists but the VM object
     // is half-initialized — any doubt = return null, retry next tick.
     try {
@@ -171,5 +208,12 @@ rpc.exports = {
         if (env === null) return false;
         install(env);
         return installed;
+    },
+    // python calls this late in the run (after the user has triggered as
+    // many features as possible) so lazily-decrypted function bodies are
+    // captured in their decrypted state
+    dumpmodule: function () {
+        dumpLibModule();
+        return dumped;
     }
 };

@@ -1,0 +1,28 @@
+java.lang.Compiler	compileClass	(Ljava/lang/Class;)Z	0x7ff87e5a0d23	0x7ff87e591000	?
+java.lang.Compiler	compileClasses	(Ljava/lang/String;)Z	0x7ff87e5a0d29	0x7ff87e591000	?
+java.lang.Compiler	command	(Ljava/lang/Object;)Ljava/lang/Object;	0x7ff87e5a0d2f	0x7ff87e591000	?
+java.lang.Compiler	enable	()V	0x7ff87e5a0d35	0x7ff87e591000	?
+java.lang.Compiler	disable	()V	0x7ff87e5a0d3b	0x7ff87e591000	?
+java.lang.invoke.MethodHandleNatives	init	(Ljava/lang/invoke/MemberName;Ljava/lang/Object;)V	0x7ff84b68d360	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	expand	(Ljava/lang/invoke/MemberName;)V	0x7ff84b68d570	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	resolve	(Ljava/lang/invoke/MemberName;Ljava/lang/Class;)Ljava/lang/invoke/MemberName;	0x7ff84b68d710	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	getConstant	(I)I	0x7ff84b68ed10	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	getNamedCon	(I[Ljava/lang/Object;)I	0x7ff84b68ee60	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	getMembers	(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;I[Ljava/lang/invoke/MemberName;)I	0x7ff84b68e2f0	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	objectFieldOffset	(Ljava/lang/invoke/MemberName;)J	0x7ff84b68dac0	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	setCallSiteTargetNormal	(Ljava/lang/invoke/CallSite;Ljava/lang/invoke/MethodHandle;)V	0x7ff84b68e630	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	setCallSiteTargetVolatile	(Ljava/lang/invoke/CallSite;Ljava/lang/invoke/MethodHandle;)V	0x7ff84b68e840	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	staticFieldOffset	(Ljava/lang/invoke/MemberName;)J	0x7ff84b68dc90	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	staticFieldBase	(Ljava/lang/invoke/MemberName;)Ljava/lang/Object;	0x7ff84b68de60	0x7ff84b617000	?
+java.lang.invoke.MethodHandleNatives	getMemberVMInfo	(Ljava/lang/invoke/MemberName;)Ljava/lang/Object;	0x7ff84b68e060	0x7ff84b617000	?
+java.lang.invoke.MethodHandle	invoke	([Ljava/lang/Object;)Ljava/lang/Object;	0x7ff84b68ea50	0x7ff84b617000	?
+java.lang.invoke.MethodHandle	invokeExact	([Ljava/lang/Object;)Ljava/lang/Object;	0x7ff84b68ebb0	0x7ff84b617000	?
+sun.misc.Perf	attach	(Ljava/lang/String;II)Ljava/nio/ByteBuffer;	0x7ff84b693da0	0x7ff84b617000	?
+sun.misc.Perf	detach	(Ljava/nio/ByteBuffer;)V	0x7ff84b6941a0	0x7ff84b617000	?
+sun.misc.Perf	createLong	(Ljava/lang/String;IIJ)Ljava/nio/ByteBuffer;	0x7ff84b694400	0x7ff84b617000	?
+sun.misc.Perf	createByteArray	(Ljava/lang/String;II[BI)Ljava/nio/ByteBuffer;	0x7ff84b694840	0x7ff84b617000	?
+sun.misc.Perf	highResCounter	()J	0x7ff84b694cc0	0x7ff84b617000	?
+sun.misc.Perf	highResFrequency	()J	0x7ff84b694e10	0x7ff84b617000	?
+antiLeak-1a2786b1-7d43-4a96-b4bc-752eb89b1600.Loader	registerNativesForClass	(ILjava/lang/Class;)V	0x1eaad4673b0	0x1eaace91000	?
+myau.o			0x1eaad387910	0x1eaace91000	?
+myau.o			0x1eaad388940	0x1eaace91000	?
