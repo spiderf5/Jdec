@@ -122,7 +122,7 @@ class JarProfile:
 
 
 def _major_version(data: bytes) -> int | None:
-    if len(data) < 8:
+    if len(data) < 8 or data[:4] != b"\xca\xfe\xba\xbe":
         return None
     try:
         return struct.unpack_from(">H", data, 6)[0]
@@ -252,7 +252,7 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
     for n in class_names:
         try:
             with zf.open(n) as f:
-                head = f.read()
+                head = f.read(8)
         except Exception:
             continue
         mj = _major_version(head)

@@ -192,11 +192,19 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
 
                 target_pc = in2.pc + in2.arg
                 rel = target_pc - in2.pc
+                span1 = (in2.pc + in2.length) - in1.pc
                 if taken and -32768 <= rel <= 32767:
                     for p in range(in1.pc, in1.pc + in1.length):
                         buf[p] = 0x00
                     buf[in2.pc] = OP_GOTO
                     struct.pack_into(">h", buf, in2.pc + 1, rel)
+                    changes += 1
+                elif taken and span1 >= 5:
+                    rel_far = target_pc - in1.pc
+                    buf[in1.pc] = OP_GOTO_W
+                    struct.pack_into(">i", buf, in1.pc + 1, rel_far)
+                    for p in range(in1.pc + 5, in2.pc + in2.length):
+                        buf[p] = 0x00
                     changes += 1
                 elif not taken:
                     for p in range(in1.pc, in2.pc + in2.length):
@@ -220,11 +228,19 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
 
                 target_pc = in3.pc + in3.arg
                 rel = target_pc - in3.pc
+                span2 = (in3.pc + in3.length) - in1.pc
                 if taken and -32768 <= rel <= 32767:
                     for p in range(in1.pc, in3.pc):
                         buf[p] = 0x00
                     buf[in3.pc] = OP_GOTO
                     struct.pack_into(">h", buf, in3.pc + 1, rel)
+                    changes += 1
+                elif taken and span2 >= 5:
+                    rel_far = target_pc - in1.pc
+                    buf[in1.pc] = OP_GOTO_W
+                    struct.pack_into(">i", buf, in1.pc + 1, rel_far)
+                    for p in range(in1.pc + 5, in3.pc + in3.length):
+                        buf[p] = 0x00
                     changes += 1
                 elif not taken:
                     for p in range(in1.pc, in3.pc + in3.length):
@@ -241,11 +257,19 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
                 taken = in3.op in (0x9F, 0xA2, 0xA4)
                 target_pc = in3.pc + in3.arg
                 rel = target_pc - in3.pc
+                span3 = (in3.pc + in3.length) - in1.pc
                 if taken and -32768 <= rel <= 32767:
                     for p in range(in1.pc, in3.pc):
                         buf[p] = 0x00
                     buf[in3.pc] = OP_GOTO
                     struct.pack_into(">h", buf, in3.pc + 1, rel)
+                    changes += 1
+                elif taken and span3 >= 5:
+                    rel_far = target_pc - in1.pc
+                    buf[in1.pc] = OP_GOTO_W
+                    struct.pack_into(">i", buf, in1.pc + 1, rel_far)
+                    for p in range(in1.pc + 5, in3.pc + in3.length):
+                        buf[p] = 0x00
                     changes += 1
                 elif not taken:
                     for p in range(in1.pc, in3.pc + in3.length):
@@ -280,11 +304,19 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
                 taken = (in3.op == 0xA5)  # if_acmpeq is always true for same local var
                 target_pc = in3.pc + in3.arg
                 rel = target_pc - in3.pc
+                span5 = (in3.pc + in3.length) - in1.pc
                 if taken and -32768 <= rel <= 32767:
                     for p in range(in1.pc, in3.pc):
                         buf[p] = 0x00
                     buf[in3.pc] = OP_GOTO
                     struct.pack_into(">h", buf, in3.pc + 1, rel)
+                    changes += 1
+                elif taken and span5 >= 5:
+                    rel_far = target_pc - in1.pc
+                    buf[in1.pc] = OP_GOTO_W
+                    struct.pack_into(">i", buf, in1.pc + 1, rel_far)
+                    for p in range(in1.pc + 5, in3.pc + in3.length):
+                        buf[p] = 0x00
                     changes += 1
                 elif not taken:
                     for p in range(in1.pc, in3.pc + in3.length):
@@ -522,6 +554,15 @@ def deflat_code(code: bytes, cf: CF.ClassFile | None = None) -> tuple[bytes, int
             elif in_g.op == OP_GOTO_W:
                 struct.pack_into(">i", buf, in_g.pc + 1, rel_target)
                 unflattened += 1
+            elif in_g.op == OP_GOTO and (rel_target < -32768 or rel_target > 32767):
+                total_span = (in_g.pc + in_g.length) - in_c.pc
+                if total_span >= 5:
+                    rel_far = target_pc - in_c.pc
+                    buf[in_c.pc] = OP_GOTO_W
+                    struct.pack_into(">i", buf, in_c.pc + 1, rel_far)
+                    for p in range(in_c.pc + 5, in_g.pc + in_g.length):
+                        buf[p] = 0x00
+                    unflattened += 1
 
     return bytes(buf), unflattened
 
@@ -616,16 +657,27 @@ def deflat_class(cf: CF.ClassFile) -> int:
 
                         new_code, new_handlers, stats = optimize_code(raw_code, handlers, cf=cf)
                         if stats["total"] > 0:
-                            if len(new_code) == len(raw_code):
-                                attrs_data[code_start:code_end] = new_code
+                            diff_code_len = len(new_code) - len(raw_code)
+                            # Update code bytes
+                            attrs_data[code_start:code_end] = new_code
+                            code_end = code_start + len(new_code)
+                            attr_val_end += diff_code_len
 
-                            # Re-pack exception handlers if any zero-length handlers were dropped
-                            if len(new_handlers) < len(handlers):
+                            if diff_code_len != 0:
+                                # Update code_length in Code attribute header
+                                struct.pack_into(">I", attrs_data, attr_val_start + 4, len(new_code))
+                                attr_len += diff_code_len
+                                struct.pack_into(">I", attrs_data, p + 2, attr_len)
+
+                            # Re-pack exception handlers if counts changed, code length shifted, or handlers modified
+                            handlers_changed = (len(new_handlers) != len(handlers)) or any(nh != oh for nh, oh in zip(new_handlers, handlers))
+                            if handlers_changed or diff_code_len != 0:
                                 h_bytes = struct.pack(">H", len(new_handlers)) + b"".join(
                                     struct.pack(">HHHH", h.start_pc, h.end_pc, h.handler_pc, h.catch_type)
                                     for h in new_handlers
                                 )
-                                sub_attrs = attrs_data[code_end + 2 + len(handlers) * 8:attr_val_end]
+                                old_tail_offset = code_end + 2 + len(handlers) * 8
+                                sub_attrs = bytes(attrs_data[old_tail_offset:attr_val_end])
                                 attrs_data[code_end:attr_val_end] = h_bytes + sub_attrs
                                 new_attr_len = (code_end - attr_val_start) + len(h_bytes) + len(sub_attrs)
                                 struct.pack_into(">I", attrs_data, p + 2, new_attr_len)

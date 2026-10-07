@@ -26,6 +26,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import urllib.parse
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,36 @@ WINDOWS_RESERVED_NAMES = {
 
 # Zero-width spaces, joiners, BOMs, and BiDi override characters commonly inserted by obfuscators
 ZERO_WIDTH_CHARS = re.compile(r"[\u200b\u200c\u200d\ufeff\u202a-\u202e\u2060-\u206f]")
+
+# Unbox cascade expressions commonly left as artifacts by Vineflower and CFR
+_VAL_EXPR = r"[\w$.]+(?:\[[^\]]*\])?"
+UNBOX_VARIANTS = [
+    re.compile(r"(?P<v>" + _VAL_EXPR + r")\s+instanceof\s+Boolean\s*\?\s*\(Boolean\)(?P=v)\s*:\s*\((?P=v)\s+instanceof\s+Character\s*\?\s*\(char\)\(\(Number\)(?P=v)\)\.intValue\(\)\s*:\s*\(\(Number\)(?P=v)\)\.intValue\(\)\)\)"),
+    re.compile(r"(?P<v>" + _VAL_EXPR + r")\s+instanceof\s+Boolean\s*\?\s*\(Boolean\)(?P=v)\s*:\s*\((?P=v)\s+instanceof\s+Character\s*\?\s*\(Character\)(?P=v)\s*:\s*\(\(Number\)(?P=v)\)\.intValue\(\)\)\)"),
+    re.compile(r"(?P<v>" + _VAL_EXPR + r")\s+instanceof\s+Boolean\s*\?\s*\(Boolean\)(?P=v)\s*:\s*\((?P=v)\s+instanceof\s+Character\s*\?\s*\(int\)\(\(Character\)(?P=v)\)\.charValue\(\)\s*:\s*\(\(Number\)(?P=v)\)\.intValue\(\)\)\)"),
+    re.compile(r"(?P<v>" + _VAL_EXPR + r")\s+instanceof\s+Boolean\s*\?\s*(?P=v)\s*:\s*\((?P=v)\s+instanceof\s+Character\s*\?\s*\(Character\)(?P=v)\s*:\s*\(\(Number\)(?P=v)\)\.intValue\(\)\)\)"),
+]
+
+
+def normalize_unbox(source_code: str) -> tuple[str, int]:
+    """Normalize decompiler unboxing cascade ternaries into valid Java typed expressions."""
+    def repl(m):
+        v = m.group("v")
+        return (f"({v} instanceof Boolean"
+                f" ? (((Boolean){v}).booleanValue() ? 1 : 0)"
+                f" : ({v} instanceof Character"
+                f" ? ((Character){v}).charValue()"
+                f" : ((Number){v}).intValue()))")
+
+    edits = 0
+    cur = source_code
+    prev = None
+    while prev != cur:
+        prev = cur
+        for pat in UNBOX_VARIANTS:
+            cur, count = pat.subn(repl, cur)
+            edits += count
+    return cur, edits
 
 
 @dataclass
@@ -245,6 +276,11 @@ def clean_source_for_compilation(code: str, expected_package: str | None = None)
     cur_code, br_edits = prune_duplicate_bridge_methods(cur_code)
     if br_edits > 0:
         changes.append(f"Pruned {br_edits} duplicate bridge method(s)")
+
+    # 4. Decompiler unbox cascade normalization
+    cur_code, unbox_edits = normalize_unbox(cur_code)
+    if unbox_edits > 0:
+        changes.append(f"Normalized {unbox_edits} unbox cascade expression(s)")
 
     return cur_code, changes
 
@@ -502,29 +538,98 @@ def export_project(
     # 3. Copy and clean Java source files
     if src_dir and src_dir.is_dir():
         actual_src = src_dir / "src" if (src_dir / "src").is_dir() else src_dir
+        file_plans: list[dict] = []
+        renames_by_pkg: dict[str, dict[str, str]] = {}
+        full_class_renames: dict[str, str] = {}
+
+        # Pass 1: Plan destinations and collect class renames for reserved names and case twin collisions
         for j_file in actual_src.rglob("*.java"):
             if "_work" in j_file.parts:
                 continue
             rel = j_file.relative_to(actual_src)
-
-            # Check for Windows reserved device names (e.g. aux.java, con.java)
             parts = list(rel.parts)
             fname = parts[-1]
             stem = fname[:-5] if fname.endswith(".java") else fname
+            orig_cls = stem
             renamed_cls = None
+            pkg = ".".join(parts[:-1])
+
             if stem.lower() in WINDOWS_RESERVED_NAMES:
                 renamed_cls = f"_{stem}"
                 parts[-1] = f"{renamed_cls}.java"
+            elif "%" in stem:
+                raw_stem = urllib.parse.unquote(stem)
+                orig_cls = raw_stem
+                parent_siblings = [
+                    urllib.parse.unquote(p.stem).lower()
+                    for p in j_file.parent.glob("*.java") if p != j_file
+                ]
+                if raw_stem.lower() in parent_siblings or os.name == "nt":
+                    twin_cand = f"{raw_stem}_Twin"
+                    counter = 1
+                    while any(urllib.parse.unquote(p.stem).lower() == twin_cand.lower() for p in j_file.parent.glob("*.java")):
+                        counter += 1
+                        twin_cand = f"{raw_stem}_Twin{counter}"
+                    renamed_cls = twin_cand
+                    parts[-1] = f"{renamed_cls}.java"
+                else:
+                    parts[-1] = f"{raw_stem}.java"
+                    if raw_stem != stem:
+                        renamed_cls = raw_stem
 
             dest_file = target_src.joinpath(*parts)
             dest_file.parent.mkdir(parents=True, exist_ok=True)
 
-            code = j_file.read_text(encoding="utf-8", errors="replace")
-            if renamed_cls:
-                code = re.sub(r"\b(class|interface|enum|record)\s+" + re.escape(stem) + r"\b", r"\1 " + renamed_cls, code)
+            if renamed_cls and renamed_cls != orig_cls:
+                renames_by_pkg.setdefault(pkg, {})[orig_cls] = renamed_cls
+                if pkg:
+                    full_class_renames[f"{pkg}.{orig_cls}"] = f"{pkg}.{renamed_cls}"
+                else:
+                    full_class_renames[orig_cls] = renamed_cls
 
-            # Calculate expected package from directory structure
-            expected_pkg = ".".join(rel.parent.parts) if rel.parent.parts else None
+            file_plans.append({
+                "src": j_file,
+                "dest": dest_file,
+                "rel": rel,
+                "pkg": pkg,
+                "orig_cls": orig_cls,
+                "renamed_cls": renamed_cls,
+            })
+
+        # Pass 2: Apply cross-file reference rewriting and compilation sanitation
+        for item in file_plans:
+            j_file = item["src"]
+            dest_file = item["dest"]
+            pkg = item["pkg"]
+            orig_cls = item["orig_cls"]
+            renamed_cls = item["renamed_cls"]
+
+            code = j_file.read_text(encoding="utf-8", errors="replace")
+
+            # 1. Update fully qualified class references and imports across all packages
+            for old_fqcn, new_fqcn in full_class_renames.items():
+                code = re.sub(r"\b" + re.escape(old_fqcn) + r"\b", new_fqcn, code)
+
+            # 2. Update references for renamed classes in the same package
+            pkg_renames = renames_by_pkg.get(pkg, {})
+            for old_name, new_name in pkg_renames.items():
+                if renamed_cls == new_name and orig_cls == old_name:
+                    # Within the renamed class's own file: update declaration, constructors, and self-types
+                    code = re.sub(r"\b(class|interface|enum|record)\s+" + re.escape(old_name) + r"\b", r"\1 " + new_name, code)
+                    code = re.sub(r"\b" + re.escape(old_name) + r"\s*\(", new_name + "(", code)
+                    code = re.sub(r"\b" + re.escape(old_name) + r"\b", new_name, code)
+                else:
+                    # Sibling class in the same package using the renamed class
+                    code = re.sub(r"\b" + re.escape(old_name) + r"\b", new_name, code)
+
+            # 3. For any class that imported the renamed class from another package
+            for imported_pkg, imp_renames in renames_by_pkg.items():
+                if imported_pkg != pkg:
+                    for old_name, new_name in imp_renames.items():
+                        if f"{imported_pkg}.{new_name}" in code:
+                            code = re.sub(r"\b" + re.escape(old_name) + r"\b", new_name, code)
+
+            expected_pkg = pkg if pkg else None
             cleaned_code, changes = clean_source_for_compilation(code, expected_package=expected_pkg)
             if changes or renamed_cls:
                 stats["files_repaired"] += 1
@@ -661,19 +766,72 @@ def verify_compilation(
                                     lines.insert(l_num - 1, "        throw new UnsupportedOperationException(\"jdec: auto-synthesized stub return\");")
                                     modified = True
                                     pass_repairs += 1
+                                # Repair 5: boolean cannot be converted to long (e.g. stackWords[...] = booleanExpr)
+                                elif ("cannot be converted to long" in msg and "boolean" in msg) or ("boolean无法转换为long" in msg):
+                                    eq_match = re.search(r"^(\s*.*?=\s*)(.+?);?\s*$", bad_line)
+                                    if eq_match:
+                                        pre, rhs = eq_match.groups()
+                                        lines[l_num - 1] = f"{pre}({rhs.strip().rstrip(';')}) ? 1L : 0L;"
+                                        modified = True
+                                        pass_repairs += 1
+                                # Repair 6: int cannot be converted to boolean (e.g. (boolean)(intExpr))
+                                elif ("cannot be converted to boolean" in msg and "int" in msg) or ("int无法转换为boolean" in msg):
+                                    if "(boolean)(" in bad_line:
+                                        line_part = bad_line.replace("(boolean)(", "(", 1)
+                                        open_idx = line_part.find("(")
+                                        depth = 1
+                                        done = False
+                                        j = l_num - 1
+                                        while j < len(lines) and not done:
+                                            start_ch = (open_idx + 1) if j == l_num - 1 else 0
+                                            curr_str = line_part if j == l_num - 1 else lines[j]
+                                            for ch_idx in range(start_ch, len(curr_str)):
+                                                ch = curr_str[ch_idx]
+                                                if ch == "(":
+                                                    depth += 1
+                                                elif ch == ")":
+                                                    depth -= 1
+                                                    if depth == 0:
+                                                        if j == l_num - 1:
+                                                            lines[j] = curr_str[:ch_idx + 1] + " != 0" + curr_str[ch_idx + 1:]
+                                                        else:
+                                                            lines[l_num - 1] = line_part
+                                                            lines[j] = curr_str[:ch_idx + 1] + " != 0" + curr_str[ch_idx + 1:]
+                                                        done = True
+                                                        modified = True
+                                                        pass_repairs += 1
+                                                        break
+                                            j += 1
+                                # Repair 7: Unbox cascade incompatible types
+                                elif ("incompatible types" in msg) or ("不兼容的类型" in msg):
+                                    full_text = "\n".join(lines)
+                                    norm_text, unbox_c = normalize_unbox(full_text)
+                                    if unbox_c > 0:
+                                        lines = norm_text.splitlines()
+                                        modified = True
+                                        pass_repairs += 1
                         if modified:
                             file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
                     except Exception:
                         pass
 
-            # Repair 5: Missing package / class symbol auto-synthesis
+            # Repair 8: Missing package / class symbol auto-synthesis (cross-package imports & same-package symbols)
             for file_path in list(files_to_repatch.keys()):
                 if file_path.is_file():
                     try:
                         code_txt = file_path.read_text(encoding="utf-8", errors="replace")
                         for imp_match in re.finditer(r"import\s+([\w.]+)\.([A-Za-z0-9_$]+);", code_txt):
-                            pkg_name, cls_name = imp_match.groups()
-                            if f"package {pkg_name} does not exist" in output or f"class {cls_name}" in output:
+                            is_missing_pkg = (
+                                f"package {pkg_name} does not exist" in output
+                                or f"程序包 {pkg_name} 不存在" in output
+                                or f"程序包{pkg_name}不存在" in output
+                            )
+                            is_missing_cls = (
+                                f"class {cls_name}" in output
+                                or f"类 {cls_name}" in output
+                                or f"类{cls_name}" in output
+                            )
+                            if is_missing_pkg or is_missing_cls:
                                 stub_dir = java_src_root / Path(*pkg_name.split("."))
                                 stub_file = stub_dir / f"{cls_name}.java"
                                 if not stub_file.is_file():
@@ -692,6 +850,32 @@ def verify_compilation(
                                     if stub_file not in java_files:
                                         java_files.append(stub_file)
                                     pass_repairs += 1
+
+                        for sym_m in re.finditer(r"(?:symbol|符号):\s+(?:class|类)\s+([A-Za-z0-9_$]+)", output):
+                            cls_name = sym_m.group(1)
+                            pkg_dir = file_path.parent
+                            stub_file = pkg_dir / f"{cls_name}.java"
+                            if not stub_file.is_file():
+                                pkg_decl = ""
+                                first_lines = code_txt.splitlines()[:5]
+                                for fl in first_lines:
+                                    if fl.strip().startswith("package "):
+                                        pkg_decl = fl.strip() + "\n\n"
+                                        break
+                                stub_code = (
+                                    f"{pkg_decl}"
+                                    f"public class {cls_name} {{\n"
+                                    f"    public {cls_name}() {{}}\n"
+                                    f"    public static Object dummyField;\n"
+                                    f"    public Object dummyMember;\n"
+                                    f"    public static Object dummyMethod(Object... args) {{ return null; }}\n"
+                                    f"    public Object dummyCall(Object... args) {{ return null; }}\n"
+                                    f"}}\n"
+                                )
+                                stub_file.write_text(stub_code, encoding="utf-8")
+                                if stub_file not in java_files:
+                                    java_files.append(stub_file)
+                                pass_repairs += 1
                     except Exception:
                         pass
 

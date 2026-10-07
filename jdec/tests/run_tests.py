@@ -448,6 +448,27 @@ def test_bytecode_decodes() -> None:
                                    f"of {len(ci.code)}")
     check(f"{total} methods decode cleanly", total > 0 and not bad, str(bad[:3]))
 
+    # Regression: lookupswitch branch offsets must unpack with 8-byte stride
+    # (default=100, npairs=2; pair 0: match=10, off=20; pair 1: match=30, off=40)
+    ls_code = bytearray([0xAB, 0, 0, 0])
+    ls_code += struct.pack(">ii", 100, 2)
+    ls_code += struct.pack(">ii", 10, 20)
+    ls_code += struct.pack(">ii", 30, 40)
+    ls_insns = BC.decode(bytes(ls_code))
+    check("lookupswitch decodes all jump targets correctly",
+          len(ls_insns) == 1 and ls_insns[0].targets == [100, 20, 40],
+          f"targets={ls_insns[0].targets if ls_insns else None}")
+
+    # Regression: ifnull and ifnonnull must decode as branches with signed relative offsets
+    ifnull_insns = BC.decode(bytes([0xC6, 0xFF, 0xFC]))  # ifnull -4
+    check("ifnull decodes as signed branch",
+          len(ifnull_insns) == 1 and ifnull_insns[0].is_branch and ifnull_insns[0].arg == -4 and ifnull_insns[0].jump_targets() == [-4],
+          f"insn={ifnull_insns[0] if ifnull_insns else None}")
+    ifnonnull_insns = BC.decode(bytes([0xC7, 0x00, 0x0A]))  # ifnonnull +10
+    check("ifnonnull decodes as signed branch",
+          len(ifnonnull_insns) == 1 and ifnonnull_insns[0].is_branch and ifnonnull_insns[0].arg == 10 and ifnonnull_insns[0].jump_targets() == [10],
+          f"insn={ifnonnull_insns[0] if ifnonnull_insns else None}")
+
 
 def test_flow_fingerprints() -> None:
     print("obf: structural fingerprints fire on evidence, not on guesswork")
@@ -981,6 +1002,29 @@ def test_bsm_scan_and_parse_resilience() -> None:
     check("_arity handles long and double correctly", BM._arity("(JJDD)V") == 4)
     check("_arity handles arrays", BM._arity("([[I[Ljava/lang/String;)V") == 2)
 
+    # 4. Local variable slot tracking for slot >= 4 and lload opcode 0x16
+    check("LOAD_OPS contains lload opcode 0x16", 0x16 in BM.LOAD_OPS and BM.LOAD_OPS[0x16] == ("l", None))
+    code_bytes = bytes([0x04, 0x36, 0x04, 0x05, 0x36, 0x05, 0x15, 0x04])
+    insns = BC.decode(code_bytes)
+    stk: list = []
+    loc: dict = {}
+    for ins in insns:
+        op = ins.op
+        if op in BM.ICONST:
+            stk.append(("lit", op - 0x03))
+        elif op in BM.STORE_OPS or op in BM.STORE_N:
+            k, sl = BM.STORE_OPS.get(op) or BM.STORE_N[op]
+            if sl is None: sl = ins.arg
+            if stk: loc[(k, sl)] = stk.pop()
+        elif op in BM.LOAD_OPS or op in BM.LOAD_N:
+            k, sl = BM.LOAD_OPS.get(op) or BM.LOAD_N[op]
+            if sl is None: sl = ins.arg
+            v = loc.get((k, sl))
+            stk.append(v if v is not None else ("?", None))
+    check("distinct local variable slots >= 4 do not overwrite each other",
+          loc.get(("i", 4)) == ("lit", 1) and loc.get(("i", 5)) == ("lit", 2))
+    check("iload 4 retrieves correct value from slot 4", stk == [("lit", 1)])
+
 
 def test_recover_spec_generation_and_quarantine() -> None:
     print("recover: build_spec parses jar and quarantines corrupt classes cleanly")
@@ -1262,6 +1306,11 @@ def test_probe_fingerprints_json() -> None:
         check("fingerprints.json matched JNIC", prof.obfuscator == "JNIC", str(prof.obfuscator))
         check("signature recorded", any("JNIC" in s for s in prof.signatures), str(prof.signatures))
 
+        # Regression: _major_version requires 0xCAFEBABE magic and 8-byte header
+        from jdec.probe import _major_version
+        check("_major_version rejects non-magic bytes", _major_version(b"corrupt_") is None)
+        check("_major_version extracts valid Java 8 major", _major_version(b"\xca\xfe\xba\xbe\x00\x00\x00\x34") == 52)
+
 
 def test_ops_pool() -> None:
     print("opspool: PhantomShield string-pool static decrypt (DES via bundled _des)")
@@ -1451,6 +1500,69 @@ def test_native_elf_and_ghidra_annotate() -> None:
         txt = script_out.read_text(encoding="utf-8")
         check("ghidra_annotate maps Java method", "Java_demo_Cls_run" in txt and "demo/Cls" in txt)
         check("ghidra_annotate contains run entry", "def run():" in txt and "JNI_BINDINGS" in txt)
+
+    # 3. Stripped ELF (e_shoff = 0) fallback parsing via PT_DYNAMIC program headers
+    ehdr_s = bytearray(64)
+    ehdr_s[:7] = b"\x7fELF\x02\x01\x01"
+    struct.pack_into("<HHIQQQIHHHHHH", ehdr_s, 16, 3, 0x3E, 1, 0, 64, 0, 0, 64, 56, 2, 0, 0, 0)
+    ph0_s = bytearray(56)
+    struct.pack_into("<IIQQQQQQ", ph0_s, 0, 1, 7, 0, 0x10000, 0x10000, 1024, 1024, 0x1000)
+    ph1_s = bytearray(56)
+    struct.pack_into("<IIQQQQQQ", ph1_s, 0, 2, 6, 0x200, 0x10200, 0x10200, 128, 128, 8)
+    buf_s = bytearray(1024)
+    buf_s[:64] = ehdr_s
+    buf_s[64:120] = ph0_s
+    buf_s[120:176] = ph1_s
+    dyn_off_s = 0x200
+    struct.pack_into("<QQ", buf_s, dyn_off_s, 6, 0x10300)       # DT_SYMTAB
+    struct.pack_into("<QQ", buf_s, dyn_off_s + 16, 5, 0x10380)  # DT_STRTAB
+    struct.pack_into("<QQ", buf_s, dyn_off_s + 32, 10, 64)      # DT_STRSZ
+    struct.pack_into("<QQ", buf_s, dyn_off_s + 48, 11, 24)      # DT_SYMENT
+    struct.pack_into("<QQ", buf_s, dyn_off_s + 64, 4, 0x10280)  # DT_HASH
+    struct.pack_into("<QQ", buf_s, dyn_off_s + 80, 0, 0)        # DT_NULL
+    struct.pack_into("<II", buf_s, 0x280, 1, 3)                  # nbucket=1, nchain=3
+    str_data_s = b"\x00Java_pkg_Native_call\x00JNI_OnLoad\x00"
+    buf_s[0x380:0x380 + len(str_data_s)] = str_data_s
+    struct.pack_into("<IBBHQQ", buf_s, 0x300 + 24, 1, 0x12, 0, 1, 0x1000, 32)
+    struct.pack_into("<IBBHQQ", buf_s, 0x300 + 48, 22, 0x12, 0, 1, 0x1020, 16)
+
+    # 4. Binary JNINativeMethod structure recovery directly from ELF rodata
+    s_method = b"nativeFunc\x00(I)V\x00"
+    buf_s[0x350:0x350 + len(s_method)] = s_method
+    struct.pack_into("<QQQ", buf_s, 0x3c0, 0x10350, 0x10350 + 11, 0x10555)
+
+    stripped_elf = bytes(buf_s)
+    stripped_exports = NS.parse_elf_exports(stripped_elf)
+    check("stripped ELF parsed JNI exports via PT_DYNAMIC",
+          "Java_pkg_Native_call" in stripped_exports and "JNI_OnLoad" in stripped_exports,
+          str(stripped_exports))
+
+    reg_methods = NS.scan_binary_register_natives(stripped_elf, fmt="ELF")
+    check("binary scan extracted JNINativeMethod table",
+          any(m["name"] == "nativeFunc" and m["sig"] == "(I)V" for m in reg_methods),
+          str(reg_methods))
+
+    tri_reg = NS.Triage(
+        libs=[NS.NativeLib(name="libtest.so", size=len(stripped_elf), format="ELF", exports=stripped_exports, dynamic_methods=reg_methods)],
+        native_decl=[("demo/Cls", "nativeFunc")]
+    )
+    dyn_matched = tri_reg.matched_dynamic()
+    check("tri.matched_dynamic matched declared Java method to native function",
+          len(dyn_matched) == 1 and dyn_matched[0]["func"] == "0x10555",
+          str(dyn_matched))
+
+    # 5. Stripped ELF with DT_GNU_HASH (0x6FFFFEF5)
+    buf_gnu = bytearray(buf_s)
+    struct.pack_into("<QQ", buf_gnu, dyn_off_s + 64, 0x6FFFFEF5, 0x10280)
+    struct.pack_into("<IIII", buf_gnu, 0x280, 1, 1, 1, 0)
+    struct.pack_into("<Q", buf_gnu, 0x290, 0xFFFFFFFF)
+    struct.pack_into("<I", buf_gnu, 0x298, 1)
+    struct.pack_into("<I", buf_gnu, 0x29C, 0x12345671)
+    gnu_elf = bytes(buf_gnu)
+    gnu_exports = NS.parse_elf_exports(gnu_elf)
+    check("stripped ELF parsed JNI exports via DT_GNU_HASH",
+          "Java_pkg_Native_call" in gnu_exports,
+          str(gnu_exports))
 
 
 def test_score_and_signal_enhancements() -> None:
@@ -2124,11 +2236,21 @@ def test_project_export_and_recompilability() -> None:
         exp_dir = Path(td) / "sample_exported_proj"
         mock_src = Path(td) / "mock_src"
         mock_src.mkdir(parents=True, exist_ok=True)
-        # Create an aux.java file (Windows reserved device name)
+        # Create an aux.java file (Windows reserved device name) and %41.java (twin collision)
         (mock_src / "aux.java").write_text("public class aux { public int val = 42; }", encoding="utf-8")
+        (mock_src / "a.java").write_text("public class a { public a() {} }", encoding="utf-8")
+        (mock_src / "%41.java").write_text("public class A { public A parent; public A(A p) { this.parent = p; } }", encoding="utf-8")
+        (mock_src / "b.java").write_text("public class b { public A field; public b() { this.field = new A(null); } }", encoding="utf-8")
         stats = PJ.export_project(SAMPLE, exp_dir, src_dir=mock_src, mc_version="1.20.4", with_stubs=True)
         check("export created src/main/java directory", (exp_dir / "src" / "main" / "java").is_dir())
         check("export escaped Windows reserved name aux.java -> _aux.java", (exp_dir / "src" / "main" / "java" / "_aux.java").is_file())
+        check("export escaped percent-encoded collision file %41.java -> A_Twin.java", (exp_dir / "src" / "main" / "java" / "A_Twin.java").is_file())
+        twin_txt = (exp_dir / "src" / "main" / "java" / "A_Twin.java").read_text(encoding="utf-8")
+        check("collision file class name updated to A_Twin", "class A_Twin" in twin_txt and "A_Twin(" in twin_txt)
+        check("collision file self-references updated to A_Twin", "A_Twin parent" in twin_txt and "(A_Twin p)" in twin_txt)
+        check("a.java preserved without collision", (exp_dir / "src" / "main" / "java" / "a.java").is_file())
+        b_txt = (exp_dir / "src" / "main" / "java" / "b.java").read_text(encoding="utf-8")
+        check("sibling b.java updated A references to A_Twin", "A_Twin field" in b_txt and "new A_Twin(null)" in b_txt)
         check("export bundled mc_stubs.jar into libs/", (exp_dir / "libs" / "mc_stubs.jar").is_file())
         check("export extracted resources to src/main/resources", stats["resources_copied"] >= 1)
         check("export generated build.gradle", (exp_dir / "build.gradle").is_file())
@@ -2195,6 +2317,12 @@ def test_project_export_and_recompilability() -> None:
         check("cmd_project created output project", (cli_out / "build.gradle").is_file())
         check("cmd_project bundled libs", (cli_out / "libs" / "mc_stubs.jar").is_file())
 
+    # 7. Decompiler unbox cascade normalization and typed self-healing
+    unbox_raw = "int x = v instanceof Boolean ? (Boolean)v : (v instanceof Character ? (char)((Number)v).intValue() : ((Number)v).intValue()));"
+    norm_unbox, unbox_n = PJ.normalize_unbox(unbox_raw)
+    check("normalize_unbox matched and converted ternary", unbox_n >= 1, f"edits={unbox_n}")
+    check("normalize_unbox produced valid typed expression", "booleanValue() ? 1 : 0" in norm_unbox and "charValue()" in norm_unbox)
+
 
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
@@ -2258,6 +2386,139 @@ def test_mc_is_not_flow_obfuscated() -> None:
     check("nothing attributed", rep.vendor is None, rep.summary())
 
 
+def test_cfg_and_dynamic_mocks() -> None:
+    print("cfg & stubs: control flow graph reassembly, far jumps, and dynamic mock agent")
+    from jdec import stubs as SB
+    from jdec import cfg as CFG_MOD
+    from jdec import deflat as DF_MOD
+
+    # 1. build_stub_class_bytes: pure Python synthetic class generation
+    data = SB.build_stub_class_bytes("net/minecraft/client/Minecraft")
+    cf = CF.parse(data)
+    check("build_stub_class_bytes produces valid class", cf.name == "net/minecraft/client/Minecraft")
+    check("stub class inherits java/lang/Object", cf.super_name == "java/lang/Object")
+    fnames = [cf.utf8(f.name_index) for f in cf.fields]
+    check("stub class has INSTANCE field", "INSTANCE" in fnames)
+    mnames = [cf.utf8(m.name_index) for m in cf.methods]
+    check("stub class has getInstance", "getInstance" in mnames)
+    check("stub class has <clinit>", "<clinit>" in mnames)
+
+    # 2. build_mock_agent_jar & ensure_mock_agent_jar
+    tmp_agent_dir = Path(tempfile.mkdtemp(prefix="jdec_test_agent_"))
+    try:
+        agent_jar = tmp_agent_dir / "mock_agent.jar"
+        SB.build_mock_agent_jar(agent_jar)
+        check("mock_agent.jar created", agent_jar.is_file())
+        with zipfile.ZipFile(agent_jar) as z:
+            mf = z.read("META-INF/MANIFEST.MF").decode("utf-8")
+            check("mock agent manifest has Premain-Class", "Premain-Class: jdec.mock.MockAgent" in mf)
+            check("mock agent jar contains MockAgent.class", "jdec/mock/MockAgent.class" in z.namelist())
+    finally:
+        shutil.rmtree(tmp_agent_dir, ignore_errors=True)
+
+    # 3. DynamicMockClassLoader live test (if javac & java available)
+    jc = SB._find_javac("javac")
+    if jc:
+        tmp_live = Path(tempfile.mkdtemp(prefix="jdec_test_dmcl_"))
+        try:
+            driver_src = (
+                "public class DynamicMockTest {\n"
+                "    public static void main(String[] args) throws Exception {\n"
+                "        RecoverDriver.DynamicMockClassLoader cl = new RecoverDriver.DynamicMockClassLoader(DynamicMockTest.class.getClassLoader());\n"
+                "        Class<?> c = Class.forName(\"com.unknown.external.MockService\", true, cl);\n"
+                "        Object inst1 = c.getMethod(\"getInstance\").invoke(null);\n"
+                "        Object inst2 = c.getMethod(\"getInstance\").invoke(null);\n"
+                "        if (inst1 == null || inst1 != inst2) throw new AssertionError(\"mock instance null or not singleton\");\n"
+                "        System.out.println(\"MOCK_OK: \" + inst1.getClass().getName());\n"
+                "    }\n"
+                "}\n"
+            )
+            rec_src = Path(__file__).resolve().parent.parent / "jdec" / "recover_driver_template.java"
+            (tmp_live / "RecoverDriver.java").write_text(rec_src.read_text(encoding="utf-8"), encoding="utf-8")
+            (tmp_live / "DynamicMockTest.java").write_text(driver_src, encoding="utf-8")
+            r_c = subprocess.run([jc, "-d", str(tmp_live), str(tmp_live / "RecoverDriver.java"), str(tmp_live / "DynamicMockTest.java")], capture_output=True, text=True)
+            if r_c.returncode == 0:
+                from jdec import engines as EN
+                java_bin = EN.find_java() or "java"
+                r_r = subprocess.run([java_bin, "-cp", str(tmp_live), "DynamicMockTest"], capture_output=True, text=True)
+                check("DynamicMockClassLoader loaded missing class on the fly", "MOCK_OK: com.unknown.external.MockService" in r_r.stdout)
+                check("DynamicMockClassLoader enforces singleton reference identity", "MOCK_OK" in r_r.stdout)
+        finally:
+            shutil.rmtree(tmp_live, ignore_errors=True)
+
+    # 4. CFG construction, reachability & reassembly
+    code = bytearray([
+        0x04,             # 0: iconst_1
+        0x99, 0x00, 0x07, # 1: ifeq +7 (to 8)
+        0x05,             # 4: iconst_2
+        0xA7, 0x00, 0x06, # 5: goto +6 (to 11)
+        0x06,             # 8: iconst_3
+        0x00,             # 9: nop
+        0x00,             # 10: nop
+        0xB1              # 11: return
+    ])
+    g = CFG_MOD.build_cfg(bytes(code))
+    check("CFG partitioned basic blocks", len(g.blocks) == 4)
+    r_blocks, r_pcs = CFG_MOD.compute_reachability(g)
+    check("CFG reachability found all blocks", len(r_blocks) == 4 and len(r_pcs) == 12)
+    reassembled, _, _ = CFG_MOD.assemble_cfg(g)
+    check("CFG reassembled code matches original", reassembled == bytes(code))
+
+    # 5. Far jump widening (> 32KB)
+    code_far = bytearray([0x04])
+    code_far.extend([0xC8, 0x00, 0x00, 0x9C, 0x44]) # goto_w +40004 -> targets 40005
+    code_far.extend([0x00] * 39999)
+    code_far.extend([0xB1])
+
+    g_far = CFG_MOD.build_cfg(bytes(code_far))
+    g_far.blocks[0].insns[1].op = BC.OP_GOTO
+    g_far.blocks[0].insns[1].length = 3
+    new_code, _, stats = CFG_MOD.assemble_cfg(g_far, allow_widening=True)
+    check("CFG widened 16-bit goto to goto_w for far jump", stats["widened_goto"] == 1)
+    dec = BC.decode(new_code)
+    check("CFG reassembled far goto_w has correct target", dec[1].op == BC.OP_GOTO_W and dec[1].jump_targets() == [40005])
+
+    # 6. Far conditional jump expansion (> 32KB)
+    g_far2 = CFG_MOD.build_cfg(bytes(code_far))
+    g_far2.blocks[0].insns[1].op = 0x99 # ifeq
+    g_far2.blocks[0].insns[1].length = 3
+    new_code2, _, stats2 = CFG_MOD.assemble_cfg(g_far2, allow_widening=True)
+    check("CFG expanded far conditional branch", stats2["widened_if"] == 1)
+    dec2 = BC.decode(new_code2)
+    check("CFG expanded to inverted condition and goto_w", dec2[1].op == 0x9A and dec2[2].op == BC.OP_GOTO_W and dec2[2].jump_targets() == [40008])
+    check("CFG expanded goto_w reaches return instruction", new_code2[dec2[2].jump_targets()[0]] == 0xB1)
+
+    # 7. StackMapTable reconstruction
+    smt = CFG_MOD.rebuild_stack_map_table(None, new_code2)
+    check("StackMapTable generated", len(smt) >= 2 and struct.unpack_from(">H", smt, 0)[0] > 0)
+
+    # 8. deflat far switch transition (> 32KB)
+    switch_code = bytearray([0x1B, 0xAA, 0, 0] + list(struct.pack('>iiiii', 0, 1, 3, 27, 40030)) + list(struct.pack('>i', 35)))
+    switch_code += bytearray([0x10, 0x02, 0x3C, 0xA7]) + bytearray(struct.pack('>h', -31))
+    switch_code += bytearray(b'\x00' * (40035 - len(switch_code)))
+    switch_code += bytearray([0xB1])
+    deflat_far, n_far = DF_MOD.deflat_code(bytes(switch_code))
+    check("deflat unflattened switch transition spanning > 32KB", n_far >= 1 and deflat_far[28] == BC.OP_GOTO_W)
+
+    # 9. CFG exception handler covers widened code end
+    h_orig = [BC.Handler(start_pc=0, end_pc=len(code_far), handler_pc=len(code_far) - 1, catch_type=0)]
+    g_far_h = CFG_MOD.build_cfg(bytes(code_far), handlers=h_orig)
+    g_far_h.blocks[0].insns[1].op = BC.OP_GOTO
+    g_far_h.blocks[0].insns[1].length = 3
+    new_code_h, new_handlers_h, _ = CFG_MOD.assemble_cfg(g_far_h, allow_widening=True)
+    check("CFG exception handler start matches 0", new_handlers_h[0].start_pc == 0)
+    check("CFG exception handler end covers full expanded code", new_handlers_h[0].end_pc == len(new_code_h))
+
+    # 10. StackMapTable with exception handler generates handler frames
+    smt_h = CFG_MOD.rebuild_stack_map_table(None, new_code_h, handlers=new_handlers_h)
+    check("StackMapTable generated with handler frames", len(smt_h) >= 5)
+
+    # 11. deflat_class supports variable-length code widening without dropping code
+    cf_dummy = CF.parse(SB.build_stub_class_bytes("com/example/Dummy"))
+    edits = DF_MOD.deflat_class(cf_dummy)
+    check("deflat_class executed without crashing", isinstance(edits, int))
+
+
 def main() -> int:
     with_mc = "--with-mc" in sys.argv
     if not SAMPLE.exists():
@@ -2302,6 +2563,7 @@ def main() -> int:
     test_callgraph_and_reachability()
     test_decompiler_trap_pruning()
     test_project_export_and_recompilability()
+    test_cfg_and_dynamic_mocks()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

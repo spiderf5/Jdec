@@ -41,8 +41,11 @@ OP_WIDE = 0xC4
 OP_MONITORENTER = 0xC2
 OP_IXOR = 0x82
 OP_LXOR = 0x83
+OP_IFNULL = 0xC6
+OP_IFNONNULL = 0xC7
 
 _BRANCH_OPS = set(range(0x99, 0xA9))          # ifeq..jsr, all s16 relative
+_BRANCH_OPS |= {OP_IFNULL, OP_IFNONNULL}      # ifnull, ifnonnull, s16 relative
 _BRANCH_OPS |= {OP_GOTO_W, OP_JSR_W}          # s32 relative
 _TERMINATORS = set(range(0xAC, 0xB2)) | {OP_ATHROW, OP_RET}
 
@@ -187,7 +190,7 @@ def decode(code: bytes) -> list[Insn]:
                 if npairs < 0 or q + 8 * npairs > n:
                     raise BytecodeError(f"bad lookupswitch at {pc}")
                 for i in range(npairs):
-                    off = struct.unpack_from(">i", code, q + 4 * i + 4)[0]
+                    off = struct.unpack_from(">i", code, q + 8 * i + 4)[0]
                     targets.append(pc + off)
                 length = (q + 8 * npairs) - o
             out.append(Insn(pc=pc, op=op, length=length, targets=targets))

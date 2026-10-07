@@ -1,12 +1,13 @@
-"""Native-library triage: extract shipped libs and read their PE export table.
+"""Native-library triage: extract shipped libs and read their PE / ELF export tables.
 
 jdec 的字节码侧到此为止（native 方法体不在 class 文件里），这个模块把
-"711 个方法在 DLL 里"变成可执行的下一步：提取库、列出 JNI 导出符号、
-判断静态注册还是 JNI_OnLoad 动态注册，输出给 Ghidra/IDA 分析师的任务清单。
+"711 个方法在 DLL/.so 里"变成可执行的下一步：提取库、列出 JNI 导出符号、
+识别静态注册与 RegisterNatives 动态注册表，输出给 Ghidra/IDA 分析师的任务清单。
 只解析、不执行目标代码——与 jdec 其余部分同一纪律。
 
-PE 解析是纯 struct 的最小实现（导出表 + 段表 RVA 映射），无第三方依赖。
-ELF/Mach-O 库只提取不解析，报告里说明。
+PE 与 ELF 解析均为纯 struct 的最小实现（PE 导出表/段表 RVA 映射、ELF .dynsym/.dynstr
+与 PT_DYNAMIC 程序头后备解析、二进制 JNINativeMethod 结构体定位），无第三方依赖。
+Mach-O 库只提取不解析，报告里说明。
 """
 
 from __future__ import annotations
@@ -124,6 +125,146 @@ def parse_pe_exports(data: bytes) -> list[str]:
         return []
 
 
+def _parse_elf_dynamic_segment(data: bytes, is_64: bool, endian: str) -> list[str]:
+    """Fallback ELF symbol parser reading PT_DYNAMIC and PT_LOAD program headers (works on stripped .so)."""
+    try:
+        if is_64:
+            if len(data) < 64: return []
+            e_phoff = struct.unpack_from(endian + "Q", data, 32)[0]
+            e_phentsize = struct.unpack_from(endian + "H", data, 54)[0]
+            e_phnum = struct.unpack_from(endian + "H", data, 56)[0]
+        else:
+            if len(data) < 52: return []
+            e_phoff = struct.unpack_from(endian + "I", data, 28)[0]
+            e_phentsize = struct.unpack_from(endian + "H", data, 42)[0]
+            e_phnum = struct.unpack_from(endian + "H", data, 44)[0]
+
+        if not e_phoff or not e_phentsize or not e_phnum:
+            return []
+
+        segments: list[tuple[int, int, int]] = []
+        dyn_seg: tuple[int, int, int] | None = None
+        for i in range(e_phnum):
+            p_off = e_phoff + i * e_phentsize
+            if p_off + (56 if is_64 else 32) > len(data):
+                break
+            if is_64:
+                p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz = struct.unpack_from(
+                    endian + "IIQQQQQ", data, p_off
+                )[:7]
+            else:
+                p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz = struct.unpack_from(
+                    endian + "IIIIII", data, p_off
+                )[:6]
+            if p_type == 1:  # PT_LOAD
+                segments.append((p_vaddr, p_filesz, p_offset))
+            elif p_type == 2:  # PT_DYNAMIC
+                dyn_seg = (p_offset, p_filesz, p_vaddr)
+
+        if not dyn_seg:
+            return []
+
+        def va_to_off(va: int) -> int | None:
+            for vaddr, fsz, off in segments:
+                if vaddr <= va < vaddr + fsz:
+                    return va - vaddr + off
+            return None
+
+        dyn_offset, dyn_size, _ = dyn_seg
+        dt_symtab = dt_strtab = dt_strsz = dt_syment = dt_hash = dt_gnu_hash = None
+        ent_sz = 16 if is_64 else 8
+        pos = dyn_offset
+        limit = min(len(data), dyn_offset + dyn_size)
+        while pos + ent_sz <= limit:
+            if is_64:
+                tag, val = struct.unpack_from(endian + "QQ", data, pos)
+            else:
+                tag, val = struct.unpack_from(endian + "II", data, pos)
+            pos += ent_sz
+            if tag == 0:  # DT_NULL
+                break
+            elif tag == 6:   # DT_SYMTAB
+                dt_symtab = val
+            elif tag == 5:   # DT_STRTAB
+                dt_strtab = val
+            elif tag == 10:  # DT_STRSZ
+                dt_strsz = val
+            elif tag == 11:  # DT_SYMENT
+                dt_syment = val
+            elif tag == 4:   # DT_HASH
+                dt_hash = val
+            elif tag == 0x6FFFFEF5:  # DT_GNU_HASH
+                dt_gnu_hash = val
+
+        if not dt_symtab or not dt_strtab:
+            return []
+
+        sym_off = va_to_off(dt_symtab)
+        str_off = va_to_off(dt_strtab)
+        if sym_off is None or str_off is None:
+            return []
+
+        n_syms = 0
+        if dt_hash:
+            h_off = va_to_off(dt_hash)
+            if h_off and h_off + 8 <= len(data):
+                nbucket, nchain = struct.unpack_from(endian + "II", data, h_off)
+                n_syms = nchain
+        elif dt_gnu_hash:
+            gh_off = va_to_off(dt_gnu_hash)
+            if gh_off and gh_off + 16 <= len(data):
+                nbuckets, symoffset, bloom_size, _ = struct.unpack_from(endian + "IIII", data, gh_off)
+                bloom_shift_bytes = bloom_size * (8 if is_64 else 4)
+                buckets_off = gh_off + 16 + bloom_shift_bytes
+                if buckets_off + nbuckets * 4 <= len(data):
+                    max_chain_idx = 0
+                    for bi in range(nbuckets):
+                        b_val = struct.unpack_from(endian + "I", data, buckets_off + bi * 4)[0]
+                        if b_val > max_chain_idx:
+                            max_chain_idx = b_val
+                    if max_chain_idx >= symoffset:
+                        chains_off = buckets_off + nbuckets * 4
+                        cur_idx = max_chain_idx
+                        while chains_off + (cur_idx - symoffset) * 4 + 4 <= len(data):
+                            chain_val = struct.unpack_from(endian + "I", data, chains_off + (cur_idx - symoffset) * 4)[0]
+                            cur_idx += 1
+                            if chain_val & 1:  # End of chain
+                                break
+                        n_syms = cur_idx
+
+        sym_ent = dt_syment or (24 if is_64 else 16)
+        if n_syms == 0:
+            if dt_strsz and str_off > sym_off:
+                n_syms = (str_off - sym_off) // sym_ent
+            else:
+                n_syms = 1024  # higher fallback scan limit for modern stripped libs
+
+        symbols = []
+        str_limit = str_off + (dt_strsz or 65536)
+        for i in range(n_syms):
+            cur = sym_off + i * sym_ent
+            if cur + sym_ent > len(data):
+                break
+            if is_64:
+                st_name = struct.unpack_from(endian + "I", data, cur)[0]
+                st_shndx = struct.unpack_from(endian + "H", data, cur + 6)[0]
+            else:
+                st_name = struct.unpack_from(endian + "I", data, cur)[0]
+                st_shndx = struct.unpack_from(endian + "H", data, cur + 14)[0]
+
+            if st_shndx != 0 and st_name != 0:
+                name_ptr = str_off + st_name
+                if name_ptr < min(len(data), str_limit):
+                    zero_idx = data.find(b"\x00", name_ptr, min(len(data), str_limit))
+                    if zero_idx != -1:
+                        sym = data[name_ptr:zero_idx].decode("ascii", errors="replace")
+                        if sym:
+                            symbols.append(sym)
+        return symbols
+    except Exception:
+        return []
+
+
 def parse_elf_exports(data: bytes) -> list[str]:
     """Exported symbol names of an ELF (.so) shared object; supports ELF32 and ELF64."""
     if len(data) < 52 or data[:4] != b"\x7fELF":
@@ -143,73 +284,72 @@ def parse_elf_exports(data: bytes) -> list[str]:
             e_shentsize = struct.unpack_from(endian + "H", data, 46)[0]
             e_shnum = struct.unpack_from(endian + "H", data, 48)[0]
 
-        if not e_shoff or not e_shentsize or not e_shnum:
-            return []
+        # If section headers are present, parse sections first
+        if e_shoff and e_shentsize and e_shnum:
+            sections = []
+            for i in range(e_shnum):
+                s_off = e_shoff + i * e_shentsize
+                if s_off + (64 if is_64 else 40) > len(data):
+                    break
+                if is_64:
+                    sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link = struct.unpack_from(
+                        endian + "IIQQQQI", data, s_off
+                    )[:7]
+                    sh_entsize = struct.unpack_from(endian + "Q", data, s_off + 56)[0]
+                else:
+                    sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link = struct.unpack_from(
+                        endian + "IIIIIII", data, s_off
+                    )[:7]
+                    sh_entsize = struct.unpack_from(endian + "I", data, s_off + 36)[0]
+                sections.append({
+                    "type": sh_type, "offset": sh_offset, "size": sh_size,
+                    "link": sh_link, "entsize": sh_entsize
+                })
 
-        sections = []
-        for i in range(e_shnum):
-            s_off = e_shoff + i * e_shentsize
-            if s_off + (64 if is_64 else 40) > len(data):
-                break
-            if is_64:
-                sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link = struct.unpack_from(
-                    endian + "IIQQQQI", data, s_off
-                )[:7]
-                sh_entsize = struct.unpack_from(endian + "Q", data, s_off + 56)[0]
-            else:
-                sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link = struct.unpack_from(
-                    endian + "IIIIIII", data, s_off
-                )[:7]
-                sh_entsize = struct.unpack_from(endian + "I", data, s_off + 36)[0]
-            sections.append({
-                "type": sh_type, "offset": sh_offset, "size": sh_size,
-                "link": sh_link, "entsize": sh_entsize
-            })
+            # SHT_DYNSYM = 11, SHT_SYMTAB = 2
+            dynsym = None
+            for sec in sections:
+                if sec["type"] == 11:
+                    dynsym = sec
+                    break
+                if sec["type"] == 2 and dynsym is None:
+                    dynsym = sec
 
-        # SHT_DYNSYM = 11, SHT_SYMTAB = 2
-        dynsym = None
-        for sec in sections:
-            if sec["type"] == 11:
-                dynsym = sec
-                break
-            if sec["type"] == 2 and dynsym is None:
-                dynsym = sec
+            if dynsym and dynsym["link"] < len(sections):
+                strtab = sections[dynsym["link"]]
+                str_start = strtab["offset"]
+                str_end = str_start + strtab["size"]
+                if str_end <= len(data):
+                    sym_off = dynsym["offset"]
+                    sym_size = dynsym["size"]
+                    ent_sz = dynsym["entsize"] or (24 if is_64 else 16)
+                    n_syms = sym_size // ent_sz
 
-        if not dynsym or dynsym["link"] >= len(sections):
-            return []
+                    out = []
+                    for i in range(n_syms):
+                        cur = sym_off + i * ent_sz
+                        if cur + ent_sz > len(data):
+                            break
+                        if is_64:
+                            st_name = struct.unpack_from(endian + "I", data, cur)[0]
+                            st_shndx = struct.unpack_from(endian + "H", data, cur + 6)[0]
+                        else:
+                            st_name = struct.unpack_from(endian + "I", data, cur)[0]
+                            st_shndx = struct.unpack_from(endian + "H", data, cur + 14)[0]
 
-        strtab = sections[dynsym["link"]]
-        str_start = strtab["offset"]
-        str_end = str_start + strtab["size"]
-        if str_end > len(data):
-            return []
+                        if st_shndx != 0 and st_name != 0:
+                            name_ptr = str_start + st_name
+                            if name_ptr < str_end:
+                                zero_idx = data.find(b"\x00", name_ptr, str_end)
+                                if zero_idx != -1:
+                                    sym_name = data[name_ptr:zero_idx].decode("ascii", errors="replace")
+                                    if sym_name:
+                                        out.append(sym_name)
+                    if out:
+                        return out
 
-        sym_off = dynsym["offset"]
-        sym_size = dynsym["size"]
-        ent_sz = dynsym["entsize"] or (24 if is_64 else 16)
-        n_syms = sym_size // ent_sz
-
-        out = []
-        for i in range(n_syms):
-            cur = sym_off + i * ent_sz
-            if cur + ent_sz > len(data):
-                break
-            if is_64:
-                st_name = struct.unpack_from(endian + "I", data, cur)[0]
-                st_shndx = struct.unpack_from(endian + "H", data, cur + 6)[0]
-            else:
-                st_name = struct.unpack_from(endian + "I", data, cur)[0]
-                st_shndx = struct.unpack_from(endian + "H", data, cur + 14)[0]
-
-            if st_shndx != 0 and st_name != 0:
-                name_ptr = str_start + st_name
-                if name_ptr < str_end:
-                    zero_idx = data.find(b"\x00", name_ptr, str_end)
-                    if zero_idx != -1:
-                        sym_name = data[name_ptr:zero_idx].decode("ascii", errors="replace")
-                        if sym_name:
-                            out.append(sym_name)
-        return out
+        # Fallback to PT_DYNAMIC program headers when section headers are stripped (e_shoff == 0)
+        return _parse_elf_dynamic_segment(data, is_64, endian)
     except Exception:
         return []
 
@@ -349,6 +489,135 @@ def scan_binary_jni_descriptors(data: bytes) -> list[dict]:
     return out
 
 
+def scan_binary_register_natives(data: bytes, fmt: str = "auto") -> list[dict]:
+    """Extract JNINativeMethod tables (name, sig, fnPtr) directly from raw ELF/PE binary without Ghidra.
+
+    Searches for consecutive struct JNINativeMethod { const char* name; const char* sig; void* fnPtr; }
+    where sig matches JNI descriptor syntax and name is a valid Java identifier.
+    """
+    if len(data) < 64:
+        return []
+    if fmt == "auto":
+        fmt = detect_format(data)
+
+    segments: list[tuple[int, int, int]] = []
+    is_64 = True
+    endian = "<"
+
+    if fmt == "ELF":
+        if data[:4] != b"\x7fELF":
+            return []
+        is_64 = (data[4] == 2)
+        endian = "<" if data[5] == 1 else ">"
+        try:
+            if is_64:
+                e_phoff = struct.unpack_from(endian + "Q", data, 32)[0]
+                e_phentsize = struct.unpack_from(endian + "H", data, 54)[0]
+                e_phnum = struct.unpack_from(endian + "H", data, 56)[0]
+            else:
+                e_phoff = struct.unpack_from(endian + "I", data, 28)[0]
+                e_phentsize = struct.unpack_from(endian + "H", data, 42)[0]
+                e_phnum = struct.unpack_from(endian + "H", data, 44)[0]
+            for i in range(e_phnum):
+                p_off = e_phoff + i * e_phentsize
+                if p_off + (56 if is_64 else 32) > len(data): break
+                if is_64:
+                    p_type, _, p_offset, p_vaddr, _, p_filesz = struct.unpack_from(endian + "IIQQQQ", data, p_off)[:6]
+                else:
+                    p_type, p_offset, p_vaddr, _, p_filesz = struct.unpack_from(endian + "IIIII", data, p_off)[:5]
+                if p_type == 1:  # PT_LOAD
+                    segments.append((p_vaddr, p_filesz, p_offset))
+        except Exception:
+            return []
+    elif fmt == "PE":
+        if data[:2] != b"MZ":
+            return []
+        try:
+            pe_off = struct.unpack_from("<I", data, 0x3C)[0]
+            if data[pe_off:pe_off + 4] != b"PE\x00\x00":
+                return []
+            coff = pe_off + 4
+            nsec = struct.unpack_from("<H", data, coff + 2)[0]
+            opt_size = struct.unpack_from("<H", data, coff + 16)[0]
+            opt = coff + 20
+            magic = struct.unpack_from("<H", data, opt)[0]
+            is_64 = (magic == 0x20B)
+            image_base = struct.unpack_from("<Q" if is_64 else "<I", data, opt + (24 if is_64 else 28))[0]
+            sec_tab = opt + opt_size
+            for i in range(nsec):
+                s = sec_tab + i * 40
+                vsz, va, rsz, raw = struct.unpack_from("<IIII", data, s + 8)
+                segments.append((image_base + va, vsz, raw))
+                segments.append((va, vsz, raw))  # Support relative RVA arrays
+        except Exception:
+            return []
+    else:
+        return []
+
+    if not segments:
+        return []
+
+    def va_to_off(va: int) -> int | None:
+        for vaddr, fsz, off in segments:
+            if vaddr <= va < vaddr + fsz and off < len(data):
+                file_pos = va - vaddr + off
+                if file_pos < len(data):
+                    return file_pos
+        return None
+
+    def read_c_str(va: int) -> str | None:
+        file_pos = va_to_off(va)
+        if file_pos is None or file_pos >= len(data):
+            return None
+        null_pos = data.find(b"\x00", file_pos, min(len(data), file_pos + 256))
+        if null_pos != -1:
+            try:
+                return data[file_pos:null_pos].decode("utf-8", errors="replace")
+            except Exception:
+                return None
+        return None
+
+    rx_sig = re.compile(r"^\([A-Za-z0-9_$/;\[]*\)[A-Za-z0-9_$/;\[]+$")
+    rx_name = re.compile(r"^[a-zA-Z_$][a-zA-Z0-9_$]*$|^(?:<init>|<clinit>)$")
+
+    step = 8 if is_64 else 4
+    struct_sz = 24 if is_64 else 12
+    unpack_fmt = endian + ("QQQ" if is_64 else "III")
+
+    results: list[dict] = []
+    seen_methods: set[tuple[str, str]] = set()
+
+    unique_ranges: list[tuple[int, int]] = []
+    seen_ranges: set[tuple[int, int]] = set()
+    for _, fsz, off in segments:
+        rng = (off, fsz)
+        if rng not in seen_ranges and off < len(data):
+            seen_ranges.add(rng)
+            unique_ranges.append(rng)
+
+    for off, fsz in unique_ranges:
+        seg_end = min(len(data), off + fsz)
+        for p in range(off, seg_end - struct_sz + 1, step):
+            name_ptr, sig_ptr, fn_ptr = struct.unpack_from(unpack_fmt, data, p)
+            if not name_ptr or not sig_ptr or not fn_ptr:
+                continue
+            sig_str = read_c_str(sig_ptr)
+            if sig_str and rx_sig.match(sig_str):
+                name_str = read_c_str(name_ptr)
+                if name_str and rx_name.match(name_str):
+                    key = (name_str, sig_str)
+                    if key not in seen_methods:
+                        seen_methods.add(key)
+                        results.append({
+                            "name": name_str,
+                            "sig": sig_str,
+                            "func": f"0x{fn_ptr:x}",
+                            "source": "binary_JNINativeMethod",
+                            "offset": p,
+                        })
+    return results
+
+
 def triage_raw(path: Path, out_dir: Path) -> Triage:
     """Triage a single raw PE/ELF file (e.g. a DLL dumped by engines/frida)."""
     data = path.read_bytes()
@@ -365,7 +634,7 @@ def triage_raw(path: Path, out_dir: Path) -> Triage:
     else:
         lib.error = "PE / ELF 以外的格式仅提取不解析"
     lib.strings = scan_strings(data)
-    lib.dynamic_methods = scan_binary_jni_descriptors(data)
+    lib.dynamic_methods = scan_binary_register_natives(data, lib.format) + scan_binary_jni_descriptors(data)
     tri.libs.append(lib)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / path.name).write_bytes(data)
@@ -391,7 +660,7 @@ def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
         else:
             lib.error = "PE / ELF 以外的格式仅提取不解析（Mach-O 待补）"
         lib.strings = scan_strings(data)
-        lib.dynamic_methods = scan_binary_jni_descriptors(data)
+        lib.dynamic_methods = scan_binary_register_natives(data, lib.format) + scan_binary_jni_descriptors(data)
         tri.libs.append(lib)
     if collect_decl:
         with zipfile.ZipFile(jar) as zf:

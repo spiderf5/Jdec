@@ -194,7 +194,7 @@ class IndySite:
 STORE_OPS = {0x36: ("i", None), 0x37: ("l", None)}       # istore/lstore
 STORE_N = {0x3B: ("i", 0), 0x3C: ("i", 1), 0x3D: ("i", 2), 0x3E: ("i", 3),
            0x3F: ("l", 0), 0x40: ("l", 1), 0x41: ("l", 2), 0x42: ("l", 3)}
-LOAD_OPS = {0x15: ("i", None), 0x22: ("l", None)}
+LOAD_OPS = {0x15: ("i", None), 0x16: ("l", None)}
 LOAD_N = {0x1A: ("i", 0), 0x1B: ("i", 1), 0x1C: ("i", 2), 0x1D: ("i", 3),
           0x1E: ("l", 0), 0x1F: ("l", 1), 0x20: ("l", 2), 0x21: ("l", 3)}
 ALOAD_N = {0x2A: 0, 0x2B: 1, 0x2C: 2, 0x2D: 3}
@@ -242,10 +242,14 @@ def enum_sites(cf, bsm_cache: dict | None = None) -> list[IndySite]:
                     stack.append(("?", None))
             elif op in STORE_OPS or op in STORE_N:
                 kind, slot = STORE_OPS.get(op) or STORE_N[op]
+                if slot is None:
+                    slot = ins.arg
                 if stack:
                     locals_[(kind, slot)] = stack.pop()
             elif op in LOAD_OPS or op in LOAD_N:
                 kind, slot = LOAD_OPS.get(op) or LOAD_N[op]
+                if slot is None:
+                    slot = ins.arg
                 v = locals_.get((kind, slot))
                 stack.append(v if v is not None else ("?", None))
             elif op in ALOAD_N or op == 0x19:
