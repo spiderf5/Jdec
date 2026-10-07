@@ -2665,6 +2665,64 @@ def test_bvm_and_native_extensions() -> None:
         check("mock agent manifest contains Premain-Class", "Premain-Class: jdec.mock.MockAgent" in mf)
         check("mock agent contains MockAgent.class", "jdec/mock/MockAgent.class" in zf.namelist())
 
+    # 10. INVOKEINTERFACE with arguments and receiver count
+    vm_meth_itf = BVM.BVMMethod(
+        code_id=104,
+        name="callItf",
+        desc="()V",
+        code=[
+            BVM.ORDINAL_BY_NAME["ALOAD"], 0,
+            BVM.ORDINAL_BY_NAME["ICONST_1"],
+            BVM.ORDINAL_BY_NAME["LCONST_0"],
+            BVM.ORDINAL_BY_NAME["INVOKEINTERFACE"], 0, 1, 2, 4,
+            BVM.ORDINAL_BY_NAME["RETURN"]
+        ],
+        constants=["com/example/MyInterface", "compute", "(IJ)V"],
+        max_locals=3,
+        max_stack=4
+    )
+    res_itf = BVM.BVMTranslator.translate_method(vm_meth_itf, cf_host)
+    check("BVMTranslator translated invokeinterface", 0xB9 in res_itf.bytecode)
+    itf_idx = res_itf.bytecode.index(0xB9)
+    check("invokeinterface count operand is 4", res_itf.bytecode[itf_idx + 3] == 4)
+
+    # 11. LDC with 2-word Long / Double uses ldc2_w (0x14)
+    vm_meth_long = BVM.BVMMethod(
+        code_id=105,
+        name="loadLong",
+        desc="()J",
+        code=[
+            BVM.ORDINAL_BY_NAME["LDC"], 0,
+            BVM.ORDINAL_BY_NAME["LRETURN"]
+        ],
+        constants=[{"type": "long", "value": 9876543210123}],
+        max_locals=1,
+        max_stack=2
+    )
+    res_long = BVM.BVMTranslator.translate_method(vm_meth_long, cf_host)
+    check("ldc2_w used for long constant", res_long.bytecode[0] == 0x14)
+
+    # 12. Non-Code attributes preserved across devirtualization
+    sig_attr_idx = cf_host.intern_utf8("Signature")
+    sig_val_idx = cf_host.intern_utf8("()I")
+    sig_attr = struct.pack(">HIH", sig_attr_idx, 2, sig_val_idx)
+    target_method.attrs_blob = struct.pack(">H", 2) + code_attr + sig_attr
+    devirt_cf2, count2 = BVM.BVMDevirtualizer.devirtualize_class_file(cf_host, {101: vm_meth})
+    has_sig = False
+    o = 2
+    for _ in range(struct.unpack_from(">H", target_method.attrs_blob, 0)[0]):
+        ni = struct.unpack_from(">H", target_method.attrs_blob, o)[0]
+        alen = struct.unpack_from(">I", target_method.attrs_blob, o + 2)[0]
+        o += 6 + alen
+        if cf_host.utf8(ni) == "Signature":
+            has_sig = True
+    check("set_code_attribute preserved Signature attribute", has_sig)
+
+    # 13. Keyword sanitization handles short and byte declarations
+    code_kw_types = "short default = 1;\nbyte goto = 2;\nMyType default = null;"
+    san_kw, kw_c = PJ.sanitize_keyword_identifiers(code_kw_types)
+    check("keywords escaped for short and byte types", "short default_ = 1;" in san_kw and "byte goto_ = 2;" in san_kw)
+
 
 def main() -> int:
     with_mc = "--with-mc" in sys.argv

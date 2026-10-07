@@ -482,6 +482,14 @@ class ConstantPoolHelper:
         self.cf.cp.append(None)  # Double occupies two slots
         return idx
 
+    def add_invoke_dynamic(self, bsm_attr_idx: int, name: str, desc: str) -> int:
+        nat_idx = self.add_name_and_type(name, desc)
+        for i, e in enumerate(self.cf.cp[1:], 1):
+            if e and e[0] == CF.C_INVOKE_DYNAMIC and e[1] == [bsm_attr_idx, nat_idx]:
+                return i
+        self.cf.cp.append((CF.C_INVOKE_DYNAMIC, [bsm_attr_idx, nat_idx]))
+        return len(self.cf.cp) - 1
+
     def add_constant(self, val: Any) -> int:
         """Add arbitrary constant from BytecodeVM constants table."""
         if isinstance(val, str):
@@ -504,7 +512,51 @@ class ConstantPoolHelper:
                 return self.add_methodref(val["owner"], val["name"], val["desc"])
             elif t == "field":
                 return self.add_fieldref(val["owner"], val["name"], val["desc"])
+            elif t == "int":
+                return self.add_int(int(val.get("value", 0)))
+            elif t == "long":
+                return self.add_long(int(val.get("value", 0)))
+            elif t == "float":
+                return self.add_float(float(val.get("value", 0.0)))
+            elif t == "double":
+                return self.add_double(float(val.get("value", 0.0)))
+            elif t == "string":
+                return self.add_string(str(val.get("value", "")))
         return self.add_string(str(val))
+
+
+def compute_interface_args_count(desc: str) -> int:
+    """Compute count operand for invokeinterface (1 for receiver + argument slots)."""
+    if not desc or "(" not in desc or ")" not in desc:
+        return 1
+    params_part = desc[desc.find("(") + 1:desc.find(")")]
+    count = 1  # receiver 'this'
+    i = 0
+    while i < len(params_part):
+        ch = params_part[i]
+        if ch in ("J", "D"):  # long or double take 2 slots
+            count += 2
+            i += 1
+        elif ch in ("B", "C", "F", "I", "S", "Z"):
+            count += 1
+            i += 1
+        elif ch == "L":
+            semi = params_part.find(";", i)
+            i = (semi + 1) if semi != -1 else (i + 1)
+            count += 1
+        elif ch == "[":
+            while i < len(params_part) and params_part[i] == "[":
+                i += 1
+            if i < len(params_part) and params_part[i] == "L":
+                semi = params_part.find(";", i)
+                i = (semi + 1) if semi != -1 else (i + 1)
+            elif i < len(params_part):
+                i += 1
+            count += 1
+        else:
+            i += 1
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -571,8 +623,9 @@ class BVMTranslator:
                 c_idx = operands[0]
                 c_val = vm_method.constants[c_idx] if c_idx < len(vm_method.constants) else 0
                 cpi = cp_helper.add_constant(c_val)
-                # Check if 2-word constant (Long / Double)
-                if isinstance(c_val, int) and (c_val < -2147483648 or c_val > 2147483647):
+                cp_entry = cf.cp[cpi] if cpi < len(cf.cp) else None
+                is_two_word = cp_entry and cp_entry[0] in (CF.C_LONG, CF.C_DOUBLE)
+                if is_two_word:
                     buf.extend([0x14, (cpi >> 8) & 0xFF, cpi & 0xFF])  # ldc2_w
                 elif cpi > 255:
                     buf.extend([0x13, (cpi >> 8) & 0xFF, cpi & 0xFF])  # ldc_w
@@ -581,24 +634,30 @@ class BVMTranslator:
             elif fmt == "type":
                 c_idx = operands[0]
                 c_val = vm_method.constants[c_idx] if c_idx < len(vm_method.constants) else "java/lang/Object"
-                cpi = cp_helper.add_class(str(c_val))
+                cls_str = str(c_val).replace(".", "/")
+                if cls_str.startswith("L") and cls_str.endswith(";") and not cls_str.startswith("["):
+                    cls_str = cls_str[1:-1]
+                cpi = cp_helper.add_class(cls_str)
                 buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF])
             elif fmt == "field":
                 o_idx, n_idx, d_idx = operands[0], operands[1], operands[2]
-                owner = str(vm_method.constants[o_idx])
+                owner = str(vm_method.constants[o_idx]).replace(".", "/")
+                if owner.startswith("L") and owner.endswith(";") and not owner.startswith("["):
+                    owner = owner[1:-1]
                 name = str(vm_method.constants[n_idx])
                 desc = str(vm_method.constants[d_idx])
                 cpi = cp_helper.add_fieldref(owner, name, desc)
                 buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF])
             elif fmt == "method":
                 o_idx, n_idx, d_idx, itf = operands[0], operands[1], operands[2], operands[3]
-                owner = str(vm_method.constants[o_idx])
+                owner = str(vm_method.constants[o_idx]).replace(".", "/")
+                if owner.startswith("L") and owner.endswith(";") and not owner.startswith("["):
+                    owner = owner[1:-1]
                 name = str(vm_method.constants[n_idx])
                 desc = str(vm_method.constants[d_idx])
                 if op == 0xB9:  # INVOKEINTERFACE
                     cpi = cp_helper.add_interface_methodref(owner, name, desc)
-                    # compute argument slot count
-                    argc = BC._arity(desc) + 1  # includes receiver
+                    argc = compute_interface_args_count(desc)
                     buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF, argc & 0xFF, 0x00])
                 else:
                     cpi = cp_helper.add_methodref(owner, name, desc)
@@ -607,12 +666,11 @@ class BVMTranslator:
                 n_idx, d_idx, b_idx, argc = operands[0], operands[1], operands[2], operands[3]
                 name = str(vm_method.constants[n_idx])
                 desc = str(vm_method.constants[d_idx])
-                # Minimal invokedynamic entry
-                cpi = cp_helper.add_name_and_type(name, desc)
+                cpi = cp_helper.add_invoke_dynamic(b_idx, name, desc)
                 buf.extend([0xBA, (cpi >> 8) & 0xFF, cpi & 0xFF, 0x00, 0x00])
             elif fmt == "multi_array":
                 t_idx, dims = operands[0], operands[1]
-                owner = str(vm_method.constants[t_idx])
+                owner = str(vm_method.constants[t_idx]).replace(".", "/")
                 cpi = cp_helper.add_class(owner)
                 buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF, dims & 0xFF])
             elif fmt == "jump":
@@ -751,14 +809,29 @@ class BVMTranslator:
         stats["widened_goto"] = widened_goto_count
         stats["widened_if"] = widened_if_count
 
+        computed_locals = max(vm_method.max_locals, 1)
+        for insn in instructions:
+            if insn.fmt == "var":
+                slot = insn.operands[0]
+                is_two_slot = insn.jvm_opcode in (0x16, 0x18, 0x37, 0x39)
+                needed = slot + (2 if is_two_slot else 1)
+                computed_locals = max(computed_locals, needed)
+            elif insn.fmt == "iinc":
+                computed_locals = max(computed_locals, insn.operands[0] + 1)
+        if vm_method.desc:
+            param_slots = compute_interface_args_count(vm_method.desc)
+            if vm_method.is_static:
+                param_slots -= 1
+            computed_locals = max(computed_locals, param_slots)
+
         return DevirtualizedResult(
             code_id=vm_method.code_id,
             name=vm_method.name,
             desc=vm_method.desc,
             bytecode=final_code,
             handlers=final_handlers,
-            max_stack=max(vm_method.max_stack, 4),
-            max_locals=max(vm_method.max_locals, 2),
+            max_stack=max(vm_method.max_stack, 8),
+            max_locals=computed_locals,
             instructions_count=len(instructions),
             stats=stats
         )
@@ -798,6 +871,45 @@ class BVMDevirtualizer:
         return struct.pack(">HI", code_attr_idx, attr_len) + body
 
     @classmethod
+    def set_code_attribute(cls, cf: CF.ClassFile, method: CF.Member, code_attr: bytes) -> None:
+        """Replace or add Code attribute in method, preserving all other attributes (e.g. annotations, signatures)."""
+        attrs: list[tuple[int, bytes]] = []
+        code_attr_name_idx = cf.intern_utf8("Code")
+        has_code = False
+
+        if method.attrs_blob and len(method.attrs_blob) >= 2:
+            count = struct.unpack_from(">H", method.attrs_blob, 0)[0]
+            p = 2
+            for _ in range(count):
+                if p + 6 > len(method.attrs_blob):
+                    break
+                ni = struct.unpack_from(">H", method.attrs_blob, p)[0]
+                alen = struct.unpack_from(">I", method.attrs_blob, p + 2)[0]
+                p += 6
+                if p + alen > len(method.attrs_blob):
+                    break
+                adata = method.attrs_blob[p:p + alen]
+                p += alen
+
+                if ni < len(cf.cp) and cf.utf8(ni) == "Code":
+                    new_alen = struct.unpack_from(">I", code_attr, 2)[0]
+                    new_adata = code_attr[6:6 + new_alen]
+                    attrs.append((code_attr_name_idx, new_adata))
+                    has_code = True
+                else:
+                    attrs.append((ni, adata))
+
+        if not has_code:
+            new_alen = struct.unpack_from(">I", code_attr, 2)[0]
+            new_adata = code_attr[6:6 + new_alen]
+            attrs.append((code_attr_name_idx, new_adata))
+
+        out = bytearray(struct.pack(">H", len(attrs)))
+        for ni, adata in attrs:
+            out += struct.pack(">HI", ni, len(adata)) + adata
+        method.attrs_blob = bytes(out)
+
+    @classmethod
     def devirtualize_class_file(
         cls,
         cf: CF.ClassFile,
@@ -825,8 +937,8 @@ class BVMDevirtualizer:
                 result.handlers
             )
 
-            # Replace method's attributes with new Code attribute (1 attribute)
-            method.attrs_blob = struct.pack(">H", 1) + code_attr
+            # Preserve all non-Code attributes (annotations, signatures, exceptions)
+            cls.set_code_attribute(cf, method, code_attr)
             devirtualized_count += 1
 
         return cf, devirtualized_count
@@ -879,6 +991,42 @@ class BVMDevirtualizer:
         return None
 
     @classmethod
+    def scan_jar_code_pool(cls, input_jar: Path) -> dict[int, BVMMethod]:
+        """Auto-scan JAR for BytecodeVM CodePool static initialization tables."""
+        from . import clinit_sim as CS
+        pool: dict[int, BVMMethod] = {}
+        try:
+            with zipfile.ZipFile(input_jar, "r") as zin:
+                for item in zin.infolist():
+                    if not item.filename.endswith(".class"):
+                        continue
+                    if "CodePool" in item.filename or "Program" in item.filename:
+                        try:
+                            cf = CF.parse(zin.read(item.filename))
+                            fields, _ = CS.collect_fields(cf)
+                            op_streams = None
+                            consts = []
+                            for f_name, f_val in fields.items():
+                                if "OPCODE" in f_name.upper() or "STREAM" in f_name.upper():
+                                    rows = CS.rows_of(f_val)
+                                    if rows:
+                                        op_streams = rows
+                                elif "CONST" in f_name.upper():
+                                    c_rows = CS.rows_of(f_val)
+                                    if c_rows:
+                                        consts = c_rows
+
+                            if op_streams:
+                                for idx, row in enumerate(op_streams):
+                                    c_list = consts[idx] if idx < len(consts) and isinstance(consts[idx], list) else []
+                                    pool[idx] = BVMMethod(code_id=idx, code=row, constants=c_list)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return pool
+
+    @classmethod
     def devirtualize_jar(
         cls,
         input_jar: Path,
@@ -887,6 +1035,12 @@ class BVMDevirtualizer:
     ) -> dict[str, Any]:
         """Devirtualize an entire JAR archive using provided code_pool."""
         output_jar.parent.mkdir(parents=True, exist_ok=True)
+        working_pool = dict(code_pool)
+        if not working_pool:
+            scanned = cls.scan_jar_code_pool(input_jar)
+            if scanned:
+                working_pool.update(scanned)
+
         total_classes = 0
         devirtualized_classes = 0
         total_methods = 0
@@ -898,7 +1052,7 @@ class BVMDevirtualizer:
                     total_classes += 1
                     try:
                         cf = CF.parse(data)
-                        cf, count = cls.devirtualize_class_file(cf, code_pool)
+                        cf, count = cls.devirtualize_class_file(cf, working_pool)
                         if count > 0:
                             devirtualized_classes += 1
                             total_methods += count

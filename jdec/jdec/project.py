@@ -165,7 +165,7 @@ def sanitize_keyword_identifiers(source_code: str) -> tuple[str, int]:
                 edits += 1
 
             # Pattern 2: Assignment / declaration, e.g. goto = 5; or int goto;
-            p_assign = re.compile(r"(\b(?:private|protected|public)?\s*(?:static\s+)?(?:final\s+)?(?:int|long|float|double|boolean|char|String|Object)\s+)\b(" + kw + r")\b(\s*[;=])")
+            p_assign = re.compile(r"(\b(?:private|protected|public)?\s*(?:static\s+)?(?:final\s+)?" + types_pat + r"\s+)\b(" + kw + r")\b(\s*[;=])")
             if p_assign.search(mod_line):
                 mod_line = p_assign.sub(r"\1\2_\3", mod_line)
                 edits += 1
@@ -693,7 +693,10 @@ def verify_compilation(
             cmd = [javac_resolved, "-J-Duser.language=en", "-encoding", "UTF-8", "-d", str(tmp_classes)]
             if cp_arg:
                 cmd.extend(["-cp", cp_arg])
-            cmd.extend(str(f) for f in java_files)
+            # Use argfile for sources to prevent Windows command line 32KB overflow
+            sources_file = tmp_classes / "sources.txt"
+            sources_file.write_text("\n".join(f'"{f.resolve().as_posix()}"' for f in java_files), encoding="utf-8")
+            cmd.append(f"@{sources_file}")
 
             proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
             output = (proc.stderr or "") + (proc.stdout or "")
@@ -821,6 +824,7 @@ def verify_compilation(
                     try:
                         code_txt = file_path.read_text(encoding="utf-8", errors="replace")
                         for imp_match in re.finditer(r"import\s+([\w.]+)\.([A-Za-z0-9_$]+);", code_txt):
+                            pkg_name, cls_name = imp_match.groups()
                             is_missing_pkg = (
                                 f"package {pkg_name} does not exist" in output
                                 or f"程序包 {pkg_name} 不存在" in output

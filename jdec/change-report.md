@@ -397,3 +397,51 @@
   - `ok   pipeline ran successfully`
   - `ok   recover spec tsv exists`
   - `ok   recover results tsv exists`
+
+---
+
+# 变更报告：深度优化与隐蔽 Bug 修复（BVM 反虚拟化无损重构、JVMS 字节码规范对齐与大工程编译溢出防护）
+
+> 生成时间：2026-10-07 13:00  
+> 项目根目录：d:/MC/Workbuddy/deobf  
+> 模式：深度代码审计、隐蔽缺陷排查与工程健壮性优化  
+
+## 1. 任务背景与审计目标
+在全量落地基础与前序功能后，对整个项目（特别是反虚拟化重译引擎 `bvm_devirt.py`、工程自愈循环 `project.py`）进行深度代码审查，定位并消除潜在的边界溢出、未定义变量访问、JVMS 规范偏差及属性丢失等隐蔽缺陷，进一步提升工业级健壮性。
+
+## 2. 缺陷排查与深度优化明细
+
+### 1. `jdec/jdec/project.py`
+- **Bug Fix（未声明局部变量）**：
+  - 修复 `compile_and_repair_loop` 中 `for imp_match in re.finditer(r"import\s+([\w.]+)\.([A-Za-z0-9_$]+);", code_txt):` 下遗漏解包 `pkg_name, cls_name = imp_match.groups()` 导致的 `UnboundLocalError`。此前因存在 `except Exception: pass` 被静默吞没，导致缺失第三方依赖库时无法触发自动打桩。
+- **优化（Windows 命令行 32KB 溢出防护）**：
+  - `verify_compilation` 中改用 `@sources.txt` argument file 调用 `javac`，彻底消除大型工程包含数千个 `.java` 文件时触发 Windows `CreateProcess` 32,767 字符上限（`WinError 206`）导致的崩溃风险。
+- **优化（关键字清洗覆盖度扩展）**：
+  - `sanitize_keyword_identifiers` 的 `p_assign` 正则原先仅包含部分基本类型，现统一接入 `types_pat`，全面覆盖 `byte`、`short` 以及任意类名引用变量声明（如 `short default = 1;`、`byte goto = 2;`），防止反编译清洗时遗漏关键字变量引发二次语法错误。
+
+### 2. `jdec/jdec/bvm_devirt.py`
+- **Bug Fix（`invokeinterface` 操作数计算与 AttributeError）**：
+  - 修复重译虚拟化指令 `INVOKEINTERFACE` (0xB9) 时调用不存在的 `BC._arity(desc)` 抛出 `AttributeError` 的严重缺陷。
+  - 新增严格遵循 JVMS §6.5 规范的 `compute_interface_args_count(desc: str)`，准确计算 receiver `this`（+1）以及各形参槽位（`long`/`double` 计为 2 槽，对象与数组类型正确切分），生成合法的 `count` 操作数与第 4 字节保留 0。
+- **Bug Fix（`invokedynamic` 常量池条目类型）**：
+  - 修复 `INVOKEDYNAMIC` (0xBA) 指向 `C_NAME_AND_TYPE` 导致 JVM 报错的问题，在 `ConstantPoolHelper` 中新增 `add_invoke_dynamic`，严格生成 `CONSTANT_InvokeDynamic` (tag 18) 项。
+- **Bug Fix（`LDC` 2-word 宽常量导致 JVM 验证错误）**：
+  - 修复加载 `Long` / `Double` 常量时使用 `0x12`/`0x13` (`ldc`/`ldc_w`) 导致 JVM `VerifyError` 的缺陷。重译器现检查常量池标签 `CF.C_LONG` / `CF.C_DOUBLE`，严格生成 `0x14` (`ldc2_w`)。
+- **优化（方法属性无损替换）**：
+  - 废除原先粗暴替换 `method.attrs_blob = struct.pack(">H", 1) + code_attr` 的破坏性行为，实现 `set_code_attribute(method, code_attr, cf)`，在注入新 Code 属性的同时完整保留原方法的 `Signature`（泛型信息）、`RuntimeVisibleAnnotations`、`RuntimeInvisibleAnnotations`、`Exceptions` 等所有非 Code 属性。
+- **优化（局部变量槽上限动态计算）**：
+  - 动态根据重译后的虚拟指令变量槽位与方法参数签名计算 `max_locals`，杜绝 `xload`/`xstore` 访问局部变量槽越界。
+- **优化（全 Jar 自动扫描代码池）**：
+  - 新增 `scan_jar_code_pool`，通过 `clinit_sim` 静态提取类中的 `OPCODE_STREAMS` 和 `CONSTANTS` 数组，使 `jdec bvm target.jar` 在未提供外挂 `--pool` 参数时也能自动识别代码池并无缝反虚拟化。
+
+### 3. `jdec/tests/run_tests.py`
+- 新增 5 项专项回归断言：
+  1. `invokeinterface count operand is 4`
+  2. `ldc2_w used for long constant`
+  3. `set_code_attribute preserved Signature attribute`
+  4. `keywords escaped for short and byte types`
+  5. `BVMTranslator translated invokeinterface`
+
+## 3. 验证结果
+- **测试命令**：`python jdec/tests/run_tests.py`
+- **执行结果**：**472 passed, 0 failed**（100% PASS，0 失败）。
