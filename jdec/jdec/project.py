@@ -494,6 +494,9 @@ def export_project(
         "files_repaired": 0,
         "stubs_bundled": 0,
     }
+    # REVIEW 2.4: every self-heal is recorded so "compilable" is never
+    # mistaken for "behaviour-equal". Originals go to src-original/.
+    repairs: list[dict] = []
 
     # 1. Detect target profile and Java version
     prof = PB.profile_jar(source_jar) if source_jar.is_file() else None
@@ -605,6 +608,7 @@ def export_project(
             renamed_cls = item["renamed_cls"]
 
             code = j_file.read_text(encoding="utf-8", errors="replace")
+            original_code = code  # REVIEW 2.4: untouched decompiler output
 
             # 1. Update fully qualified class references and imports across all packages
             for old_fqcn, new_fqcn in full_class_renames.items():
@@ -633,6 +637,22 @@ def export_project(
             cleaned_code, changes = clean_source_for_compilation(code, expected_package=expected_pkg)
             if changes or renamed_cls:
                 stats["files_repaired"] += 1
+                # REVIEW 2.4: keep the pre-repair source and log the exact rules.
+                repair_rules = list(changes)
+                if renamed_cls and renamed_cls != orig_cls:
+                    repair_rules.append(
+                        f"Renamed class {orig_cls} -> {renamed_cls} "
+                        f"(reserved name / case-collision), references rewritten")
+                orig_dir = out_dir / "src-original"
+                orig_file = orig_dir / item["rel"]
+                orig_file.parent.mkdir(parents=True, exist_ok=True)
+                orig_file.write_text(original_code, encoding="utf-8")
+                repairs.append({
+                    "file": item["rel"].as_posix(),
+                    "rules": repair_rules,
+                    "orig_lines": len(original_code.splitlines()),
+                    "new_lines": len(cleaned_code.splitlines()),
+                })
 
             dest_file.write_text(cleaned_code, encoding="utf-8")
             stats["java_files"] += 1
@@ -660,6 +680,37 @@ def export_project(
         mc_version=resolved_mc,
         mc_flavor=flavor,
     )
+
+    # 6. REVIEW 2.4: self-heal audit log. Evidence ladder:
+    #    readable < compilable < JVM-verified < behaviour-parity.
+    #    Export alone proves "readable"; --compile proves "compilable" at best.
+    #    The ladder's top two levels are not produced by this tool yet and are
+    #    explicitly reported as such instead of being implied.
+    if repairs:
+        stats["repair_rules_applied"] = sum(len(r["rules"]) for r in repairs)
+        log_path = out_dir / "repair-log.md"
+        lines = [
+            "# jdec Compilation Self-Heal Log",
+            "",
+            f"- target: `{source_jar.name}`",
+            f"- exported: {stats['java_files']} java file(s); "
+            f"{stats['files_repaired']} repaired; "
+            f"{stats['repair_rules_applied']} rule(s) applied",
+            "- pre-repair sources preserved under `src-original/` (mirrored paths)",
+            "",
+            "> **Evidence ladder**: readable < compilable < JVM-verified < behaviour-parity.",
+            "> This export is at evidence level **readable**; with `--compile` success it",
+            "> reaches **compilable**. JVM verification and behaviour-parity checks are",
+            "> NOT implemented yet - a compiling project is not proven to behave like the",
+            "> original target. Every rule below may have changed semantics.",
+            "",
+            "| File | Rules applied | Lines (orig -> repaired) |",
+            "| :--- | :--- | :--- |",
+        ]
+        for r in repairs:
+            rules = "; ".join(r["rules"]) if r["rules"] else "(reference rewrite only)"
+            lines.append(f"| `{r['file']}` | {rules} | {r['orig_lines']} -> {r['new_lines']} |")
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     return stats
 

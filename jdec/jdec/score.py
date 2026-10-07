@@ -3,9 +3,19 @@
 The whole point of running several engines is being able to tell which one
 actually won. Guessing from file size or line count is worthless, so we use
 the class file itself as the answer key: every field and method that exists in
-the bytecode should show up as an identifier in the source. A method that the
+the bytecode should show up as a *declaration* in the source. A method that the
 decompiler dropped, or that collapsed into "// couldn't be decompiled", simply
 will not appear.
+
+Matching discipline (REVIEW-2026-10-07 §1.1):
+  * comments and string/char literals are stripped before matching, so an
+    engine note listing the real member names cannot fake a recovery;
+  * only declaration-shaped occurrences count - a call site `foo(x);` is a
+    reference, not proof the member was recovered;
+  * same-name overloads are counted individually, so recovering one of two
+    overloads no longer scores as a perfect recovery.
+The metric is therefore a member *name-hit* rate (COVERAGE_METRIC), not a
+signature-recovery rate, and reports label it as such.
 """
 
 from __future__ import annotations
@@ -16,6 +26,68 @@ from dataclasses import dataclass, field
 from .classfile import ClassFile
 
 _IDENT_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+# What `coverage` honestly measures, used verbatim in reports: a member counts
+# as recovered when a *declaration-shaped* occurrence of its name survives in
+# the output. It is a name-hit rate, not a signature-recovery rate.
+COVERAGE_METRIC = "member name-hit rate"
+
+# Java reserved words that must never be read as a declaration's return type
+# (they are how call statements imitate declarations: "return foo(x);").
+_NON_TYPE_KEYWORDS = (
+    "new|return|if|else|for|while|do|switch|case|break|continue|throw|throws|"
+    "try|catch|finally|assert|instanceof|import|package|extends|implements|"
+    "this|super|yield|sealed|permits|record|var|enum|interface|class"
+)
+_MODS = r"(?:public|protected|private|static|final|abstract|synchronized|native|strictfp|default|transient|volatile)"
+_ANN = r"@[\w$.]+(?:\((?:[^()]|\([^()]*\))*\))?"
+_GEN = r"<[^<>]*(?:<[^<>]*>[^<>]*)*>"
+_TYPE = (
+    r"(?!(?:" + _NON_TYPE_KEYWORDS + r")\b)"
+    r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"
+    r"(?:" + _GEN + r")?(?:\[\])*"
+)
+_PREFIX = r"(?:^|[{};])[ \t]*(?:(?:" + _ANN + r")\s*)*"
+
+# A method declaration: modifiers and/or a return type, then NAME(...), then
+# `{` (body) or `;` (abstract/interface/native). A bare call `foo(x);` has
+# neither modifier nor type in front of the name, so it does not match.
+# Terminators are lookaheads on purpose: consuming them would eat the very
+# separator the next one-line declaration needs as its prefix.
+_GENS = r"(?:" + _GEN + r")\s+"   # a generic parameter segment, e.g. <T extends C<T>>
+_METHOD_DECL_RE = re.compile(
+    _PREFIX
+    + r"(?:(?:" + _MODS + r"\s+)+" + r"(?:" + _GENS + r")*" + r"(?:" + _TYPE + r"\s+)?"
+    + r"|(?:^|[{};])[ \t]*(?:(?:" + _ANN + r")\s*)*(?:" + _MODS + r"\s+)*(?:" + _GENS + r")*"
+    + _TYPE + r"\s+)"
+    + r"(?P<name>[A-Za-z_$][\w$]*)[ \t]*\("
+    + r"[^;{)]*(?:\([^)]*\)[^;{)]*)*"
+    + r"\)[ \t]*(?:throws\s+[\w$.,\s]+?)?(?=[;{])"
+    , re.M
+)
+
+# A field declaration: a type (mandatory - bare assignments like `x = y;` are
+# statements, not declarations) then NAME followed by `=`, `;` or `,`. `,` is
+# both a separator and a prefix so multi-declarator lines count every name.
+_FIELD_DECL_RE = re.compile(
+    r"(?:^|[{};,])[ \t]*(?:(?:" + _ANN + r")\s*)*(?:" + _MODS + r"\s+)*(?:" + _GENS + r")*"
+    + _TYPE + r"\s+(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:\[\])*(?=[=;,])"
+    , re.M
+)
+
+# Enum constants are fields in bytecode: `enum Color { RED, GREEN; ... }`
+_ENUM_RE = re.compile(
+    r"\benum\s+[\w$]+\s*(?:" + _GEN + r")?(?:\s+implements\s+[\w$.,\s]+)?\{([^{}]*)")
+# Record components are fields in bytecode: `record Point(int x, int y) {}`
+_RECORD_RE = re.compile(r"\brecord\s+[\w$]+\s*\(([^)]*)\)")
+
+_JAVA_KEYWORDS_FOR_DECLS = set(
+    "abstract assert boolean break byte case catch char class const continue "
+    "default do double else enum extends final finally float for goto if "
+    "implements import instanceof int interface long native new package "
+    "private protected public return short static strictfp super switch "
+    "synchronized this throw throws transient try void volatile while "
+    "true false null var record sealed permits yield".split())
 
 # phrases that mean the engine gave up on at least part of the class
 _HARD_ERROR_PATTERNS = [
@@ -59,6 +131,16 @@ _SUGAR_PATTERNS = {
 
 @dataclass
 class Quality:
+    """Scoring result for one engine's output against the bytecode answer key.
+
+    `coverage` is a **member name-hit rate** (see COVERAGE_METRIC): the share
+    of bytecode members whose name shows up in a *declaration position* of the
+    output, with comments and string literals stripped first and same-name
+    overloads counted individually. It is deliberately not labelled a
+    signature-recovery rate - a regex cannot read descriptors out of Java
+    source reliably, and an honest metric beats a flattering one.
+    """
+
     score: float
     coverage: float
     matched: int
@@ -117,9 +199,106 @@ def _hard_error_spans(src: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _strip_noise(src: str) -> str:
+    """Blank comments and string/char literals, preserving length and lines.
+
+    Coverage matching must not be fooled by identifiers that only live in a
+    comment (an engine note listing the real member names) or inside a string
+    literal (encrypted pool payloads), so member matching runs over this
+    sanitised text. Newlines survive so `^`-anchored scans stay aligned.
+    """
+    out = list(src)
+    n = len(src)
+
+    def blank(a: int, b: int) -> None:
+        for k in range(a, min(b, n)):
+            if out[k] not in "\r\n":
+                out[k] = " "
+
+    i = 0
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = src.find("\n", i)
+            e = n if j < 0 else j
+            blank(i, e)
+            i = e
+        elif c == "/" and nxt == "*":
+            j = src.find("*/", i + 2)
+            e = n if j < 0 else j + 2
+            blank(i, e)
+            i = e
+        elif c == '"':
+            if src[i:i + 3] == '"""':            # text block
+                j = src.find('"""', i + 3)
+                e = n if j < 0 else j + 3
+                blank(i, e)
+                i = e
+                continue
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                elif src[j] == '"':
+                    j += 1
+                    break
+                else:
+                    j += 1
+            else:
+                j = n
+            blank(i, j)
+            i = j
+        elif c == "'":                           # char literal
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                elif src[j] == "'":
+                    j += 1
+                    break
+                else:
+                    j += 1
+            else:
+                j = n
+            blank(i, j)
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _decl_counts(stripped: str) -> dict[str, int]:
+    """How many times each identifier appears in declaration position.
+
+    Counts method declarations (`public void foo(...) {`), field declarations
+    (`int foo;`), enum constants and record components. A call site `foo(x);`
+    is a reference, not a declaration, and never counts.
+    """
+    counts: dict[str, int] = {}
+    for m in _METHOD_DECL_RE.finditer(stripped):
+        counts[m.group("name")] = counts.get(m.group("name"), 0) + 1
+    for m in _FIELD_DECL_RE.finditer(stripped):
+        counts[m.group("name")] = counts.get(m.group("name"), 0) + 1
+    for em in _ENUM_RE.finditer(stripped):
+        body = em.group(1)
+        head = body.split(";", 1)[0]
+        for ident in _IDENT_RE.findall(head):
+            if ident not in _JAVA_KEYWORDS_FOR_DECLS:
+                counts[ident] = counts.get(ident, 0) + 1
+    for rm in _RECORD_RE.finditer(stripped):
+        for part in rm.group(1).split(","):
+            idents = _IDENT_RE.findall(part)
+            if idents and idents[-1] not in _JAVA_KEYWORDS_FOR_DECLS:
+                counts[idents[-1]] = counts.get(idents[-1], 0) + 1
+    return counts
+
+
 def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Quality:
     floor = min_name_len if min_name_len is not None else _member_name_floor(cf)
-    idents = set(_IDENT_RE.findall(src))
+    stripped = _strip_noise(src)
+    idents = set(_IDENT_RE.findall(stripped))
+    decls = _decl_counts(stripped)
 
     # javac synthesises these for records/enums; their absence from the source
     # is normal, not a recovery failure
@@ -129,17 +308,21 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
     elif cf.super_name == "java/lang/Enum":
         synthesized |= {"equals", "hashCode", "toString", "values", "valueOf"}
 
-    candidates: set[str] = set()
+    # candidates carry their per-name multiplicity: two same-name overloads
+    # are two candidates, so a source that recovers only one of them no
+    # longer scores a perfect coverage (§1.1 of REVIEW-2026-10-07)
+    method_cands: dict[str, int] = {}
     for n, _d in cf.method_sigs():
         if n.startswith("<") or n in synthesized:
             continue
         if len(n) >= floor:
-            candidates.add(n)
+            method_cands[n] = method_cands.get(n, 0) + 1
+    field_cands: dict[str, int] = {}
     for n, _d in cf.field_sigs():
         if n.startswith("<"):
             continue
         if len(n) >= floor:
-            candidates.add(n)
+            field_cands[n] = field_cands.get(n, 0) + 1
 
     # constructors appear under the class's own simple name; when a nested
     # class is printed as `static class c` (name lost) or folded into its
@@ -148,8 +331,9 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
     segments = [p for p in cf.name.rsplit("/", 1)[-1].split("$") if len(p) >= floor]
     ctor_ok = (not has_init) or any(p in idents for p in segments)
 
-    total = len(candidates)
-    matched = len(candidates & idents)
+    total = sum(method_cands.values()) + sum(field_cands.values())
+    matched = sum(min(k, decls.get(n, 0)) for n, k in method_cands.items())
+    matched += sum(min(k, decls.get(n, 0)) for n, k in field_cands.items())
     coverage = (matched / total) if total else 1.0
 
     hard_error = any(p.search(src) for p in _HARD_ERROR_PATTERNS)
@@ -191,7 +375,9 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
     if unbalanced:
         issues.append(f"unbalanced braces ({opens} '{'{'}' vs {closes} '{'}'}')")
     if total and coverage < 1.0:
-        missing = sorted(candidates - idents)
+        shortfall = {n: k for n, k in method_cands.items() if decls.get(n, 0) < k}
+        shortfall.update({n: k for n, k in field_cands.items() if decls.get(n, 0) < k})
+        missing = sorted(shortfall)
         if len(missing) <= 6:
             issues.append("missing members: " + ", ".join(missing))
         else:

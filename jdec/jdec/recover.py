@@ -266,6 +266,82 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
     return spec_path, n_sites, n_skip
 
 
+def code_mask(txt: str) -> list[bool]:
+    """Java 源码词法区域标记：逐字符标记是否处于"代码区"。
+
+    行注释 //、块注释 /* */、字符串 "..."、字符 '...' 内的字符一律
+    False（含转义序列与结尾定界符）。供源码改写器（recover/pool）跳过
+    注释与字面量——注释里的示例调用、字符串里恰好同形的文案都不是
+    真实调用点，替换它们会污染源码并让 verify 统计虚高。
+
+    限制：不处理 Java 15+ text block（三引号），反编译器输出中罕见；
+    遇到未闭合注释/字符串时把剩余字符全部标 False（保守方向正确）。
+    """
+    n = len(txt)
+    mask = [True] * n
+    i = 0
+    state = "code"  # code | line_c | block_c | str | char
+    while i < n:
+        c = txt[i]
+        nxt = txt[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if c == "/" and nxt == "/":
+                state = "line_c"
+                mask[i] = mask[i + 1] = False
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                state = "block_c"
+                mask[i] = mask[i + 1] = False
+                i += 2
+                continue
+            if c == '"':
+                state = "str"
+                mask[i] = False
+                i += 1
+                continue
+            if c == "'":
+                state = "char"
+                mask[i] = False
+                i += 1
+                continue
+            i += 1
+        elif state == "line_c":
+            mask[i] = False
+            if c == "\n":
+                state = "code"
+            i += 1
+        elif state == "block_c":
+            mask[i] = False
+            if c == "*" and nxt == "/":
+                mask[i + 1] = False
+                state = "code"
+                i += 2
+                continue
+            i += 1
+        elif state == "str":
+            mask[i] = False
+            if c == "\\":
+                if i + 1 < n:
+                    mask[i + 1] = False
+                i += 2
+                continue
+            if c == '"':
+                state = "code"
+            i += 1
+        else:  # char
+            mask[i] = False
+            if c == "\\":
+                if i + 1 < n:
+                    mask[i + 1] = False
+                i += 2
+                continue
+            if c == "'":
+                state = "code"
+            i += 1
+    return mask
+
+
 def java_escape(s: str) -> str:
     """把明文转成 Java 字符串字面量的内容（不含首尾引号）。
 
@@ -367,6 +443,44 @@ def norm_classpath(cp: str) -> str:
                   chr(92) + r"1" + chr(92) + r"2:/", cp)
 
 
+class ReplayNotAllowed(RuntimeError):
+    """动态重放被安全闸门拒绝（默认拒绝，需显式 allow_exec）。"""
+
+
+def run_replay(cmd: list[str], timeout: int, **popen_kw) -> subprocess.CompletedProcess:
+    """Run a replay JVM; on timeout kill the WHOLE process tree.
+
+    subprocess.run(只杀直接子进程) leaves grandchildren alive when the JVM
+    spawned helpers; the replay executes untrusted target code, so the kill
+    must cover the tree. Returns CompletedProcess with a `timed_out` attribute.
+    """
+    popen_kw.setdefault("stdout", subprocess.PIPE)
+    popen_kw.setdefault("stderr", subprocess.PIPE)
+    proc = subprocess.Popen(cmd, **popen_kw)
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True)
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL the group
+            except Exception:
+                proc.kill()
+        try:
+            out, err = proc.communicate(timeout=30)
+        except Exception:
+            out, err = b"", b""
+    r = subprocess.CompletedProcess(cmd, 1 if timed_out else proc.returncode,
+                                    out if out is not None else "",
+                                    err if err is not None else "")
+    r.timed_out = timed_out  # type: ignore[attr-defined]
+    return r
+
+
 def ingest_frida_tsv(tsv_path: Path) -> dict[tuple[str, str], str]:
     """把外部 Frida 动态转储 TSV 吸收为 (cipher, seed) -> plain 映射。
 
@@ -459,9 +573,14 @@ def rewrite_sources(src_dir: Path, tsv_path: Path | None = None,
         if not pat.search(txt):
             continue
         n_files += 1
+        mask = code_mask(txt)
 
         def sub(m: "re.Match") -> str:
             nonlocal replaced, missed
+            if not mask[m.start()]:
+                # 匹配起点落在注释/字符串内：不是真实调用点，原样保留
+                # （不计 replaced 也不计 missed，residual 同口径跳过）
+                return m.group(0)
             key = (m.group(2), m.group(3))
             if key in plain_map:
                 replaced += 1
@@ -477,8 +596,11 @@ def rewrite_sources(src_dir: Path, tsv_path: Path | None = None,
             return m.group(0)
 
         new = pat.sub(sub, txt)
+        # residual verify 只看代码区（对 new 重算 mask：替换会改变长度偏移）
+        new_mask = code_mask(new)
         residual += sum(1 for m in pat.finditer(new)
-                        if (m.group(2), m.group(3)) not in plain_map)
+                        if new_mask[m.start()]
+                        and (m.group(2), m.group(3)) not in plain_map)
         if new != txt:
             path.write_text(new, encoding="utf-8")
     # 可执行断言（编码卫生）：本次写入的字面量必须无裸控制字节——
@@ -498,7 +620,14 @@ def rewrite_sources(src_dir: Path, tsv_path: Path | None = None,
 def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             limit: int = 0, stop_on_error: bool = False,
             cp_file: Path | None = None, timeout: int = 1800,
-            with_stubs: bool = True, from_frida: Path | None = None) -> int:
+            with_stubs: bool = True, from_frida: Path | None = None,
+            allow_exec: bool = False) -> int:
+    """自洽重放解密。allow_exec=False（默认）只做静态分析：生成 spec 即停，
+    不启动任何 JVM。重放会**真实执行目标 jar 里的代码**——MockAgent 桩化、
+    超时、-Xverify:none 都只是加载兜底，不是副作用隔离——所以必须显式开启。
+
+    返回码：0=有产出；1=跑过但无明文；3=被安全闸门拦下（仅静态部分完成）。
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     sep = ";" if os.name == "nt" else ":"
     agent_jvm_arg = ""
@@ -531,12 +660,19 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
     print(f"spec      : {n_sites} sites ({n_skip} skipped: args not statically "
           f"recoverable) -> {spec_path.name}")
 
+    if not allow_exec:
+        print("NOTICE    : dynamic replay EXECUTES code from the target jar "
+              "(clinit/decryptors run with this process's permissions).")
+        print("            Default is static analysis only: spec written, no "
+              "JVM started. Pass --execute (CLI) or allow_exec=True to run it.")
+        return 3
+
     src = out_dir / "RecoverDriver.java"
     src.write_text(DRIVER_JAVA, encoding="utf-8")
     from . import stubs as SB
     javac_cmd = SB._find_javac("javac")
     r = subprocess.run([javac_cmd, "-d", str(out_dir), str(src)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, errors="replace")
     if r.returncode != 0:
         print("javac failed:\n" + str(r.stderr or r.stdout or "")[-2000:])
         return 1
@@ -555,21 +691,15 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
     argsfile.write_text(
         head + agent_jvm_arg + native_jvm_arg + f'-Xverify:none\n-cp "{cp_line}"\nRecoverDriver\n"{spec_path.as_posix()}"\n',
         encoding="utf-8")
-    try:
-        r = subprocess.run([java, "@" + str(argsfile)], capture_output=True,
-                           text=True, errors="replace", timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        # 每站点真解密的代价可能远超默认 30 分钟（6516 站点实测 ~35min）。
-        # 超时不扔掉已产出：kill 后把部分输出照常收割，调用方按需加大 --timeout。
+    # 每站点真解密的代价可能远超默认 30 分钟（6516 站点实测 ~35min）。
+    # 超时不扔掉已产出：kill（含整个进程树）后把部分输出照常收割，
+    # 调用方按需加大 --timeout。
+    r = run_replay([java, "@" + str(argsfile)], timeout=timeout,
+                   text=True, errors="replace")
+    if getattr(r, "timed_out", False):
         print(f"WARNING  : driver killed at {timeout}s timeout "
-              f"(partial output kept; rerun with --timeout N)")
-        r = subprocess.CompletedProcess(e.cmd, 1,
-                                        stdout=e.stdout or "",
-                                        stderr=e.stderr or "")
-        if isinstance(r.stdout, bytes):
-            r.stdout = r.stdout.decode("utf-8", "replace")
-        if isinstance(r.stderr, bytes):
-            r.stderr = r.stderr.decode("utf-8", "replace")
+              f"(whole process tree terminated; partial output kept; "
+              f"rerun with --timeout N)")
     (out_dir / "driver.log").write_text(r.stderr[-4000:], encoding="utf-8")
 
     ok, fail, skip, ref = 0, 0, 0, 0

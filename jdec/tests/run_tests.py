@@ -35,16 +35,22 @@ from build_fixtures import ensure_collide_jar  # noqa: E402
 from jdec import analyze as AZ        # noqa: E402
 from jdec import annotations as AN    # noqa: E402
 from jdec import bytecode as BC       # noqa: E402
+from jdec import callgraph as CG      # noqa: E402
 from jdec import classfile as CF      # noqa: E402
+from jdec import devirt as DV         # noqa: E402
 from jdec import indy as INDY        # noqa: E402
 from jdec import cli as CL           # noqa: E402
 from jdec import mappings as MP       # noqa: E402
 from jdec import mcmod as MM          # noqa: E402
 from jdec import obf as OB            # noqa: E402
+from jdec import pipeline as PIPE     # noqa: E402
+from jdec import pool as PL           # noqa: E402
 from jdec import project as PJ        # noqa: E402
+from jdec import recover as RC        # noqa: E402
+from jdec import score as SCORE       # noqa: E402
 from jdec import strings as ST        # noqa: E402
 from jdec.decompile import _iso_buckets, decompile, write_report  # noqa: E402
-from jdec.probe import profile_jar    # noqa: E402
+from jdec.probe import JarProfile, profile_jar    # noqa: E402
 from jdec.score import evaluate       # noqa: E402
 
 SAMPLE = ROOT / "tests" / "sample.jar"
@@ -1143,11 +1149,12 @@ def test_pool_roundtrip() -> None:
         r = subprocess.run(["javac", "-d", str(cls_dir),
                             str(src / "pkg" / "Sample.java"),
                             str(src / "pkg" / "User.java")],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
         check("fixture javac", r.returncode == 0, r.stderr[-300:])
         hv = d / "pool_work" / "pool_harvest.tsv"
+        # REVIEW 2.1: replay is opt-in now; this fixture is locally built.
         rc = cli_main(["pool", "harvest", str(spec), "-o", str(hv),
-                       "--cp", str(cls_dir)])
+                       "--cp", str(cls_dir), "--execute"])
         rows = ([l.split(chr(9)) for l in hv.read_text(encoding="utf-8",
                                                        errors="replace")
                  .splitlines()] if hv.exists() else [])
@@ -1200,7 +1207,7 @@ def test_web_template_js() -> None:
         p = Path(td) / "inline.js"
         p.write_text(js, encoding="utf-8")
         r = subprocess.run([node, "--check", str(p)],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
         check("inline JS is syntactically valid", r.returncode == 0,
               (r.stderr or r.stdout or "")[-400:])
 
@@ -1342,12 +1349,12 @@ def test_ops_pool() -> None:
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         r = subprocess.run([sys.executable, str(gen)], cwd=tdp,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             check("fixture generated", False, r.stderr[-200:])
             return
         r = subprocess.run([javac, "OpsPoolFixture.java"], cwd=tdp,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, errors="replace")
         check("fixture compiled", r.returncode == 0, r.stderr[-200:])
         jar = tdp / "ops_fixture.jar"
         subprocess.run(["jar", "cf", jar.name, "OpsPoolFixture.class"],
@@ -1403,7 +1410,7 @@ def test_clinit_sim() -> None:
         (tdp / "ClinitSimFixture.java").write_text(src, encoding="utf-8")
         r = subprocess.run([javac, "-d", str(tdp),
                             str(tdp / "ClinitSimFixture.java")],
-                           check=True, capture_output=True, text=True)
+                           check=True, capture_output=True, text=True, errors="replace")
         check("fixture compiled", r.returncode == 0, r.stderr[-200:])
         cf = CFM.parse((tdp / "ClinitSimFixture.class").read_bytes())
         fields, unknown = CS.collect_fields(cf)
@@ -1796,6 +1803,9 @@ def test_pipeline_automation() -> None:
             out_dir,
             no_deflat=False,
             no_recover=False,
+            # REVIEW 2.1: replay now opts in explicitly; this fixture is a
+            # locally-built benign jar, so executing it is safe.
+            allow_replay=True,
             export_project=True,
             clean_work=False,
         )
@@ -1806,6 +1816,18 @@ def test_pipeline_automation() -> None:
         check("analysis markdown exists", (out_dir / "analysis.md").is_file())
         check("strings tsv exists", (out_dir / "strings.tsv").is_file())
         check("report markdown exists", (out_dir / "report.md").is_file())
+
+        # REVIEW 2.2: stage status plumbing is part of the result now
+        stage_names = [s.name for s in res.stages]
+        check("pipeline records core stages",
+              all(n in stage_names for n in ("probe", "deflat", "decompile", "replay", "summary")),
+              f"stages={stage_names}")
+        check("replay stage attempted under allow_replay",
+              res.stage("replay").status in (PIPE.STAGE_OK, PIPE.STAGE_PARTIAL, PIPE.STAGE_FAILED),
+              res.stage("replay").status)
+        check("exit code reflects overall status",
+              res.exit_code == {"success": 0, "partial": 1, "failed": 2}[res.overall_status],
+              f"overall={res.overall_status} exit={res.exit_code}")
 
         # Phase 2 unflattened methods
         check("pipeline unflattened methods", res.unflattened_methods > 0, f"unflattened={res.unflattened_methods}")
@@ -1823,6 +1845,10 @@ def test_pipeline_automation() -> None:
         json_data = json.loads((out_dir / "pipeline_summary.json").read_text(encoding="utf-8"))
         check("summary json contains metrics", "metrics" in json_data and json_data["metrics"]["decompile_total"] > 0)
         check("summary json contains profile", "profile" in json_data and json_data["profile"]["classes"] > 0)
+        # REVIEW 2.2: summary json exposes stage statuses and the exit code
+        check("summary json contains overall/exit_code/stages",
+              "overall" in json_data and "exit_code" in json_data
+              and isinstance(json_data.get("stages"), list) and json_data["stages"])
 
 
 
@@ -2454,11 +2480,11 @@ def test_cfg_and_dynamic_mocks() -> None:
             rec_src = Path(__file__).resolve().parent.parent / "jdec" / "recover_driver_template.java"
             (tmp_live / "RecoverDriver.java").write_text(rec_src.read_text(encoding="utf-8"), encoding="utf-8")
             (tmp_live / "DynamicMockTest.java").write_text(driver_src, encoding="utf-8")
-            r_c = subprocess.run([jc, "-d", str(tmp_live), str(tmp_live / "RecoverDriver.java"), str(tmp_live / "DynamicMockTest.java")], capture_output=True, text=True)
+            r_c = subprocess.run([jc, "-d", str(tmp_live), str(tmp_live / "RecoverDriver.java"), str(tmp_live / "DynamicMockTest.java")], capture_output=True, text=True, errors="replace")
             if r_c.returncode == 0:
                 from jdec import engines as EN
                 java_bin = EN.find_java() or "java"
-                r_r = subprocess.run([java_bin, "-cp", str(tmp_live), "DynamicMockTest"], capture_output=True, text=True)
+                r_r = subprocess.run([java_bin, "-cp", str(tmp_live), "DynamicMockTest"], capture_output=True, text=True, errors="replace")
                 check("DynamicMockClassLoader loaded missing class on the fly", "MOCK_OK: com.unknown.external.MockService" in r_r.stdout)
                 check("DynamicMockClassLoader enforces singleton reference identity", "MOCK_OK" in r_r.stdout)
         finally:
@@ -2878,6 +2904,451 @@ def test_attribution_gates() -> None:
           rep2.vendor is not None and "ZKM" in rep2.vendor, rep2.summary())
 
 
+def test_score_decl_and_noise() -> None:
+    """REVIEW 1.1 negative: the old identifier-set matching scored comment
+    mentions and bare call sites as full member hits."""
+    print("score: coverage counts declarations, not comments or call sites")
+    with zipfile.ZipFile(SAMPLE) as z:
+        cf = CF.parse(z.read("demo/modern/Showcase.class"))
+    members = [m for m, _d in cf.method_sigs() if not m.startswith("<")]
+    all_names = members + [f for f, _d in cf.field_sigs()]
+    check("fixture has members to score", bool(all_names))
+
+    # (a) names only inside a comment used to give coverage 1.0 / usable True
+    comment_only = ("// declared members: " + ", ".join(all_names)
+                    + "\npublic class Showcase {}\n")
+    q = evaluate(comment_only, cf)
+    check("comment-only member list is not a hit", q.coverage < 1.0,
+          f"coverage={q.coverage}")
+    check("comment-only output is unusable", not q.usable, f"score={q.score}")
+
+    # (b) bare call sites are not declarations
+    calls = ("public class Showcase {\n    void callsite() {\n        "
+             + "; ".join(f"{m}()" for m in members[:3]) + ";\n    }\n}\n")
+    q2 = evaluate(calls, cf)
+    check("bare call sites do not count as recovered members",
+          q2.coverage < 1.0, f"coverage={q2.coverage}")
+
+    # (c) string-literal mentions are stripped before matching
+    lit = ('public class Showcase {\n    void c() { System.out.println("'
+           + all_names[0] + '"); }\n}\n')
+    q3 = evaluate(lit, cf)
+    check("string-literal mention does not count", q3.coverage < 1.0,
+          f"coverage={q3.coverage}")
+
+    # (d) same-name overloads are counted individually by _decl_counts
+    counts = SCORE._decl_counts("public int a() {}\npublic int a(int x) {}\nint a;\n")
+    check("_decl_counts counts overloads individually", counts.get("a") == 3,
+          str(counts))
+    # (d2) nested generics in the method header must not hide the name
+    counts2 = SCORE._decl_counts(
+        "public <T extends Comparable<T>> T maxOf(List<T> list, T t) { return t; }\n")
+    check("nested generic header still counts as a declaration",
+          counts2.get("maxOf") == 1, str(counts2))
+
+    # (e) positive control: real declarations still hit
+    decls = ("public class Showcase {\n"
+             + "\n".join(f"    public int {m}() {{ return 1; }}" for m in members)
+             + "\n}\n")
+    q4 = evaluate(decls, cf)
+    check("true declarations still hit", q4.coverage >= 0.9, f"coverage={q4.coverage}")
+
+
+def test_code_pool_json_integrity() -> None:
+    """REVIEW 1.2 negative: JSON round-trip stringifies dict keys; the loaded
+    map used to make resolve_opcode(7) return None."""
+    print("devirt: code-pool JSON round-trip preserves int opcode keys")
+    ret = DV.ORDINAL_BY_NAME["RETURN"]
+    vm = DV.VMMethod(code_id=7, name="m", desc="()V", code=[7, 8],
+                     opcode_map={7: 4, 8: ret}, mode="ordinal")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "pool.json"
+        DV.Devirtualizer.save_code_pool({7: vm}, p)
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        check("json inevitably stores string keys",
+              raw["7"]["opcode_map"] == {"7": 4, "8": ret})
+        loaded = DV.Devirtualizer.load_code_pool(p)[7]
+        check("loaded map keys are ints again",
+              loaded.opcode_map == {7: 4, 8: ret}, repr(loaded.opcode_map))
+        check("mode round-trips", loaded.mode == "ordinal")
+    check("review repro: resolve_opcode(7) resolves (used to be None)",
+          DV.VMDecoder.resolve_opcode(7, loaded.opcode_map) == "ICONST_1",
+          repr(DV.VMDecoder.resolve_opcode(7, loaded.opcode_map)))
+    bad = DV.VMMethod(code_id=9, code=[0], opcode_map={5: 999})
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "bad.json"
+        DV.Devirtualizer.save_code_pool({9: bad}, p)
+        try:
+            DV.Devirtualizer.load_code_pool(p)
+            check("invalid ordinal fails loudly", False, "no exception raised")
+        except ValueError as e:
+            check("invalid ordinal fails loudly", "ordinal" in str(e).lower(), str(e))
+
+
+def test_max_stack_dataflow() -> None:
+    """REVIEW 1.3 negative: a peak-9 stream used to inherit the declared
+    (smaller) max_stack instead of the computed one."""
+    print("devirt: max_stack comes from stack dataflow, not the declared field")
+    from jdec import stubs as SB
+    cf_host = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
+    b = DV.ORDINAL_BY_NAME
+    code9 = [b["ICONST_1"]] * 9 + [b["POP"]] * 9 + [b["RETURN"]]
+    r9 = DV.VMTranslator.translate_method(
+        DV.VMMethod(code_id=1, name="nine", desc="()V", code=code9, max_stack=2),
+        cf_host)
+    check("peak-9 stream yields max_stack >= 9 (declared was 2)",
+          r9.max_stack >= 9, f"max_stack={r9.max_stack}")
+    check("stats records the computed source",
+          r9.stats.get("max_stack_source") == "computed")
+    codel = [b["LCONST_0"]] * 4 + [b["POP2"]] * 4 + [b["RETURN"]]
+    rl = DV.VMTranslator.translate_method(
+        DV.VMMethod(code_id=2, name="longs", desc="()V", code=codel, max_stack=2),
+        cf_host)
+    check("two-slot values occupy two slots (peak 8)", rl.max_stack >= 8,
+          f"max_stack={rl.max_stack}")
+
+
+def test_replay_safety_gate() -> None:
+    """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
+    print("recover/pool: dynamic replay is opt-in (safety gate)")
+    with tempfile.TemporaryDirectory() as td:
+        rec_dir = Path(td) / "rec"
+        rc = RC.recover(SAMPLE, rec_dir)
+        check("recover without allow_exec returns 3 (gated)", rc == 3, f"rc={rc}")
+        check("no recovered.tsv without opt-in",
+              not (rec_dir / "recovered.tsv").is_file())
+    with tempfile.TemporaryDirectory() as td:
+        spec = Path(td) / "spec.tsv"
+        spec.write_text("class\tmethod\tsite\texpr\n", encoding="utf-8")
+        try:
+            PL.harvest(spec, Path(td) / "out.tsv", Path(td) / "work")
+            check("pool harvest without allow_exec raises", False, "no exception")
+        except PL.ReplayNotAllowed as e:
+            check("pool harvest without allow_exec raises", "EXECUTES" in str(e), str(e))
+    parser = CL.build_parser()
+    ns = parser.parse_args(["auto", "x.jar"])
+    check("auto defaults to allow_replay=False", not getattr(ns, "allow_replay", True))
+    ns2 = parser.parse_args(["pipeline", "x.jar", "--allow-replay"])
+    check("pipeline --allow-replay opts in", getattr(ns2, "allow_replay", False))
+
+
+def test_rewrite_skips_comments_strings() -> None:
+    """BUG round negative: source rewriters used to replace lookalike
+    call sites inside comments and string literals (source pollution,
+    inflated replace counts, false verify residuals)."""
+    print("recover: code_mask keeps comments/strings untouched in rewrite")
+    code_mask = RC.code_mask
+
+    # 1. lexer mask core cases
+    t1 = 'int a = 1; // call Foo.q("AA", "BB", 3)\nint b = 2;'
+    m1 = code_mask(t1)
+    check("mask: line-comment lookalike masked", not m1[t1.index('"AA"')])
+    check("mask: code after comment is code", m1[t1.index("int b")] is True)
+
+    t2 = 'String s = "a\\"b"; Foo.q("CC", "DD", 4);'
+    m2 = code_mask(t2)
+    check("mask: escaped quote stays inside string", m2[t2.index("a\\")] is False)
+    check("mask: real call site after string is code", m2[t2.index("Foo.q")] is True)
+
+    t3 = '/* Foo.q("EE", "FF", 5) */ int x;'
+    m3 = code_mask(t3)
+    check("mask: block-comment lookalike masked",
+          m3[t3.index('"EE"')] is False and m3[t3.index("int x")] is True)
+
+    t4 = "char c = '\"'; Foo.q(\"GG\", \"HH\", 6);"
+    m4 = code_mask(t4)
+    check("mask: quote inside char literal does not open string",
+          m4[t4.index("Foo.q")] is True and m4[t4.index("'\"'")] is False)
+
+    # 2. rewrite_sources integration: decoys untouched, real sites replaced
+    import base64
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src"
+        src.mkdir()
+        jf = src / "T.java"
+        jf.write_text(
+            'class T {\n'
+            '  // decoy: Util.dec("siteA", "cipherAA", 11) must stay\n'
+            '  /* decoy: Util.dec("siteB", "cipherBB", 12) must stay */\n'
+            '  String doc = "decoy Util.dec(\\"siteC\\", \\"cipherCC\\", 13) stays";\n'
+            '  String a = Util.dec("siteD", "cipherDD", 14);\n'
+            '  String b = Util.dec("siteE", "cipherEE", 15);\n'
+            '}\n', encoding="utf-8")
+        tsv = Path(td) / "recovered.tsv"
+        # rewrite tsv columns: OK, ?, ?, cipher=parts[3], seed=parts[4], plain
+        # call-shape X.y("site", "cipher", seed) -> key=(cipher, seed-int)
+        rows = ["OK\tx\tx\tcipherDD\t14\tb64:" + base64.b64encode(b"plain4").decode(),
+                "OK\tx\tx\tcipherEE\t15\tb64:" + base64.b64encode(b"plain5").decode()]
+        tsv.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+        st = RC.rewrite_sources(src, tsv_path=tsv)
+        out = jf.read_text(encoding="utf-8")
+        check("rewrite: line-comment decoy untouched",
+              'Util.dec("siteA", "cipherAA", 11)' in out)
+        check("rewrite: block-comment decoy untouched",
+              'Util.dec("siteB", "cipherBB", 12)' in out)
+        check("rewrite: in-string decoy untouched",
+              'Util.dec(\\"siteC\\", \\"cipherCC\\", 13)' in out)
+        check("rewrite: real call 1 replaced", '"plain4"' in out)
+        check("rewrite: real call 2 replaced", '"plain5"' in out)
+        check("rewrite: replaced counted exactly 2", st["replaced"] == 2,
+              f"replaced={st['replaced']}")
+        check("rewrite: nothing counted missed", st["missed"] == 0)
+        check("rewrite: no false residual", st["residual"] == 0)
+
+
+def test_bvm_extract_code_id_descriptor_gate() -> None:
+    """BUG round negative: extract_code_id used to accept any invokestatic
+    named 'execute' regardless of descriptor -> wrong codeId on collisions."""
+    print("devirt: extract_code_id requires (I... descriptor on execute")
+    from jdec import bvm_devirt as BVM
+    from jdec import stubs as SB
+    cf = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
+    helper = BVM.ConstantPoolHelper(cf)
+
+    def make_caller(name: str, mref: int, code_id: int) -> CF.Member:
+        blob = bytearray([0x10, code_id,
+                          0xB8, (mref >> 8) & 0xFF, mref & 0xFF, 0xB1])
+        attr = BVM.BVMDevirtualizer.build_code_attribute(cf, 2, 1, bytes(blob), [])
+        return CF.Member(
+            access_flags=CF.ACC_PUBLIC | CF.ACC_STATIC,
+            name_index=cf.intern_utf8(name),
+            descriptor_index=cf.intern_utf8("()I"),
+            attrs_blob=struct.pack(">H", 1) + attr)
+
+    # negative: name collides but first param is long, not int
+    mref_bad = helper.add_methodref("com/example/VM", "execute", "(J)V")
+    m_bad = make_caller("collideLong", mref_bad, 77)
+    cf.methods.append(m_bad)
+    got_bad = BVM.BVMDevirtualizer.extract_code_id(cf, m_bad)
+    check("wrong-descriptor execute yields None", got_bad is None,
+          f"got={got_bad}")
+
+    # positive control: (I... execute still resolves the codeId
+    mref_ok = helper.add_methodref("com/example/VM", "execute", "(I)V")
+    m_ok = make_caller("collideOk", mref_ok, 88)
+    cf.methods.append(m_ok)
+    got_ok = BVM.BVMDevirtualizer.extract_code_id(cf, m_ok)
+    check("(I...) execute still yields codeId", got_ok == 88, f"got={got_ok}")
+
+
+def test_web_callgraph_error_semantics() -> None:
+    """BUG round negative: /api/callgraph used to synthesize reachable:null
+    plus empty lists when the callgraph could not be built - masking
+    failures as normal-looking empty data."""
+    print("web: /api/callgraph returns structured error instead of fake data")
+    import urllib.request
+    import urllib.error
+    import threading
+    from jdec import web as WB
+
+    def fetch(url: str):
+        try:
+            with urllib.request.urlopen(url) as res:
+                return res.status, json.loads(res.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    # scenario 1: empty work dir -> no analysis target at all
+    with tempfile.TemporaryDirectory() as td:
+        handler = lambda *a, **k: WB.WorkbenchHandler(*a, work_dir=Path(td), **k)
+        server = WB.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            status, body = fetch(
+                f"http://127.0.0.1:{server.server_address[1]}"
+                f"/api/callgraph?class=demo/X")
+            check("no-target -> structured error (4xx/5xx)", status >= 400,
+                  f"status={status}")
+            check("no-target error mentions missing target",
+                  "error" in body and "target" in body["error"], str(body))
+            check("no synthesized reachable key", "reachable" not in body)
+        finally:
+            server.shutdown()
+
+    # scenario 2: target resolves but build fails (not a real jar)
+    with tempfile.TemporaryDirectory() as td:
+        fake_jar = Path(td) / "fake.jar"
+        fake_jar.write_bytes(b"this is not a zip archive")
+        handler = lambda *a, **k: WB.WorkbenchHandler(*a, work_dir=fake_jar, **k)
+        server = WB.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            status, body = fetch(
+                f"http://127.0.0.1:{server.server_address[1]}"
+                f"/api/callgraph?class=demo/X")
+            check("build-failure -> structured error (4xx/5xx)", status >= 400,
+                  f"status={status}")
+            check("build-failure error mentions build failure",
+                  "error" in body and "build failed" in body["error"], str(body))
+            check("no synthesized reachable key on failure",
+                  "reachable" not in body)
+        finally:
+            server.shutdown()
+
+
+def test_pipeline_stage_status() -> None:
+    """REVIEW 2.2 negative: partial results used to exit 0 with no trace."""
+    print("pipeline: stage status plumbing and exit codes")
+    prof = JarProfile(path=SAMPLE, entries=1, classes=1)
+
+    def mk(stages, strict=False):
+        return PIPE.PipelineResult(target_jar=SAMPLE, out_dir=Path("."), profile=prof,
+                                   stages=list(stages), strict=strict)
+
+    ok_s = PIPE.StageStatus("probe", PIPE.STAGE_OK)
+    sk = PIPE.StageStatus("replay", PIPE.STAGE_SKIPPED, "safety gate")
+    part = PIPE.StageStatus("decompile", PIPE.STAGE_PARTIAL, "2 failed")
+    bad = PIPE.StageStatus("replay", PIPE.STAGE_FAILED, "rc=1")
+    check("ok/skipped -> success/0", mk([ok_s, sk]).exit_code == 0)
+    check("partial -> exit 1", mk([ok_s, part]).exit_code == 1)
+    check("failed -> exit 2", mk([ok_s, bad]).exit_code == 2)
+    check("failed dominates partial", mk([part, bad]).overall_status == "failed")
+    check("strict escalates partial to 2", mk([part], strict=True).exit_code == 2)
+    check("strict keeps success at 0", mk([ok_s], strict=True).exit_code == 0)
+    r = mk([PIPE.StageStatus("replay", PIPE.STAGE_PARTIAL, "indy ok; pool failed")])
+    d = r.to_dict()
+    check("to_dict carries overall/exit_code/stages",
+          d["overall"] == "partial" and d["exit_code"] == 1
+          and d["stages"][0]["stage"] == "replay")
+    with tempfile.TemporaryDirectory() as td:
+        md_path, json_path = PIPE.write_pipeline_summary(mk([ok_s, sk, part]), Path(td))
+        md = md_path.read_text(encoding="utf-8")
+        js = json.loads(json_path.read_text(encoding="utf-8"))
+        check("summary md has stage table", "## Stage Status" in md and "`replay`" in md)
+        check("summary md header shows overall + exit code",
+              "Overall status:" in md and "exit code 1" in md)
+        check("summary json carries stages", len(js["stages"]) == 3
+              and js["overall"] == "partial")
+    # BUG round negative: detail containing | or newlines used to break the
+    # Markdown table structure
+    pipe_st = PIPE.StageStatus("pool", PIPE.STAGE_PARTIAL, "a|b\nc d")
+    with tempfile.TemporaryDirectory() as td2:
+        md2, _ = PIPE.write_pipeline_summary(mk([ok_s, pipe_st]), Path(td2))
+        md_text = md2.read_text(encoding="utf-8")
+        row = next(ln for ln in md_text.splitlines()
+                   if ln.startswith("| `pool` |"))
+        cols = row.split(" | ")
+        check("stage table: detail pipe escaped", "\\|b" in row, row)
+        check("stage table: detail newline flattened", "\n" not in row and "c d" in row)
+        check("stage table: column count preserved", len(cols) == 3, row)
+
+
+def test_conservative_prune() -> None:
+    """REVIEW 2.3 negative: indy method-ref targets and reflection-by-name
+    classes used to be pruned as 'dead'."""
+    print("reach: pruning keeps unknown dependencies (indy handles, reflection)")
+    check("javac available for prune fixture", build_fixtures.ensure_sample_jar() is not None)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "src" / "a").mkdir(parents=True)
+        sources = {
+            "a/A.java": ("package a;\n"
+                         "public class A {\n"
+                         "    public static void main(String[] args) throws Exception {\n"
+                         "        Runnable r = B::helper;\n"
+                         "        r.run();\n"
+                         "        Class.forName(\"a.Reflected\");\n"
+                         "    }\n"
+                         "}\n"),
+            "a/B.java": ("package a;\n"
+                         "public class B { public static void helper() { } }\n"),
+            "a/Reflected.java": ("package a;\npublic class Reflected {}\n"),
+            "a/Dead.java": ("package a;\npublic class Dead { public void unused() {} }\n"),
+        }
+        for rel, txt in sources.items():
+            (d / "src" / rel).write_text(txt, encoding="utf-8")
+        cls = d / "cls"
+        subprocess.run(["javac", "-d", str(cls)]
+                       + [str(d / "src" / r) for r in sources],
+                       check=True, capture_output=True)
+        jar = d / "fixture.jar"
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as z:
+            for c in cls.rglob("*.class"):
+                z.write(c, c.relative_to(cls).as_posix())
+
+        keep, counts = CG.conservative_keepset(jar)
+        check("lambda host kept via BSM rule", "a/A" in keep, str(sorted(keep)))
+        check("method-ref target kept via handle rule", "a/B" in keep, str(sorted(keep)))
+        check("reflection target kept via string rule", "a/Reflected" in keep,
+              str(sorted(keep)))
+        check("proven-dead class not held back", "a/Dead" not in keep)
+
+        cg = CG.build_callgraph(jar)
+        rep = CG.compute_reachability(cg)
+        # indy + Class.forName create no static edges: B and Reflected look dead
+        check("B unreacheable by static edges (indy blindness)",
+              "a/B" not in rep.reachable_classes)
+        check("Reflected unreachable by static edges (reflection blindness)",
+              "a/Reflected" not in rep.reachable_classes)
+        out = d / "pruned.jar"
+        CG.prune_jar(jar, out, rep.reachable_classes | keep)
+        with zipfile.ZipFile(out) as z:
+            names = {n[:-6] for n in z.namelist() if n.endswith(".class")}
+        check("pruned jar keeps B (would-be NoSuchMethodError)", "a/B" in names)
+        check("pruned jar keeps Reflected (Class.forName target)",
+              "a/Reflected" in names)
+        check("pruned jar drops Dead", "a/Dead" not in names)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "a").mkdir()
+        for n in ("Reflected", "Dead"):
+            (d / "a" / f"{n}.java").write_text(
+                f"package a;\npublic class {n} {{}}\n", encoding="utf-8")
+        cls = d / "cls"
+        subprocess.run(["javac", "-d", str(cls), str(d / "a" / "Reflected.java"),
+                        str(d / "a" / "Dead.java")], check=True, capture_output=True)
+        noep = d / "noep.jar"
+        with zipfile.ZipFile(noep, "w", zipfile.ZIP_DEFLATED) as z:
+            for c in cls.rglob("*.class"):
+                z.write(c, c.relative_to(cls).as_posix())
+        rep2 = CG.compute_reachability(CG.build_callgraph(noep))
+        check("no-entrypoint jar triggers the refusal condition",
+              not rep2.entrypoints)
+
+
+def test_selfheal_audit() -> None:
+    """REVIEW 2.4 negative: self-heal used to overwrite the only copy of the
+    decompiled source, with no record of what changed."""
+    print("project: self-heal keeps src-original/ and writes repair-log.md")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        src_dir = d / "decomp_src" / "a"
+        src_dir.mkdir(parents=True)
+        # zero-width char + 'goto' as identifier: two self-heal rules fire.
+        # (record/yield are contextual keywords and legal identifiers - the
+        # tool correctly leaves them alone.)
+        original = ("package a;\n\npublic class Healing {\n    public void run() {\n"
+                    "        int record\u200b = 1;\n        int goto = 2;\n"
+                    "        System.out.println(record + goto);\n    }\n}\n")
+        (src_dir / "Healing.java").write_text(original, encoding="utf-8")
+        (src_dir / "Plain.java").write_text(
+            "package a;\n\npublic class Plain {\n    int ok = 3;\n}\n",
+            encoding="utf-8")
+        out = d / "proj"
+        stats = PJ.export_project(SAMPLE, out, src_dir=d / "decomp_src",
+                                  with_stubs=False)
+        orig = out / "src-original" / "a" / "Healing.java"
+        check("pre-repair source preserved", orig.is_file()
+              and "\u200b" in orig.read_text(encoding="utf-8"))
+        repaired = out / "src" / "main" / "java" / "a" / "Healing.java"
+        rtxt = repaired.read_text(encoding="utf-8") if repaired.is_file() else ""
+        check("repaired version escapes the keyword", "goto_" in rtxt, rtxt[:200])
+        check("unrepaired file not duplicated into src-original",
+              not (out / "src-original" / "a" / "Plain.java").is_file())
+        log = out / "repair-log.md"
+        txt = log.read_text(encoding="utf-8") if log.is_file() else ""
+        check("repair-log written with evidence ladder",
+              log.is_file() and "readable < compilable" in txt
+              and "NOT implemented" in txt)
+        check("repair-log lists the healed file and rules",
+              "`a/Healing.java`" in txt and "keyword" in txt.lower())
+        check("stats counters consistent", stats.get("files_repaired") == 1
+              and stats.get("repair_rules_applied", 0) >= 2, str(stats))
+
+
 def main() -> int:
     with_mc = "--with-mc" in sys.argv
     if not SAMPLE.exists() and build_fixtures.ensure_sample_jar(quiet=False) is None:
@@ -2888,6 +3359,7 @@ def main() -> int:
     test_synthetic_members_ignored()
     test_scoring_sees_obfuscated_names()
     test_partial_failure_is_not_total_failure()
+    test_score_decl_and_noise()
     test_unbalanced_braces_are_proportional()
     test_end_to_end_sample()
     test_case_colliding_class_names()
@@ -2903,6 +3375,7 @@ def main() -> int:
     test_rewrite_escapes()
     test_bsm_scan_and_parse_resilience()
     test_recover_spec_generation_and_quarantine()
+    test_replay_safety_gate()
     test_resource_anomaly()
     test_scorecard_smoke()
     test_pool_roundtrip()
@@ -2913,6 +3386,8 @@ def main() -> int:
     test_platform_classpath_separator()
     test_remap_failure_accounting()
     test_devirt_opcode_disambiguation()
+    test_code_pool_json_integrity()
+    test_max_stack_dataflow()
     test_pool_verify_fq_callsites()
     test_attribution_gates()
     test_ops_pool()
@@ -2924,10 +3399,16 @@ def main() -> int:
     test_multimodule_enhancements()
     test_advanced_roadmap_features()
     test_pipeline_automation()
+    test_pipeline_stage_status()
+    test_rewrite_skips_comments_strings()
+    test_bvm_extract_code_id_descriptor_gate()
+    test_web_callgraph_error_semantics()
     test_web_workbench_features()
     test_callgraph_and_reachability()
+    test_conservative_prune()
     test_decompiler_trap_pruning()
     test_project_export_and_recompilability()
+    test_selfheal_audit()
     test_cfg_and_dynamic_mocks()
     test_bvm_and_native_extensions()
     if build_fixtures.ensure_mixin_jar() is None:

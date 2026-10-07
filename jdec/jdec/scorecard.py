@@ -28,7 +28,8 @@ from .probe import profile_jar
 def _git_rev() -> str:
     try:
         r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                           capture_output=True, text=True, timeout=10,
+                           capture_output=True, text=True, errors="replace",
+                           timeout=10,
                            cwd=Path(__file__).resolve().parent.parent)
         return r.stdout.strip() if r.returncode == 0 else "?"
     except Exception:  # noqa: BLE001

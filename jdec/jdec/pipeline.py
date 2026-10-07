@@ -34,6 +34,25 @@ from . import recover as RC
 from . import strings as ST
 from . import web as WB
 
+# Stage status vocabulary (REVIEW 2.2): a stage is one of exactly these.
+STAGE_OK = "ok"
+STAGE_PARTIAL = "partial"
+STAGE_SKIPPED = "skipped"
+STAGE_FAILED = "failed"
+
+_EXIT_CODES = {"success": 0, "partial": 1, "failed": 2}
+
+
+@dataclass
+class StageStatus:
+    """Outcome of one pipeline stage: 成功/部分成功/跳过/失败 + 原因."""
+    name: str
+    status: str = STAGE_SKIPPED
+    detail: str = ""
+
+    def to_dict(self) -> dict:
+        return {"stage": self.name, "status": self.status, "detail": self.detail}
+
 
 @dataclass
 class PipelineResult:
@@ -59,11 +78,42 @@ class PipelineResult:
     threat_strings_count: int = 0
     signal_classes_count: int = 0
     elapsed_seconds: float = 0.0
+    stages: list[StageStatus] = field(default_factory=list)
+    strict: bool = False
+
+    def stage(self, name: str) -> StageStatus:
+        for s in self.stages:
+            if s.name == name:
+                return s
+        raise KeyError(f"unknown stage: {name}")
+
+    @property
+    def overall_status(self) -> str:
+        statuses = [s.status for s in self.stages]
+        if any(s == STAGE_FAILED for s in statuses):
+            return "failed"
+        if any(s == STAGE_PARTIAL for s in statuses):
+            return "partial"
+        return "success"
+
+    @property
+    def exit_code(self) -> int:
+        """0 = all stages ok/skipped, 1 = partial results, 2 = stage failure.
+
+        With strict=True any non-success outcome escalates to 2 (CI mode).
+        """
+        code = _EXIT_CODES[self.overall_status]
+        if self.strict and code != 0:
+            return 2
+        return code
 
     def to_dict(self) -> dict:
         return {
             "target": str(self.target_jar.name),
             "out_dir": str(self.out_dir),
+            "overall": self.overall_status,
+            "exit_code": self.exit_code,
+            "stages": [s.to_dict() for s in self.stages],
             "profile": {
                 "classes": self.profile.classes,
                 "obfuscation": self.profile.obfuscation,
@@ -135,13 +185,33 @@ def write_pipeline_summary(res: PipelineResult, out_dir: Path) -> tuple[Path, Pa
         "",
         "> [!NOTE]",
         f"> Automated pipeline execution finished in **{res.elapsed_seconds:.2f}s**.",
+        f"> Overall status: **{res.overall_status.upper()}** (exit code {res.exit_code}"
+        + (", strict mode" if res.strict else "") + ").",
         "",
+    ]
+
+    if res.stages:
+        md_lines.extend([
+            "## Stage Status",
+            "",
+            "| Stage | Status | Detail |",
+            "| :--- | :--- | :--- |",
+        ])
+        for s in res.stages:
+            # detail 是自由文本（可能含路径、异常摘要）：| 和换行会破坏
+            # Markdown 表格结构，先压平
+            detail = (s.detail or "—").replace("|", "\\|")
+            detail = " ".join(detail.split())
+            md_lines.append(f"| `{s.name}` | **{s.status}** | {detail} |")
+        md_lines.append("")
+
+    md_lines.extend([
         "## Target Fingerprint",
         f"- **File**: `{res.target_jar.name}` ({res.profile.classes} classes, {res.profile.entries} total entries)",
         f"- **Obfuscation Score**: **{res.profile.obfuscation}/100**",
         f"- **Identified Obfuscator**: `{res.profile.obfuscator or 'None / Unknown'}`",
         f"- **Minecraft Environment**: `{mc_desc}`",
-    ]
+    ])
 
     if res.profile.signatures:
         md_lines.append(f"- **Structural Signatures**: {', '.join(f'`{s}`' for s in res.profile.signatures)}")
@@ -155,7 +225,7 @@ def write_pipeline_summary(res: PipelineResult, out_dir: Path) -> tuple[Path, Pa
         f"| **CFG De-flattening** | Unflattened Method Transitions | **{res.unflattened_methods}** |",
         f"| **Symbol Remapping** | Remapped Classes | **{res.remapped_classes}** ({res.mapping_name or 'None'}) |",
         f"| **Decompilation** | Clean / Partial / Failed | **{res.decompile_ok}** / {res.decompile_partial} / {res.decompile_failed} |",
-        f"| **Ground-Truth Verification**| Member Signature Recovery | **{cov_str}** |",
+        f"| **Ground-Truth Verification**| Member Name-Hit Rate | **{cov_str}** |",
         f"| **String Decryption** | Indy + Pool Plaintexts Recovered | **{res.indy_recovered + res.pool_recovered}** ({res.indy_recovered} indy, {res.pool_recovered} pool) |",
         f"| **Native Code Triage** | Shipped Libs / Methods / Rev JNI | **{res.native_libs_count}** libs, **{res.native_methods_count}** methods, **{res.reverse_jni_calls}** reverse calls |",
         f"| **Game Hooks** | Mixin Injections / Patched Classes | **{res.mixin_hooks_count}** hooks across **{res.patched_classes_count}** classes |",
@@ -163,7 +233,7 @@ def write_pipeline_summary(res: PipelineResult, out_dir: Path) -> tuple[Path, Pa
         "",
         "## Generated Workspace Artifacts",
         "- `src/` — Clean, decompiled Java source code with decrypted plaintexts substituted.",
-        "- `report.md` / `report.json` — Per-class decompiler engine selection and member coverage score.",
+        "- `report.md` / `report.json` — Per-class decompiler engine selection and member name-hit score.",
         "- `analysis.md` / `analysis.json` — In-depth Mixin hook analysis and high-risk capability signals.",
         "- `strings.tsv` / `strings.json` — All string literals with security tags (webhook, C2, IP, crypto).",
     ])
@@ -198,12 +268,20 @@ def run_pipeline(
     compile_verify: bool = False,
     cp: str = "",
     cp_file: Path | None = None,
+    allow_replay: bool = False,
+    strict: bool = False,
 ) -> PipelineResult:
     """Execute end-to-end deobfuscation and triage pipeline."""
     t0 = time.time()
     out_dir.mkdir(parents=True, exist_ok=True)
     work_dir = out_dir / "_pipeline"
     work_dir.mkdir(parents=True, exist_ok=True)
+    stages: list[StageStatus] = []
+
+    def record(name: str, status: str, detail: str = "") -> StageStatus:
+        st = StageStatus(name=name, status=status, detail=detail)
+        stages.append(st)
+        return st
 
     if engines_dir is None:
         engines_dir = Path(__file__).resolve().parent.parent / "engines"
@@ -217,6 +295,9 @@ def run_pipeline(
     # Phase 1: Probe
     print("[1/7] Probing & profiling target ...")
     prof = PB.profile_jar(target)
+    record("probe", STAGE_OK,
+           f"{prof.classes} classes, obf={prof.obfuscation}/100 "
+           f"({prof.obfuscator or 'Unknown'})")
     print(f"      entries={prof.entries}, classes={prof.classes}, "
           f"obf={prof.obfuscation}/100 ({prof.obfuscator or 'Unknown'})")
     if prof.is_minecraft:
@@ -235,13 +316,18 @@ def run_pipeline(
             unflattened_count = stats.get("methods_unflattened", 0)
             if unflattened_count > 0:
                 print(f"      unflattened {unflattened_count} method(s) across {stats.get('classes', 0)} class(es)")
+                record("deflat", STAGE_OK, f"unflattened {unflattened_count} method(s) in {stats.get('classes', 0)} class(es)")
                 # 不直接切 current_jar:反平坦化对某些目标(如 CFR 本就能
                 # 结构化的 ZKM goto 洪水)是净伤害。原 jar 先正常反编译,
                 # Phase 4 末尾按 clean 数对比决定是否采用 deflatted 版。
             else:
                 print("      no flattened switch dispatchers detected")
+                record("deflat", STAGE_OK, "no flattened switch dispatchers detected")
         except Exception as exc:
             print(f"      ! de-flattening skipped: {exc}")
+            record("deflat", STAGE_FAILED, f"de-flattening error: {exc}")
+    else:
+        record("deflat", STAGE_SKIPPED, "disabled (--no-deflat)")
 
     # Phase 3: Minecraft Symbol Remapping
     remapped_count = 0
@@ -255,8 +341,12 @@ def run_pipeline(
         version = mc_version or prof.mc_version
         if mappings_file:
             print(f"[3/7] Loading custom mappings from {mappings_file.name} ...")
-            mapping_obj = MP.load_mapping(mappings_file)
-            mapping_desc = mappings_file.name
+            try:
+                mapping_obj = MP.load_mapping(mappings_file)
+                mapping_desc = mappings_file.name
+            except Exception as exc:
+                print(f"      ! mapping load failed: {exc}")
+                record("remap", STAGE_FAILED, f"mapping load failed: {exc}")
         elif version:
             try:
                 resolved_set = _mapping_set_for(mapping_set, prof)
@@ -266,34 +356,45 @@ def run_pipeline(
                 mapping_desc = mapping_obj.describe() if mapping_obj else None
             except Exception as exc:
                 print(f"      ! mapping fetch failed: {exc}")
+                record("remap", STAGE_FAILED, f"mapping fetch failed: {exc}")
                 mapping_obj = None
         else:
             print("[3/7] ! Minecraft version unknown; skipping symbol remapping")
+            record("remap", STAGE_SKIPPED, "minecraft version unknown")
 
         if mapping_obj is not None:
             remapped_jar = work_dir / "remapped.jar"
             try:
                 remapped_count, total = MP.remap_jar(current_jar, remapped_jar, mapping_obj)
                 print(f"      remapped {remapped_count}/{total} classes -> remapped.jar")
+                record("remap", STAGE_OK, f"remapped {remapped_count}/{total} classes ({mapping_desc or 'custom'})")
                 if remapped_count > 0:
                     current_jar = remapped_jar
             except Exception as exc:
                 print(f"      ! remapping failed: {exc}")
+                record("remap", STAGE_FAILED, f"remap failed: {exc}")
     else:
         print("[3/7] Symbol remapping: skipped (not needed or disabled)")
+        record("remap", STAGE_SKIPPED, "not needed or disabled")
 
     # Phase 4: Multi-Engine Decompilation & Verification
     print("[4/7] Multi-engine decompilation with bytecode verification ...")
     src_dir = out_dir / "src"
-    rep = DC.decompile(
-        current_jar, out_dir, engines_dir=engines_dir,
-        jobs=jobs, timeout=timeout, verify_all=verify_all,
-        clean_work=False, limit=0
-    )
-    DC.write_report(rep, out_dir)
-    print(f"      results: {rep.ok} clean, {rep.partial} partial, {rep.failed + rep.missing} failed")
-    if rep.coverage_avg is not None:
-        print(f"      member recovery coverage: {rep.coverage_avg * 100:.1f}%")
+    rep = None
+    decompile_error = ""
+    try:
+        rep = DC.decompile(
+            current_jar, out_dir, engines_dir=engines_dir,
+            jobs=jobs, timeout=timeout, verify_all=verify_all,
+            clean_work=False, limit=0
+        )
+        DC.write_report(rep, out_dir)
+        print(f"      results: {rep.ok} clean, {rep.partial} partial, {rep.failed + rep.missing} failed")
+        if rep.coverage_avg is not None:
+            print(f"      member name-hit rate: {rep.coverage_avg * 100:.1f}%")
+    except Exception as exc:
+        decompile_error = f"decompilation crashed: {exc}"
+        print(f"      ! {decompile_error}")
 
     # Phase 4.5: deflat 抢救对比——原 jar 反编译若更差,采用 deflatted 版
     if unflattened_count > 0 and not no_deflat:
@@ -314,24 +415,48 @@ def run_pipeline(
                                     clean_work=False, limit=0)
                 print(f"      deflatted variant: {rep2.ok} clean, {rep2.partial} partial, "
                       f"{rep2.failed + rep2.missing} failed")
-                if rep2.ok > rep.ok:
+                adopt = rep is None or rep2.ok > rep.ok
+                if adopt:
+                    gained = rep2.ok - (rep.ok if rep is not None else 0)
                     shutil.rmtree(src_dir, ignore_errors=True)
                     shutil.move(str(alt_dir / "src"), str(src_dir))
                     shutil.copy2(alt_dir / "report.md", out_dir / "report.md")
                     shutil.copy2(alt_dir / "report.json", out_dir / "report.json")
                     rep = rep2
-                    print(f"      adopted de-flattened results (+{rep2.ok - rep.ok} clean)")
+                    print(f"      adopted de-flattened results (+{gained} clean)")
                 else:
                     shutil.rmtree(alt_dir, ignore_errors=True)
                     print("      kept original results (de-flattening did not help)")
             except Exception as exc:
                 print(f"      ! rescue pass failed: {exc}")
 
+    # 反编译阶段状态:以最终采用的 rep 为准(主跑或 4.5 采纳的抢救版)
+    if rep is None:
+        record("decompile", STAGE_FAILED, decompile_error or "no result produced")
+    elif rep.total == 0:
+        record("decompile", STAGE_FAILED, "0 classes decompiled")
+    elif rep.failed + rep.missing > 0:
+        record("decompile", STAGE_PARTIAL,
+               f"{rep.ok} clean, {rep.partial} partial, {rep.failed + rep.missing} failed "
+               f"of {rep.total}")
+    else:
+        record("decompile", STAGE_OK, f"{rep.ok} clean of {rep.total}")
+
     # Phase 5: Dynamic Decryption Replay (BSM Indy + Pool Recovery)
     indy_recovered = 0
     pool_recovered = 0
-    if not no_recover:
-        print("[5/7] Dynamic JVM replay string decryption ...")
+    # 子状态:None=未尝试;否则 (status, detail),status 取 STAGE_* 或 "no-target"
+    indy_st: tuple[str, str] | None = None
+    pool_st: tuple[str, str] | None = None
+    if not no_recover and not allow_replay:
+        print("[5/7] Dynamic replay string decryption: SKIPPED (safety gate)")
+        print("      Dynamic replay EXECUTES code from the target jar; it is "
+              "opt-in via --allow-replay / allow_replay=True.")
+        record("replay", STAGE_SKIPPED,
+               "safety gate: replay executes target code; opt in via --allow-replay")
+    elif not no_recover:
+        print("[5/7] Dynamic JVM replay string decryption "
+              "(--allow-replay given: target code WILL be executed) ...")
         # 1. BSM Indy
         try:
             census = BM.scan_jar(current_jar)
@@ -342,14 +467,25 @@ def run_pipeline(
                 rec_dir = work_dir / "recover"
                 rc_code = RC.recover(original_jar, rec_dir, timeout=timeout,
                                      with_stubs=with_stubs, cp=cp, cp_file=cp_file,
-                                     java=java_bin)
+                                     java=java_bin, allow_exec=True)
                 rec_tsv = rec_dir / "recovered.tsv"
                 if rec_tsv.is_file():
                     st_rw = RC.rewrite_sources(src_dir, rec_tsv)
                     indy_recovered = st_rw.get("replaced", 0)
                     if indy_recovered > 0:
                         print(f"      indy: {indy_recovered} callsite(s) decrypted and rewritten")
+                if rc_code == 0:
+                    indy_st = (STAGE_OK, f"rc=0, {indy_recovered} callsite(s) rewritten")
+                elif rc_code == 3:
+                    indy_st = (STAGE_FAILED, "replay blocked by exec gate (unexpected inside pipeline)")
+                else:
+                    indy_st = (STAGE_FAILED,
+                               f"recovery driver failed (rc={rc_code}); "
+                               f"{indy_recovered} callsite(s) rewritten; see _pipeline/recover/")
+            else:
+                indy_st = ("no-target", f"0 indy callsites in {st.get('classes_with_sites', 0)} classes")
         except Exception as exc:
+            indy_st = (STAGE_FAILED, f"indy decryption error: {exc}")
             print(f"      ! indy decryption skipped: {exc}")
 
         # 2. String Pool
@@ -363,9 +499,9 @@ def run_pipeline(
                 sep = ";" if sys.platform == "win32" else ":"
                 pool_cp = (str(original_jar) + (sep if cp else "") + cp) if original_jar else cp
                 java_bin = EN.find_java() or "java"
-                PL.harvest(pool_spec, harvest_tsv, pool_dir, timeout=timeout,
-                           with_stubs=with_stubs, cp=pool_cp,
-                           cp_file=cp_file, java=java_bin)
+                h_res = PL.harvest(pool_spec, harvest_tsv, pool_dir, timeout=timeout,
+                                   with_stubs=with_stubs, cp=pool_cp,
+                                   cp_file=cp_file, java=java_bin, allow_exec=True)
                 if harvest_tsv.is_file():
                     tmp_pool = work_dir / "src_pool"
                     st_apply = PL.apply(src_dir, harvest_tsv, tmp_pool)
@@ -375,10 +511,38 @@ def run_pipeline(
                         shutil.copytree(tmp_pool, src_dir)
                         shutil.rmtree(tmp_pool, ignore_errors=True)
                         print(f"      pool: {pool_recovered} callsite(s) decrypted and rewritten")
+                if h_res.get("ok"):
+                    pool_st = (STAGE_OK, f"rc={h_res.get('returncode')}, {pool_recovered} callsite(s) rewritten")
+                else:
+                    why = "timeout killed driver" if h_res.get("timed_out") else \
+                        (h_res.get("err") or f"rc={h_res.get('returncode')}")
+                    pool_st = (STAGE_FAILED,
+                               f"harvest failed: {why}; {pool_recovered} callsite(s) rewritten; "
+                               f"see _pipeline/pool/")
+            else:
+                pool_st = ("no-target", "0 pool accessor sites found")
         except Exception as exc:
+            pool_st = (STAGE_FAILED, f"pool decryption error: {exc}")
             print(f"      ! pool decryption skipped: {exc}")
+
+        # 聚合:无目标≠失败;部分失败=partial;全失败=failed
+        attempted = [s for s in (indy_st, pool_st) if s is not None]
+        n_target = sum(1 for s, _ in attempted if s != "no-target")
+        n_fail = sum(1 for s, _ in attempted if s == STAGE_FAILED)
+        detail = f"indy[{indy_st[1]}]; pool[{pool_st[1]}]" \
+            if (indy_st and pool_st) else \
+            f"indy[{indy_st[1]}]" if indy_st else f"pool[{pool_st[1]}]"
+        if n_target == 0:
+            record("replay", STAGE_SKIPPED, "no replay targets found: " + detail)
+        elif n_fail == n_target and n_target > 0:
+            record("replay", STAGE_FAILED, detail)
+        elif n_fail:
+            record("replay", STAGE_PARTIAL, detail)
+        else:
+            record("replay", STAGE_OK, detail)
     else:
-        print("[5/7] Dynamic replay string decryption: disabled")
+        print("[5/7] Dynamic replay string decryption: disabled (--no-recover)")
+        record("replay", STAGE_SKIPPED, "disabled (--no-recover)")
 
     # Phase 6: Native Triage & Behavioral Analysis
     nat_libs_count = 0
@@ -400,12 +564,18 @@ def run_pipeline(
                 dyn_jni_count = sum(len(l.dynamic_methods) for l in tri.libs)
                 print(f"      native: {nat_libs_count} library(ies), {nat_methods_count} native method(s), "
                       f"{rev_jni_count} reverse JNI call(s)")
+                record("natives", STAGE_OK,
+                       f"{nat_libs_count} lib(s), {nat_methods_count} native method(s), "
+                       f"{rev_jni_count} reverse JNI call(s)")
             else:
                 print("      native: no native binaries found")
+                record("natives", STAGE_OK, "no native binaries found")
         except Exception as exc:
             print(f"      ! native triage failed: {exc}")
+            record("natives", STAGE_FAILED, f"native triage error: {exc}")
     else:
         print("[6/7] Native library triage: disabled")
+        record("natives", STAGE_SKIPPED, "disabled (--no-natives)")
 
     # Behavioral analysis (Mixin hooks & threat signals)
     hooks_count = 0
@@ -414,6 +584,7 @@ def run_pipeline(
     threat_count = 0
 
     if not no_analyze:
+        analysis_failures = []
         try:
             a = AZ.analyze(current_jar, mapping=mapping_obj, mapping_desc=mapping_desc)
             AZ.write_analysis(a, out_dir)
@@ -423,6 +594,7 @@ def run_pipeline(
             print(f"      analysis: {hooks_count} Mixin hook(s) across {patched_cls_count} class(es), "
                   f"{signals_count} high-risk signal class(es)")
         except Exception as exc:
+            analysis_failures.append(f"mixin analysis error: {exc}")
             print(f"      ! analysis failed: {exc}")
 
         try:
@@ -433,13 +605,23 @@ def run_pipeline(
             threat_count = sum(tc.values())
             print(f"      strings: {d.total} literal(s) dumped, {threat_count} threat-tagged")
         except Exception as exc:
+            analysis_failures.append(f"strings dump error: {exc}")
             print(f"      ! strings dump failed: {exc}")
+
+        if not analysis_failures:
+            record("analysis", STAGE_OK)
+        elif len(analysis_failures) == 2:
+            record("analysis", STAGE_FAILED, "; ".join(analysis_failures))
+        else:
+            record("analysis", STAGE_PARTIAL, "; ".join(analysis_failures))
     else:
         print("      behavioral analysis: disabled")
+        record("analysis", STAGE_SKIPPED, "disabled (--no-analyze)")
 
     # Phase 7: Master Executive Summary Report
     print("[7/7] Generating pipeline summary ...")
     elapsed = time.time() - t0
+    record("summary", STAGE_OK, "pipeline_summary.md / pipeline_summary.json")
     res = PipelineResult(
         target_jar=target,
         out_dir=out_dir,
@@ -447,11 +629,11 @@ def run_pipeline(
         unflattened_methods=unflattened_count,
         remapped_classes=remapped_count,
         mapping_name=mapping_desc,
-        decompile_total=rep.total,
-        decompile_ok=rep.ok,
-        decompile_partial=rep.partial,
-        decompile_failed=rep.failed + rep.missing,
-        coverage_avg=rep.coverage_avg,
+        decompile_total=rep.total if rep is not None else 0,
+        decompile_ok=rep.ok if rep is not None else 0,
+        decompile_partial=rep.partial if rep is not None else 0,
+        decompile_failed=(rep.failed + rep.missing) if rep is not None else 0,
+        coverage_avg=rep.coverage_avg if rep is not None else None,
         indy_recovered=indy_recovered,
         pool_recovered=pool_recovered,
         native_libs_count=nat_libs_count,
@@ -463,32 +645,66 @@ def run_pipeline(
         threat_strings_count=threat_count,
         signal_classes_count=signals_count,
         elapsed_seconds=elapsed,
+        stages=stages,
+        strict=strict,
     )
     md_sum, json_sum = write_pipeline_summary(res, out_dir)
     print(f"      summary: {md_sum}")
     print(f"      json   : {json_sum}")
-    print(f"=== Pipeline finished in {elapsed:.2f}s ===")
 
     # Phase 8: Automated IDE Project Export
     if export_project:
         print("\n[8/8] Exporting complete IDE Gradle project ...")
         from . import project as PJ
         proj_dir = out_dir / "project"
-        p_stats = PJ.export_project(
-            source_jar=target,
-            out_dir=proj_dir,
-            src_dir=out_dir / "src",
-            mc_version=prof.mc_version,
-            with_stubs=True,
-        )
-        print(f"      project: {proj_dir} ({p_stats['java_files']} sources, {p_stats['files_repaired']} repaired)")
-        if compile_verify:
-            print("      running javac compilation verification ...")
-            c_rep = PJ.verify_compilation(proj_dir)
-            print(f"      {c_rep.summary()}")
+        try:
+            p_stats = PJ.export_project(
+                source_jar=target,
+                out_dir=proj_dir,
+                src_dir=out_dir / "src",
+                mc_version=prof.mc_version,
+                with_stubs=True,
+            )
+            print(f"      project: {proj_dir} ({p_stats['java_files']} sources, {p_stats['files_repaired']} repaired)")
+            export_detail = (f"{p_stats['java_files']} sources, "
+                             f"{p_stats['files_repaired']} repaired")
+            if p_stats.get("files_repaired"):
+                n_rules = p_stats.get("repair_rules_applied", 0)
+                print(f"      self-heal audit: repair-log.md ({n_rules} rule(s)); "
+                      f"originals kept in project/src-original/")
+                export_detail += f"; {n_rules} self-heal rule(s) logged"
+                # 证据分级:导出=可阅读;--compile 通过=可编译(在下方编译验证处升级)
+            if compile_verify:
+                print("      running javac compilation verification ...")
+                c_rep = PJ.verify_compilation(proj_dir)
+                print(f"      {c_rep.summary()}")
+                export_detail += f"; {c_rep.summary()}"
+                # 编译通过=ok;导出成功但仍有编译问题=partial(证据级别未达"可编译")
+                if not c_rep.success:
+                    res.stages.append(StageStatus("export", STAGE_PARTIAL, export_detail))
+                else:
+                    res.stages.append(StageStatus("export", STAGE_OK, export_detail))
+            else:
+                res.stages.append(StageStatus("export", STAGE_OK,
+                                              export_detail + "; compilation not verified (--compile to enable)"))
+        except Exception as exc:
+            print(f"      ! project export failed: {exc}")
+            res.stages.append(StageStatus("export", STAGE_FAILED, f"export error: {exc}"))
+        # export 阶段可能改变 overall/exit code -> 刷新总报告使其一致
+        md_sum, json_sum = write_pipeline_summary(res, out_dir)
 
     if clean_work:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+    print("=== Stage summary ===")
+    for s in res.stages:
+        line = f"  {s.name:<10}: {s.status}"
+        if s.detail and s.status != STAGE_OK:
+            line += f" ({s.detail})"
+        print(line)
+    print(f"=== Pipeline finished in {time.time() - t0:.2f}s : "
+          f"status={res.overall_status}, exit code {res.exit_code}"
+          + (" (strict)" if res.strict else "") + " ===")
 
     if launch_web:
         print()

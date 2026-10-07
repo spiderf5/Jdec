@@ -35,6 +35,7 @@ from . import rename as RN
 from . import callgraph as CG
 
 _CG_CACHE: dict[str, tuple[CG.CallGraph, CG.ReachabilityReport]] = {}
+_CG_FAIL: set[str] = set()
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -428,6 +429,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/callgraph?class=' + encodeURIComponent(cls));
         const data = await res.json();
+        if (data.error) {
+          // 结构化错误：构建失败/无目标，明确报错而不是伪装成空图
+          badgeEl.innerHTML = '<span class="tag-badge tag-suspect" style="font-size:0.76rem; padding:2px 7px;">unavailable</span>' +
+            '<div style="font-size:0.74rem; color:var(--text-muted); margin-top:3px;">' + esc(data.error) + '</div>';
+          callersEl.innerHTML = '<div style="color:var(--text-muted); font-size:0.75rem;">N/A (callgraph unavailable)</div>';
+          calleesEl.innerHTML = '<div style="color:var(--text-muted); font-size:0.75rem;">N/A (callgraph unavailable)</div>';
+          return;
+        }
         if (data.reachable === true) {
           badgeEl.innerHTML = '<span class="tag-badge tag-benign" style="font-size:0.76rem; padding:2px 7px;">reachable</span>' +
             '<div style="font-size:0.74rem; color:var(--text-muted); margin-top:3px;">Triggerable from ' + (data.entrypoints_count || 1) + ' entrypoint(s)</div>';
@@ -778,6 +787,8 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
         return self.work_dir / "audit_notes.json"
 
     def _get_cached_callgraph(self) -> tuple[CG.CallGraph, CG.ReachabilityReport] | None:
+        # None ≠ 合法空数据：配合 self._cg_error 区分"无目标"与"构建失败"
+        self._cg_error: str | None = None
         target = None
         if self.work_dir.is_file() and self.work_dir.suffix.lower() == ".jar":
             target = self.work_dir
@@ -805,18 +816,31 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
                 target = self.work_dir
 
         if not target:
+            self._cg_error = ("no analysis target found (need a .jar, "
+                              "report.json, pipeline_summary.json or src/ "
+                              "in the work dir)")
             return None
 
         cache_key = str(target.resolve())
         if cache_key in _CG_CACHE:
             return _CG_CACHE[cache_key]
+        if cache_key in _CG_FAIL:
+            self._cg_error = ("callgraph build failed for this target "
+                              "(see server stderr for the original error)")
+            return None
 
         try:
             cg = CG.build_callgraph(target)
             rep = CG.compute_reachability(cg)
             _CG_CACHE[cache_key] = (cg, rep)
             return (cg, rep)
-        except Exception:
+        except Exception as exc:
+            # 构建失败 ≠ 无数据：留痕到失败缓存（避免每个请求重复重建+刷屏），
+            # stderr 告警一次，处理器负责把它变成结构化错误而不是假数据
+            _CG_FAIL.add(cache_key)
+            print(f"[callgraph] build failed for {target}: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            self._cg_error = f"callgraph build failed: {type(exc).__name__}: {exc}"
             return None
 
     def do_POST(self):
@@ -1112,14 +1136,12 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
 
             cg_data = self._get_cached_callgraph()
             if not cg_data:
+                # 构建失败/无目标 ≠ 空图：返回结构化错误，禁止合成 reachable:null 假数据
                 self.send_json({
+                    "error": getattr(self, "_cg_error", None)
+                             or "callgraph unavailable",
                     "class": cls,
-                    "reachable": None,
-                    "entrypoints_count": 0,
-                    "callers": [],
-                    "callees": [],
-                    "path": [],
-                })
+                }, status=503)
                 return
 
             cg, rep = cg_data
@@ -1214,9 +1236,9 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
 
         self.send_error(404, "Not Found")
 
-    def send_json(self, data: dict):
+    def send_json(self, data: dict, status: int = 200):
         body = json.dumps(data).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

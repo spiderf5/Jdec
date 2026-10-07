@@ -7,6 +7,7 @@ reconstructs exception handlers and stack maps, and restores original method bod
 
 from __future__ import annotations
 
+import collections
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -252,6 +253,10 @@ class VMMethod:
     max_locals: int = 1
     max_stack: int = 2
     opcode_map: list[int] | dict[int, int] | None = None
+    # how to read a bare int in `code`: "ordinal" = OPCS ordinal (default),
+    # "jvm-opcode" = raw JVM opcode. Threaded through decode/JSON so a pool
+    # dumped from a jvm-opcode stream does not silently re-read as ordinals.
+    mode: str = "ordinal"
 
 
 BVMMethod = VMMethod  # backward-compatibility alias
@@ -590,6 +595,247 @@ def compute_interface_args_count(desc: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# max_stack computation (REVIEW-2026-10-07 §1.3)
+#
+# `max(declared, 8)` was a guess, and a stack of 9 slots came out declared as
+# 8 - a VerifyError waiting for the first caller. The real value is a dataflow
+# property of the instruction stream, so we compute it: a worklist fixpoint
+# over the decoded instructions, merging join points by max (a sound
+# over-approximation - an oversized max_stack is legal, an undersized one is
+# not). Long/double occupy two slots; exception handler entries start at
+# depth 1 (the caught exception). Branch targets are resolved with the same
+# clamp translate_method uses, so the analysis covers exactly the code we emit.
+# ---------------------------------------------------------------------------
+
+# opcodes that end a basic block (no fall-through)
+_TERMINAL_OPS = frozenset({
+    "IRETURN", "LRETURN", "FRETURN", "DRETURN", "ARETURN", "RETURN", "ATHROW",
+})
+
+# (pop, push) per slot, for the fixed-shape opcodes. Descriptors (invoke*,
+# get/putfield) are resolved dynamically in _stack_effect.
+_FIXED_EFFECTS: dict[str, tuple[int, int]] = {
+    "ICONST_M1": (0, 1), "ICONST_0": (0, 1), "ICONST_1": (0, 1), "ICONST_2": (0, 1),
+    "ICONST_3": (0, 1), "ICONST_4": (0, 1), "ICONST_5": (0, 1),
+    "LCONST_0": (0, 2), "LCONST_1": (0, 2),
+    "FCONST_0": (0, 1), "FCONST_1": (0, 1), "FCONST_2": (0, 1),
+    "DCONST_0": (0, 2), "DCONST_1": (0, 2),
+    "ACONST_NULL": (0, 1), "BIPUSH": (0, 1), "SIPUSH": (0, 1),
+    "POP": (1, 0), "POP2": (2, 0),
+    "DUP": (1, 2), "DUP_X1": (2, 3), "DUP_X2": (3, 4),
+    "DUP2": (2, 4), "DUP2_X1": (3, 5), "DUP2_X2": (4, 6), "SWAP": (2, 2),
+    "INEG": (1, 1), "FNEG": (1, 1), "LNEG": (2, 2), "DNEG": (2, 2),
+    "IINC": (0, 0), "NOP": (0, 0), "GOTO": (0, 0),
+    "TABLESWITCH": (1, 0), "LOOKUPSWITCH": (1, 0),
+    "IRETURN": (1, 0), "FRETURN": (1, 0), "ARETURN": (1, 0),
+    "LRETURN": (2, 0), "DRETURN": (2, 0), "RETURN": (0, 0), "ATHROW": (1, 0),
+    "NEW": (0, 1), "NEWARRAY": (1, 1), "ANEWARRAY": (1, 1), "ARRAYLENGTH": (1, 1),
+    "CHECKCAST": (1, 1), "INSTANCEOF": (1, 1),
+    "MONITORENTER": (1, 0), "MONITOREXIT": (1, 0),
+    "IFEQ": (1, 0), "IFNE": (1, 0), "IFLT": (1, 0), "IFGE": (1, 0),
+    "IFGT": (1, 0), "IFLE": (1, 0), "IFNULL": (1, 0), "IFNONNULL": (1, 0),
+    "IF_ICMPEQ": (2, 0), "IF_ICMPNE": (2, 0), "IF_ICMPLT": (2, 0),
+    "IF_ICMPGE": (2, 0), "IF_ICMPGT": (2, 0), "IF_ICMPLE": (2, 0),
+    "IF_ACMPEQ": (2, 0), "IF_ACMPNE": (2, 0),
+    "I2L": (1, 2), "I2F": (1, 1), "I2D": (1, 2),
+    "L2I": (2, 1), "L2F": (2, 1), "L2D": (2, 2),
+    "F2I": (1, 1), "F2L": (1, 2), "F2D": (1, 2),
+    "D2I": (2, 1), "D2L": (2, 2), "D2F": (2, 1),
+    "LCMP": (4, 1), "FCMPL": (2, 1), "FCMPG": (2, 1),
+    "DCMPL": (4, 1), "DCMPG": (4, 1),
+    "IADD": (2, 1), "ISUB": (2, 1), "IMUL": (2, 1), "IDIV": (2, 1), "IREM": (2, 1),
+    "FADD": (2, 1), "FSUB": (2, 1), "FMUL": (2, 1), "FDIV": (2, 1), "FREM": (2, 1),
+    "IAND": (2, 1), "IOR": (2, 1), "IXOR": (2, 1),
+    "ISHL": (2, 1), "ISHR": (2, 1), "IUSHR": (2, 1),
+    "LADD": (4, 2), "LSUB": (4, 2), "LMUL": (4, 2), "LDIV": (4, 2), "LREM": (4, 2),
+    "LAND": (4, 2), "LOR": (4, 2), "LXOR": (4, 2),
+    "LSHL": (3, 2), "LSHR": (3, 2), "LUSHR": (3, 2),
+    "DADD": (4, 2), "DSUB": (4, 2), "DMUL": (4, 2), "DDIV": (4, 2), "DREM": (4, 2),
+}
+
+_TWO_SLOT_LOADS = frozenset({"LLOAD", "DLOAD"})
+_TWO_SLOT_STORES = frozenset({"LSTORE", "DSTORE"})
+
+
+def _method_shape(desc: str) -> tuple[int, int]:
+    """(argument slots, return slots) from a method descriptor."""
+    if not desc or "(" not in desc or ")" not in desc:
+        return 0, 0
+    params = desc[desc.find("(") + 1:desc.find(")")]
+    ret = desc[desc.find(")") + 1:]
+    slots = 0
+    i = 0
+    while i < len(params):
+        c = params[i]
+        if c in "JD":
+            slots += 2
+            i += 1
+        elif c == "L":
+            semi = params.find(";", i)
+            i = len(params) if semi < 0 else semi + 1
+            slots += 1
+        elif c == "[":
+            while i < len(params) and params[i] == "[":
+                i += 1
+            if i < len(params) and params[i] == "L":
+                semi = params.find(";", i)
+                i = len(params) if semi < 0 else semi + 1
+            elif i < len(params):
+                i += 1
+            slots += 1
+        else:
+            slots += 1
+            i += 1
+    rslots = 2 if ret[:1] in ("J", "D") else (0 if ret[:1] == "V" else 1)
+    return slots, rslots
+
+
+def _value_slots(desc: str) -> int:
+    """Slots occupied by a single value of the given (field) descriptor."""
+    return 2 if desc[:1] in ("J", "D") else 1
+
+
+def _const_is_two_word(val: Any) -> bool:
+    """Mirror ConstantPoolHelper.add_constant's routing: is this LDC 2 slots?"""
+    if isinstance(val, dict):
+        return val.get("type") in ("long", "double")
+    if isinstance(val, bool):
+        return False
+    if isinstance(val, int):
+        return not (-2**31 <= val < 2**31)
+    if isinstance(val, float):
+        return True
+    return False
+
+
+def _stack_effect(insn: VMInstruction, vm_method: VMMethod) -> tuple[int, int]:
+    """(pop, push) in slots for one decoded virtual instruction."""
+    name = insn.opcode_name
+    if name in _FIXED_EFFECTS:
+        return _FIXED_EFFECTS[name]
+    if name in _TWO_SLOT_LOADS:
+        return 0, 2
+    if name.endswith("LOAD") and insn.fmt == "var":      # ILOAD/FLOAD/ALOAD
+        return 0, 1
+    if name in _TWO_SLOT_STORES:
+        return 2, 0
+    if name.endswith("STORE") and insn.fmt == "var":     # ISTORE/FSTORE/ASTORE
+        return 1, 0
+    if name.endswith("ALOAD"):                           # array element loads
+        return 2, (2 if name in ("LALOAD", "DALOAD") else 1)
+    if name.endswith("ASTORE"):                          # array element stores
+        return 4 if name in ("LASTORE", "DASTORE") else 3, 0
+    if name == "LDC":
+        c_idx = insn.operands[0] if insn.operands else -1
+        val = vm_method.constants[c_idx] if 0 <= c_idx < len(vm_method.constants) else 0
+        return 0, (2 if _const_is_two_word(val) else 1)
+    if name in ("GETSTATIC",):
+        return 0, _value_slots(str(vm_method.constants[insn.operands[2]])
+                               if len(insn.operands) > 2 and
+                               0 <= insn.operands[2] < len(vm_method.constants) else "I")
+    if name in ("PUTSTATIC",):
+        return _value_slots(str(vm_method.constants[insn.operands[2]])
+                            if len(insn.operands) > 2 and
+                            0 <= insn.operands[2] < len(vm_method.constants) else "I"), 0
+    if name == "GETFIELD":
+        return 1, _value_slots(str(vm_method.constants[insn.operands[2]])
+                               if len(insn.operands) > 2 and
+                               0 <= insn.operands[2] < len(vm_method.constants) else "I")
+    if name == "PUTFIELD":
+        return 1 + _value_slots(str(vm_method.constants[insn.operands[2]])
+                                if len(insn.operands) > 2 and
+                                0 <= insn.operands[2] < len(vm_method.constants) else "I"), 0
+    if name in ("INVOKEVIRTUAL", "INVOKESPECIAL", "INVOKEINTERFACE"):
+        args, ret = _method_shape(str(vm_method.constants[insn.operands[2]])
+                                  if len(insn.operands) > 2 and
+                                  0 <= insn.operands[2] < len(vm_method.constants) else "()V")
+        return args + 1, ret                             # + receiver
+    if name == "INVOKESTATIC":
+        args, ret = _method_shape(str(vm_method.constants[insn.operands[2]])
+                                  if len(insn.operands) > 2 and
+                                  0 <= insn.operands[2] < len(vm_method.constants) else "()V")
+        return args, ret
+    if name == "INVOKEDYNAMIC":
+        args, ret = _method_shape(str(vm_method.constants[insn.operands[1]])
+                                  if len(insn.operands) > 1 and
+                                  0 <= insn.operands[1] < len(vm_method.constants) else "()V")
+        return args, ret
+    if name == "MULTIANEWARRAY":
+        dims = insn.operands[1] if len(insn.operands) > 1 else 1
+        return int(dims), 1
+    # Unknown shape: (0, 0) can only understate. Everything in OPCS_SPECS is
+    # covered above, so reaching here means the spec table grew without this
+    # analysis - fail loudly instead of silently declaring a small stack.
+    raise ValueError(f"no stack effect known for opcode {name!r}; "
+                     f"extend _FIXED_EFFECTS/_stack_effect")
+
+
+def compute_max_stack(instructions: list[VMInstruction], vm_method: VMMethod,
+                      v_pc_to_idx: dict[int, int]) -> int:
+    """Compute the real max_stack (in slots) of a decoded virtual stream.
+
+    Worklist fixpoint: depth is propagated per instruction, join points merge
+    by max, exception handler entries start at depth 1. Returns the deepest
+    point any executable path reaches - a sound over-approximation of what the
+    JVM verifier will demand.
+    """
+    if not instructions:
+        return max(getattr(vm_method, "max_stack", 0), 0)
+
+    depths: dict[int, int] = {0: 0}
+    work: collections.deque[int] = collections.deque([0])
+
+    eh = vm_method.exception_handlers
+    for i in range(0, len(eh) - 3, 4):
+        h_idx = v_pc_to_idx.get(eh[i + 2])
+        if h_idx is not None and depths.get(h_idx, -1) < 1:
+            depths[h_idx] = 1
+            work.append(h_idx)
+
+    peak = 0
+    last = len(instructions) - 1
+    while work:
+        idx = work.popleft()
+        d = depths[idx]
+        insn = instructions[idx]
+        pop, push = _stack_effect(insn, vm_method)
+        after = d - pop + push
+        peak = max(peak, d, after)
+        if after < 0:
+            after = 0  # malformed stream: clamp so propagation stays usable
+
+        def reach(target_vpc: int) -> None:
+            t_idx = v_pc_to_idx.get(target_vpc, last)
+            if after > depths.get(t_idx, -1):
+                depths[t_idx] = after
+                work.append(t_idx)
+
+        if insn.fmt == "jump":
+            reach(insn.operands[0])
+            if insn.opcode_name == "GOTO":
+                continue                                # no fall-through
+        elif insn.fmt == "table_switch":
+            count = insn.operands[3]
+            reach(insn.operands[2])                     # default
+            for vt in insn.operands[4:4 + count]:
+                reach(vt)
+            continue
+        elif insn.fmt == "lookup_switch":
+            reach(insn.operands[0])                     # default
+            pairs = insn.operands[2:2 + int(insn.operands[1]) * 2]
+            for vt in pairs[1::2]:
+                reach(vt)
+            continue
+        if insn.opcode_name in _TERMINAL_OPS:
+            continue
+        if idx < last:
+            if after > depths.get(idx + 1, -1):
+                depths[idx + 1] = after
+                work.append(idx + 1)
+    return peak
+
+
+# ---------------------------------------------------------------------------
 # Virtual to standard JVM bytecode re-translator
 # ---------------------------------------------------------------------------
 
@@ -604,7 +850,8 @@ class VMTranslator:
         allow_widening: bool = True
     ) -> DevirtualizedResult:
         """Translate a VMMethod into standard JVM bytecode and reassemble through CFG."""
-        instructions = VMDecoder.decode(vm_method.code, vm_method.opcode_map)
+        instructions = VMDecoder.decode(vm_method.code, vm_method.opcode_map,
+                                        mode=getattr(vm_method, "mode", "ordinal"))
         cp_helper = ConstantPoolHelper(cf)
 
         # 1. Map virtual PC to instruction index
@@ -854,13 +1101,21 @@ class VMTranslator:
                 param_slots -= 1
             computed_locals = max(computed_locals, param_slots)
 
+        # Real stack-depth dataflow (REVIEW-2026-10-07 §1.3): the declared
+        # value stays as a floor (it is input, not a guess), but the computed
+        # peak replaces the old `max(declared, 8)` shrug.
+        computed_stack = compute_max_stack(instructions, vm_method, v_pc_to_idx)
+        max_stack = max(computed_stack, vm_method.max_stack)
+        stats["max_stack"] = computed_stack
+        stats["max_stack_source"] = "computed"
+
         return DevirtualizedResult(
             code_id=vm_method.code_id,
             name=vm_method.name,
             desc=vm_method.desc,
             bytecode=final_code,
             handlers=final_handlers,
-            max_stack=max(vm_method.max_stack, 8),
+            max_stack=max_stack,
             max_locals=computed_locals,
             instructions_count=len(instructions),
             stats=stats
@@ -1020,7 +1275,13 @@ class Devirtualizer:
                                 nat_idx = cf.cp[m_idx][1][1]
                                 if nat_idx < len(cf.cp) and cf.cp[nat_idx] and cf.cp[nat_idx][0] == CF.C_NAME_AND_TYPE:
                                     m_name = cf.utf8(cf.cp[nat_idx][1][0])
-                                    if m_name == "execute" and pushed_int is not None:
+                                    m_desc = cf.utf8(cf.cp[nat_idx][1][1])
+                                    # 描述符校验：execute 的第一参数必须是 int，
+                                    # 与前面 push 的 codeId 语义一致；只撞名不撞
+                                    # 签名的同名方法不算命中（防误报 codeId）
+                                    if (m_name == "execute"
+                                            and m_desc.startswith("(I")
+                                            and pushed_int is not None):
                                         return pushed_int
 
                 o += attr_len
@@ -1119,6 +1380,52 @@ class Devirtualizer:
         }
 
     @classmethod
+    def _normalize_opcode_map(cls, raw: Any, where: str) -> list[int] | dict[int, int] | None:
+        """Normalize an opcode_map coming from JSON back into working types.
+
+        JSON object keys are always strings, so a dict opcode_map `{7: 4}`
+        round-trips to `{"7": 4}` - and without this normalization
+        `resolve_opcode(7, map)` returned None and every pool import silently
+        failed to decode (REVIEW-2026-10-07 §1.2). Keys are coerced to int
+        and every value is validated instead of trusted.
+        """
+        if raw is None:
+            return None
+        if isinstance(raw, list):
+            out: list[int] = []
+            for i, v in enumerate(raw):
+                if v is None:
+                    out.append(-1)          # explicit "unmapped" slot
+                elif isinstance(v, int) and 0 <= v < len(OPCS_ORDINALS):
+                    out.append(v)
+                elif isinstance(v, str) and v in OPCS_SPECS:
+                    out.append(ORDINAL_BY_NAME[v])
+                else:
+                    raise ValueError(
+                        f"{where}: opcode_map[{i}] = {v!r} is not a valid "
+                        f"OPCS ordinal (<{len(OPCS_ORDINALS)}) or mnemonic")
+            return out
+        if isinstance(raw, dict):
+            out_d: dict[int, int] = {}
+            for k, v in raw.items():
+                try:
+                    key = int(k)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{where}: opcode_map key {k!r} is not an integer") from None
+                if isinstance(v, int) and 0 <= v < len(OPCS_ORDINALS):
+                    out_d[key] = v
+                elif isinstance(v, str) and v in OPCS_SPECS:
+                    out_d[key] = ORDINAL_BY_NAME[v]
+                else:
+                    raise ValueError(
+                        f"{where}: opcode_map[{k}] = {v!r} is not a valid "
+                        f"OPCS ordinal (<{len(OPCS_ORDINALS)}) or mnemonic")
+            return out_d
+        raise ValueError(
+            f"{where}: opcode_map must be a list, dict or null, got {type(raw).__name__}")
+
+    @classmethod
     def load_code_pool(cls, path: Path) -> dict[int, VMMethod]:
         """Load code pool dictionary from a JSON file."""
         import json
@@ -1126,17 +1433,24 @@ class Devirtualizer:
         res: dict[int, VMMethod] = {}
         items = data.values() if isinstance(data, dict) else data
         for item in items:
+            mode = item.get("mode", "ordinal")
+            if mode not in ("ordinal", "jvm-opcode"):
+                raise ValueError(
+                    f"code pool entry {item.get('code_id')!r}: unknown opcode mode {mode!r} "
+                    f"(expected 'ordinal' or 'jvm-opcode')")
             method = VMMethod(
                 code_id=int(item["code_id"]),
                 name=item.get("name", ""),
                 desc=item.get("desc", ""),
                 is_static=item.get("is_static", False),
-                code=item.get("code", []),
+                code=[int(c) for c in item.get("code", [])],
                 constants=item.get("constants", []),
-                exception_handlers=item.get("exception_handlers", []),
+                exception_handlers=[int(e) for e in item.get("exception_handlers", [])],
                 max_locals=item.get("max_locals", 2),
                 max_stack=item.get("max_stack", 4),
-                opcode_map=item.get("opcode_map")
+                opcode_map=cls._normalize_opcode_map(
+                    item.get("opcode_map"), f"code pool entry {item.get('code_id')!r}"),
+                mode=mode,
             )
             res[method.code_id] = method
         return res

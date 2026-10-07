@@ -165,7 +165,8 @@ def cmd_decompile(args: argparse.Namespace) -> int:
               f"{rep.failed + rep.missing} failed")
         print(f"retried   : {rep.retried} (improved {rep.improved})")
         if rep.coverage_avg is not None:
-            print(f"recovery  : {rep.coverage_avg * 100:.1f}% of members found in output")
+            print(f"recovery  : {rep.coverage_avg * 100:.1f}% member name-hit rate "
+                  f"(declared members found in output)")
         print(f"elapsed   : {rep.elapsed:.1f}s")
         print(f"source    : {out_dir / 'src'}")
         print(f"report    : {out_dir / 'report.md'}")
@@ -378,7 +379,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
                     limit=args.limit, stop_on_error=args.stop_on_error,
                     cp_file=args.cp_file, timeout=args.timeout,
                     with_stubs=getattr(args, "with_stubs", True),
-                    from_frida=from_frida)
+                    from_frida=from_frida,
+                    allow_exec=getattr(args, "execute", False))
     tsv = out_dir / "recovered.tsv"
     if args.rewrite_src:
         if not Path(args.rewrite_src).is_dir():
@@ -423,12 +425,19 @@ def cmd_pool(args: argparse.Namespace) -> int:
         if not spec.is_file():
             print(f"no such file: {spec}")
             return 2
+        if not getattr(args, "execute", False):
+            print("NOTICE    : pool harvest runs the replay JVM, which EXECUTES "
+                  "code from the target jar.")
+            print("            Default is refused (no sandbox). Pass --execute "
+                  "to run it anyway.")
+            return 3
         out_tsv = Path(args.output) if args.output else \
             spec.parent / "pool_harvest.tsv"
         st = PL.harvest(spec, out_tsv, spec.parent, cp=args.cp,
                         cp_file=args.cp_file, java=args.java,
                         timeout=args.timeout,
-                        with_stubs=getattr(args, "with_stubs", True))
+                        with_stubs=getattr(args, "with_stubs", True),
+                        allow_exec=True)
         if st["timed_out"]:
             print(f"WARNING   : driver killed at {args.timeout}s timeout "
                   f"(partial output kept; rerun with --timeout N)")
@@ -598,7 +607,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
     engines_dir = Path(args.engines_dir)
 
     try:
-        pipeline.run_pipeline(
+        res = pipeline.run_pipeline(
             target=input_path,
             out_dir=out_dir,
             engines_dir=engines_dir,
@@ -607,6 +616,8 @@ def cmd_auto(args: argparse.Namespace) -> int:
             mappings_file=Path(args.mappings) if args.mappings else None,
             no_deflat=args.no_deflat,
             no_recover=args.no_recover,
+            allow_replay=getattr(args, "allow_replay", False),
+            strict=getattr(args, "strict", False),
             with_stubs=getattr(args, "with_stubs", True),
             no_natives=args.no_natives,
             no_analyze=args.no_analyze,
@@ -621,7 +632,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
             cp=getattr(args, "cp", "") or "",
             cp_file=Path(args.cp_file) if getattr(args, "cp_file", None) else None,
         )
-        return 0
+        return res.exit_code
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -639,7 +650,7 @@ def cmd_reach(args: argparse.Namespace) -> int:
     cg = callgraph.build_callgraph(raw, custom_entrypoints=custom_eps)
     rep = callgraph.compute_reachability(cg)
 
-    print(f"classes      : {rep.total_classes} total -> {len(rep.reachable_classes)} reachable ({rep.reachability_pct}%), {len(rep.dead_classes)} dead/unused ({rep.dead_classes_pct}%)")
+    print(f"classes      : {rep.total_classes} total -> {len(rep.reachable_classes)} reachable ({rep.reachability_pct}%), {len(rep.dead_classes)} suspected unused ({rep.dead_classes_pct}%)")
     print(f"methods      : {rep.total_methods} declared -> {len(rep.reachable_methods)} reachable, {len(rep.dead_methods)} dead")
     print(f"entrypoints  : {len(rep.entrypoints)} discovered")
     for ep in rep.entrypoints[:6]:
@@ -659,10 +670,32 @@ def cmd_reach(args: argparse.Namespace) -> int:
 
     prune_out = getattr(args, "prune", None)
     if prune_out and raw.is_file():
-        p_out = Path(prune_out)
-        kept, dropped, saved = callgraph.prune_jar(raw, p_out, rep.reachable_classes)
-        print(f"\npruned jar   : {p_out}")
-        print(f"  kept {kept} reachable class(es), dropped {dropped} dead class(es), saved {saved // 1024} KB")
+        # REVIEW 2.3: no entrypoints -> reachability is empty by construction;
+        # pruning would delete the whole jar. Refuse, stay report-only.
+        if not rep.entrypoints:
+            print("\nprune       : REFUSED - no entrypoints discovered "
+                  "(no mod metadata, manifest main, or user -e list).")
+            print("  Reachability cannot distinguish dead code from unknown "
+                  "entry paths; pruning is disabled. The report above is the output.")
+        else:
+            # Unknown-dependency channels (indy method handles, reflection by
+            # name) are invisible to the call graph: keep them conservatively.
+            keep_conservative, keep_counts = callgraph.conservative_keepset(raw)
+            held_back = keep_conservative - rep.reachable_classes
+            prune_set = rep.reachable_classes | keep_conservative
+            p_out = Path(prune_out)
+            kept, dropped, saved = callgraph.prune_jar(raw, p_out, prune_set)
+            print(f"\npruned jar   : {p_out}")
+            print(f"  kept {kept} class(es) ({len(rep.reachable_classes)} reachable + "
+                  f"{len(held_back)} conservatively held back), "
+                  f"dropped {dropped} suspected-unused class(es), saved {saved // 1024} KB")
+            if held_back:
+                print(f"  hold-back reasons: bootstrap/indy={keep_counts['bsm']}, "
+                      f"method-handle targets={keep_counts['handle']}, "
+                      f"reflection-by-name={keep_counts['reflect']}")
+            print("  WARNING: this is a 'suspected unused classes' cut, NOT a "
+                  "verified slim jar - lambda/reflection/behaviour equivalence "
+                  "is not guaranteed. Prefer the reachability report for decisions.")
 
     dot_out = getattr(args, "dot", None)
     if dot_out:
@@ -888,8 +921,16 @@ def build_parser() -> argparse.ArgumentParser:
     sr = sub.add_parser("recover",
                         help="self-consistent replay: decrypt indy-encrypted "
                              "strings/constants by running the target's own "
-                             "bootstrap machinery (needs a runnable classpath)")
+                             "bootstrap machinery (EXECUTES code from the "
+                             "target jar; needs a runnable classpath and "
+                             "--execute)")
     sr.add_argument("input")
+    sr.add_argument("--execute", action="store_true",
+                    help="run the replay JVM. WARNING: the replay EXECUTES "
+                         "code from the target jar (initializers, decryptors) "
+                         "with your process's permissions - stubs, timeouts "
+                         "and -Xverify:none are NOT a sandbox. Without this "
+                         "flag only the static spec is generated.")
     sr.add_argument("-o", "--output", default=None, help="output dir")
     sr.add_argument("--cp", default="", help="extra classpath entries for the "
                    "replay JVM, ';'-separated on Windows (MC jars, libs, stubs)")
@@ -942,6 +983,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--timeout", type=int, default=3600,
                     help="kill the replay JVM after N seconds (default "
                          "3600); partial output is kept on timeout")
+    sp.add_argument("--execute", action="store_true",
+                    help="harvest: run the replay JVM. WARNING: the replay "
+                         "EXECUTES code from the target jar with your "
+                         "process's permissions - stubs and timeouts are NOT "
+                         "a sandbox. Required for the harvest step.")
     sp.add_argument("--no-stubs", dest="with_stubs", action="store_false", default=True,
                     help="do not inject synthetic Minecraft runtime stubs into classpath")
     sp.set_defaults(func=cmd_pool)
@@ -1021,6 +1067,12 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--mappings", default=None, help="custom mapping file (proguard/tiny/tsrg)")
         parser.add_argument("--no-deflat", action="store_true", help="skip control flow unflattening")
         parser.add_argument("--no-recover", action="store_true", help="skip dynamic replay string decryption")
+        parser.add_argument("--allow-replay", action="store_true",
+                            help="enable dynamic replay string decryption - EXECUTES code "
+                                 "from the target jar on this machine; opt-in, default off")
+        parser.add_argument("--strict", action="store_true",
+                            help="CI mode: exit 2 on any stage failure or partial result "
+                                 "(default exit codes: 0=success, 1=partial, 2=failed)")
         parser.add_argument("--no-stubs", dest="with_stubs", action="store_false", default=True,
                             help="do not inject synthetic Minecraft runtime stubs into replay classpath")
         parser.add_argument("--no-natives", action="store_true", help="skip native library triage")
@@ -1057,7 +1109,9 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("-t", "--target", default=None,
                             help="target class or method to trace shortest execution path from entrypoints")
         parser.add_argument("--prune", default=None,
-                            help="output slimmed jar containing only reachable classes")
+                            help="write a jar dropping SUSPECTED-unused classes only "
+                                 "(conservative: keeps indy handles and reflection-by-name "
+                                 "targets; not a behaviour-safe slim jar)")
         parser.add_argument("--dot", default=None,
                             help="export call graph in Graphviz DOT format")
         parser.add_argument("--json", default=None,

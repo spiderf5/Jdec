@@ -112,14 +112,16 @@ def build_stubs_jar(dest: Path, javac_bin: str = "javac") -> Path:
         # Compile with javac
         cmd = [javac_resolved, "-source", "8", "-target", "8"] + java_files
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               errors="replace", check=False)
         except Exception:
             r = None
 
         if r is None or r.returncode != 0:
             # Fallback without -source 8 / -target 8 (for newer javac)
             cmd = [javac_resolved] + java_files
-            r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               errors="replace", check=False)
 
         if r.returncode != 0:
             raise RuntimeError(f"javac failed to compile stubs: {r.stderr or r.stdout}")
@@ -383,7 +385,8 @@ def build_mock_agent_jar(dest: Path, javac_bin: str = "javac") -> Path:
         agent_src.write_text(MOCK_AGENT_JAVA, encoding="utf-8")
         javac_resolved = _find_javac(javac_bin)
         cmd = [javac_resolved, str(agent_src)]
-        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", check=False)
         if r.returncode == 0:
             with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr("META-INF/MANIFEST.MF", manifest)

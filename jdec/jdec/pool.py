@@ -28,7 +28,8 @@ import subprocess
 from collections import defaultdict
 from pathlib import Path
 
-from .recover import (java_escape, java_unescape, norm_classpath,
+from .recover import (ReplayNotAllowed, code_mask, java_escape,
+                      java_unescape, norm_classpath, run_replay,
                       triage_failures, write_failed_triage)
 
 DRIVER_JAVA = (Path(__file__).parent / "pool_driver_template.java").read_text(
@@ -258,15 +259,26 @@ def scan_spec(src_dir: Path, spec_path: Path) -> dict:
 
 def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
             cp_file: Path | None = None, java: str = "java",
-            timeout: int = 3600, with_stubs: bool = True) -> dict:
-    """生成/编译 PoolDriver，真类加载逐站点求明文 → out_tsv（R/E 行）。"""
+            timeout: int = 3600, with_stubs: bool = True,
+            allow_exec: bool = False) -> dict:
+    """生成/编译 PoolDriver，真类加载逐站点求明文 → out_tsv（R/E 行）。
+
+    安全闸门：harvest 的全部工作都是 JVM replay——**会真实执行目标 jar
+    里的代码**（clinit / 解密器以本进程权限运行）。默认 allow_exec=False
+    直接拒绝；CLI 需 --execute，pipeline 需 allow_replay=True。
+    """
+    if not allow_exec:
+        raise ReplayNotAllowed(
+            "pool harvest runs the replay JVM, which EXECUTES code from the "
+            "target jar (initializers/decryptors run with this process's "
+            "permissions); pass --execute (CLI) or allow_exec=True to enable")
     work_dir.mkdir(parents=True, exist_ok=True)
     src = work_dir / "PoolDriver.java"
     src.write_text(DRIVER_JAVA, encoding="utf-8")
     from . import stubs as SB
     javac_cmd = SB._find_javac("javac")
     r = subprocess.run([javac_cmd, "-d", str(work_dir), str(src)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, errors="replace")
     if r.returncode != 0:
         raise RuntimeError("javac failed: " + (r.stderr or r.stdout or "")[-2000:])
 
@@ -318,17 +330,13 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
         encoding="utf-8")
     log_path = work_dir / "driver.log"
     out_tsv.parent.mkdir(parents=True, exist_ok=True)
-    timed_out = False
     # stdout 直落盘：真实样本实战教训，管道缓冲+大输出会假死假象
+    # 超时终止整个进程树（run_replay），部分输出保留
     with open(out_tsv, "wb") as fo, open(log_path, "wb") as fe:
-        try:
-            rc = subprocess.run([java, "@" + str(argsfile)],
-                                stdout=fo, stderr=fe,
-                                timeout=timeout).returncode
-        except subprocess.TimeoutExpired:
-            # 超时保部分输出；调用方按需加大 --timeout 重跑
-            timed_out = True
-            rc = 1
+        cp_res = run_replay([java, "@" + str(argsfile)], timeout=timeout,
+                            stdout=fo, stderr=fe)
+        rc = cp_res.returncode
+        timed_out = getattr(cp_res, "timed_out", False)
 
     ok = err = 0
     fail_lines: list[str] = []
@@ -424,8 +432,12 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
     for f, own_fq, txt in parsed:
         orig = txt
         own_acc = acc.get(own_fq, {})
+        # 词法 mask：注释/字符串里的同形调用点不是真调用，跳过
+        mask = code_mask(txt)
 
         def repl_q(m: "re.Match") -> str:
+            if not mask[m.start()]:
+                return m.group(0)
             cls_raw, meth = m.group(1), m.group(2)
             fq = _resolve_fq(cls_raw, acc, simple, ambiguous)
             if fq is None:
@@ -444,6 +456,8 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
             return m.group(0)
 
         def repl_b(m: "re.Match") -> str:
+            if not mask_b[m.start()]:
+                return m.group(0)
             meth = m.group(1)
             if meth not in own_acc:
                 return m.group(0)
@@ -461,17 +475,23 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
 
         txt = _CALL_Q.sub(repl_q, txt)
         if own_acc:
+            # _CALL_Q 的替换会改变长度偏移，bare 正则须对新文本重算 mask
+            mask_b = code_mask(txt)
             txt = _CALL_BARE.sub(repl_b, txt)
         if txt != orig:
             _write(f, txt)
 
     # verify：回填后的树里，可解站点的调用形态残留必须为 0
+    # （verify 与替换同口径：只看代码区，注释/字符串里的同形不算）
     residual = 0
     residual_samples: list[str] = []
     for f, own_fq in [(f, fq) for f, fq, _ in parsed]:
         txt = _read(f)
         own_acc = acc.get(own_fq, {})
+        vmask = code_mask(txt)
         for m in _CALL_Q.finditer(txt):
+            if not vmask[m.start()]:
+                continue
             cls_raw, meth = m.group(1), m.group(2)
             fq = _resolve_fq(cls_raw, acc, simple, ambiguous)
             if fq is None:
@@ -485,6 +505,8 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
                     residual_samples.append(f.name)
         if own_acc:
             for m in _CALL_BARE.finditer(txt):
+                if not vmask[m.start()]:
+                    continue
                 meth = m.group(1)
                 if meth not in own_acc:
                     continue

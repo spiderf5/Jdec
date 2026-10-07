@@ -577,3 +577,125 @@
   `git stash` 整体搁置；新增文件仅 `jdec/tests/samples/demo/broken/Truncated.java`
   （可删）与 `D:/MC/notes/`（独立仓，整目录删除即可）。
 - skill 用户级副本同步的 7 个文件：重拷仓库副本即恢复。
+
+---
+
+# REVIEW-2026-10-07 全量处置（2026-10-07 第二轮）
+
+## 1. 任务目标
+
+解决 `REVIEW-2026-10-07.md` 列出的全部缺陷：P0 三项（§1.1 覆盖率骗过、§1.2 代码池
+JSON 往返破坏、§1.3 max_stack 虚报）+ P0 安全项（§2.1 动态重放无权限隔离）+
+P1 两项（§2.2 阶段失败未贯通、§2.3 裁剪不保守）+ P2 一项（§2.4 自愈无证据分级），
+并为每个修复补"修复前会失败"的负向用例（§3）。
+
+## 2. 逐条处置
+
+| 评审条目 | 状态 | 关键改动 |
+| --- | --- | --- |
+| §1.1 成员覆盖率被注释/调用点骗过 | ✅ | score.py：`_strip_noise()`（注释/字符串字面量置空后匹配）+ `_decl_counts()`（声明位置计数，方法/字段/枚举常量/record 组件）+ 候选按名计重载数 `matched=Σmin(k,decls)`；措辞全局改为 "member name-hit rate"（decompile/cli/pipeline）。修复后补修：泛型段 `(?:<[^<>]*>\s+)*` 不支持嵌套尖括号，`public <T extends C<T>> T maxOf(...)` 漏配 → 统一引用 `_GEN`（`_GENS`），sample.jar Showcase 回归 ok=10 |
+| §1.2 代码池 JSON 往返破坏操作码映射 | ✅ | devirt.py：`VMMethod.mode` 字段；`_normalize_opcode_map()`（dict 键 int 化 + 值合法性校验 0..len(OPCS_ORDINALS)-1 或合法助记符，非法 fail loudly）；`load_code_pool` 校验 mode；评审精确复现 `{7:4}` 往返后 `resolve_opcode(7)=="ICONST_1"` |
+| §1.3 max_stack 未真正计算 | ✅ | devirt.py：`compute_max_stack()` worklist 不动点数据流（汇合取 max、long/double 双槽、异常处理器入口深 1、分支/translate 同一 clamp、未知操作码 raise）；`translate_method` 取 `max(计算值, 声明值)`，stats 记 `max_stack_source="computed"`。峰值 9（声明 2）→ 产出 ≥9 |
+| §2.1 动态重放无权限隔离 | ✅ | recover.py：`allow_exec=False`（默认拒绝，仅静态 spec，返回 3）+ `run_replay()`（进程树终止：Windows `taskkill /F /T`、POSIX `killpg` SIGKILL，`timed_out` 属性）；pool.py：`ReplayNotAllowed` 异常；cli.py：recover/pool 增 `--execute`、auto/pipeline 增 `--allow-replay`、recover 帮助注明 EXECUTES；pipeline.py：Phase 5 三分支（默认 SKIPPED (safety gate) / `--allow-replay` 显式开启 / `--no-recover`），开启时对 RC/PL 传 `allow_exec=True` |
+| §2.2 阶段失败未贯通总报告与退出码 | ✅ | pipeline.py：`StageStatus`（ok/partial/skipped/failed + detail）；九阶段逐一记录（probe/deflat/remap/decompile/replay/natives/analysis/summary/export）；`overall_status`（failed>partial>success）与 `exit_code`（0/1/2，`strict=True` 时非成功一律 2）；`PipelineResult.to_dict` 携 overall/exit_code/stages；`write_pipeline_summary` 输出 Stage Status 表；控制台打阶段汇总 + 最终状态行；export 后刷新总报告保持一致；cli.py `--strict` + `cmd_auto` 返回 `res.exit_code`。区分"无目标（skipped）/主动跳过/环境失败/执行失败"；`recover` rc、`harvest` 的 ok/err/timed_out/returncode 全部消费 |
+| §2.3 reach --prune 把未知依赖当不可达 | ✅ | callgraph.py：`conservative_keepset()` 三规则（BootstrapMethods 属性类 / METHOD_HANDLE 指向的 owner 类 / 类名字符串常量引用类），误差方向=多保留；cli.py `cmd_reach`：无入口拒绝裁剪（report-only）、`prune 集合 = 可达 ∪ 保守集`、hold-back 归因打印、"疑似未使用类报告"定位措辞 + WARNING；`prune_jar` 原语不变（既有测试 kept==4/dropped==6 不受影响）。验证：method-ref 指向类（会 NoSuchMethodError）与 `Class.forName("a.Reflected")` 目标均保留，真 dead 类正常删 |
+| §2.4 自愈可能牺牲原始行为 | ✅ | project.py：`export_project` 将被修复文件的**原始内容**镜像保存到 `src-original/`（字节保真，含零宽字符）；修复记录（文件/规则/前后行数）写 `repair-log.md`，含证据阶梯声明：可阅读 < 可编译 < JVM 验证（未实现）< 行为对拍（未实现）；`stats["repair_rules_applied"]`；pipeline Phase 8 打印自愈审计路径，`--compile` 通过时证据升到"可编译"。record/yield 等上下文关键字确认不误改（合法标识符不动是有意设计） |
+| §3 负向用例 | ✅ | run_tests.py 新增 7 个测试函数（36 项断言）：`test_score_decl_and_noise`（注释/调用点/字符串字面量/重载/嵌套泛型/正向对照）、`test_code_pool_json_integrity`、`test_max_stack_dataflow`、`test_replay_safety_gate`、`test_pipeline_stage_status`、`test_conservative_prune`、`test_selfheal_audit`；`test_pipeline_automation` 适配 `allow_replay=True` 并断言阶段状态贯通 |
+
+## 3. 验证
+
+| 检查项 | 命令 | 结果 |
+| --- | --- | --- |
+| 全量核心回归 | `python jdec/tests/run_tests.py` | **553 passed, 0 failed**（基线 517 + 新增 36） |
+| 含真实样本回归（纪律） | `python jdec/tests/run_tests.py --with-mc` | **569 passed, 0 failed**（ZKM 样本归因 + MC 800 类 round-trip） |
+| 临时验收（P0 三项） | scratch 脚本（13/14/8 项） | 全过，脚本已清理 |
+| 评审精确复现 | `{7:4}` 往返后 `resolve_opcode(7)` | `ICONST_1`（修复前 None） |
+| 峰值 9 验收 | 9×ICONST_1 流 | `max_stack>=9`，`max_stack_source="computed"` |
+| 闸门验收 | recover/pool 无 opt-in | 返回 3 / raise ReplayNotAllowed，零 JVM 启动 |
+
+## 4. 修复轮次
+
+1. 第 1 轮 — 现象：`--with-mc` 前的核心回归 3 处 FAIL（ok=9/partial=1、
+   coverage=0.9857、pool harvest 被闸门拦截致 fixture 崩溃）；归因：①评分新正则
+   泛型段不支持嵌套尖括号（`<T extends Comparable<T>>`）；②test_pool_roundtrip
+   未随新闸门传 `--execute`；改动：score.py `_GENS` 统一泛型段、测试加
+   `--execute`；结果：553 全绿。嵌套泛型漏配本身即 §1.1 新语义在真实
+   decompiler 输出上生效的证据（旧实现此处虚高计 1.0）。
+2. 第 2 轮 — `--with-mc` 真实样本回归 569 全绿，无新失败。
+
+## 5. 遗留风险与未做的事
+
+- §2.2 的 replay 阶段聚合粒度为"indy/pool 两子步"，`recover` 内部站点级
+  fail/skip 明细仍以 `failed_triage.md` 为准，未上提为阶段 detail。
+- §2.3 的 keepset 字符串规则按"类名精确匹配"计；`Class.forName` 拼接类名的
+  场景仍不可见（评审已认可该边界：功能定位为"疑似未使用类报告"）。
+- §2.4 证据阶梯的上两级（JVM 验证、行为对拍）未实现，repair-log 明文声明
+  "NOT implemented"，未冒充。
+- `devirt` 无条件接入 `auto`（评审 P2 扩充建议中的警示）未在本轮处理——属
+  功能取舍而非缺陷，待拍板。
+
+## 6. 回滚方式
+
+- 本轮改动均未提交：`git checkout -- jdec/jdec/score.py jdec/jdec/devirt.py
+  jdec/jdec/recover.py jdec/jdec/pool.py jdec/jdec/pipeline.py
+  jdec/jdec/callgraph.py jdec/jdec/project.py jdec/jdec/decompile.py
+  jdec/jdec/cli.py jdec/tests/run_tests.py` 逐文件回滚。
+
+---
+
+# BUG 修复轮（2026-10-07 第三轮）
+
+## 1. 任务目标
+
+用户指令"先修复一轮 bug"。处置上轮 change-report §4 确认"但未修"的遗留线索、
+评审 §3 点名的编码健康度问题，以及本轮自查发现的小缺陷。每项配负向用例。
+
+## 2. 逐条处置
+
+| 缺陷 | 状态 | 关键改动 |
+| --- | --- | --- |
+| web.py `/api/callgraph` 构建失败合成 `reachable:null` 假数据（上轮确认未修线索） | ✅ | `_get_cached_callgraph` 失败原因写入 `self._cg_error`（区分"无目标"与"构建失败"），失败目标进模块级 `_CG_FAIL` 缓存（防每请求重复重建+刷屏），异常 stderr 留痕；处理器返回 `status=503 + {"error": ...}` 结构化错误，删除 `reachable:null` 合成分支；`send_json` 增 `status` 参数；前端 JS 增 `data.error` 分支（显示 unavailable 徽章 + N/A，不再伪装成 "No entrypoints"） |
+| devirt.py `extract_code_id` 只查方法名不查描述符（上轮确认未修线索） | ✅ | 命中 `execute` 后校验 NameAndType 描述符首参为 int（`m_desc.startswith("(I")`），与 `pushed_int` 语义一致；撞名但签名不符的同名方法不再误报 codeId。正向对照：`(I)V` 仍命中 |
+| recover.py `rewrite_sources` 正则替换范围含注释与字符串（上轮确认未修线索） | ✅ | 新增 `code_mask()` 共享 helper（逐字符词法状态机：行注释/块注释/字符串/字符字面量 → False，含转义序列；未闭合时剩余字符保守标 False）；`rewrite_sources` 的 sub 回调按 `mask[m.start()]` 跳过非代码区命中（不计 replaced/missed），residual verify 对替换后文本重算 mask 同口径；限制：text block 不处理（反编译器输出罕见） |
+| pool.py `apply` 的 `_CALL_Q`/`_CALL_BARE` 同病 | ✅ | 同一 `code_mask` 复用（pool 本就 import recover）；`repl_q`/`repl_b` 回调开头 mask 检查；`_CALL_Q` 替换改变偏移后对 bare 正则重算 mask；residual verify 循环同口径跳过 |
+| pipeline.py Stage Status 表 detail 含 `|`/换行破坏 Markdown 表格（本轮自查） | ✅ | detail 先 `|`→`\|` 转义、再 `split()` 压平换行/连续空白；负向用例断言转义、压平、列数 3 不变 |
+| 评审 §3 编码健康度：子进程读取线程 UnicodeDecodeError 被吞 | ✅ 已复现并修复 | 复现：`text=True` 无 `errors=` 时 CPython `_readerthread` 按 locale strict 解码（本环境 PYTHONUTF8=1 → UTF-8 strict），0xFF 字节触发 `UnicodeDecodeError`，线程内被吞、returncode=0、stdout 静默变 None（正是"测试零失败但输出丢失"的机制）；修复：生产路径 5 处补 `errors="replace"`（pool.py javac、recover.py javac、scorecard.py git-rev、stubs.py ×3），测试 7 处同口径（run_tests.py） |
+
+有意不修（与前轮结论一致）：deflat 常量压栈 NOP 的跳转目标检查（CFG 级重活）、
+project.py 重复声明自动注释超范围（AST 级）、indy 死类高估（设计取舍+§2.3 已缓解）。
+
+## 3. 验证
+
+| 检查项 | 命令 | 结果 |
+| --- | --- | --- |
+| 全量核心回归 | `python tests/run_tests.py` | **578 passed, 0 failed**（基线 553 + 本轮 25 断言） |
+| 含真实样本回归（纪律：判定类改动 extract_code_id + 改写器） | `python tests/run_tests.py --with-mc` | **594 passed, 0 failed**（ZKM 归因/字符串解密检测正常，改写器修复未伤真实样本路径） |
+| 编码健康度复现实验 | 临时脚本（场景 A/B 对照） | A：无 errors → stdout=None 零报错；B：`errors="replace"` → 数据保留（脚本已清理） |
+| 负向用例 | `test_rewrite_skips_comments_strings`（16 断言）、`test_bvm_extract_code_id_descriptor_gate`（2）、`test_web_callgraph_error_semantics`（6）、Stage 表转义（3） | 全绿 |
+
+## 4. 修复轮次
+
+1. 第 1 轮 — 冒烟脚本 3 处 FAIL 均为脚本自身问题：TSV 行首列未写 `OK`、
+   期望值把 `//` 定界符算错区、`decode_plain_field` 要求 `b64:` 前缀、
+   测试数据语义摆错（形态 `X.y("site","cipher",seed)` 中 group(2)=cipher、
+   group(3)=seed 整数，与 TSV key=(cipher,seed) 对齐后全绿）。产品代码
+   无改动。
+2. 第 2 轮 — devirt 负向用例 `NameError: SB`：BVM/SB 在既有测试中为函数内
+   局部 import（`from jdec import bvm_devirt as BVM`），补齐后全绿。
+3. 第 3 轮 — `--with-mc` 真实样本回归 594 全绿，无新失败。
+
+## 5. 遗留风险与未做的事
+
+- `code_mask` 不处理 Java 15+ text block（三引号）——反编译器输出中罕见，
+  遇到时按普通字符串处理，误差方向为"多保护"（漏替换而非误替换）。
+- web 前端 `data.error` 分支的视觉样式未做独立设计（复用 suspect 色徽章）。
+- 编码口径 `errors="replace"` 统一为"可用但不完美"语义：损坏字节变 U+FFFD，
+  不修复损坏源头（源头在子进程自身的输出编码，属环境问题）。
+- 上轮遗留：`devirt` 无条件接入 `auto` 仍待拍板。
+
+## 6. 回滚方式
+
+- 本轮改动均未提交（连同上轮 11 文件）：
+  `git checkout -- jdec/jdec/web.py jdec/jdec/devirt.py jdec/jdec/recover.py
+  jdec/jdec/pool.py jdec/jdec/pipeline.py jdec/jdec/scorecard.py
+  jdec/jdec/stubs.py jdec/tests/run_tests.py`

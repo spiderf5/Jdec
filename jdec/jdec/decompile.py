@@ -684,7 +684,7 @@ def write_report(rep: Report, out_dir: Path) -> None:
         f"| improved by retry | {rep.improved} |",
     ]
     if rep.coverage_avg is not None:
-        lines.append(f"- average member recovery: {rep.coverage_avg * 100:.1f}%")
+        lines.append(f"- average member name-hit rate: {rep.coverage_avg * 100:.1f}%")
     if rep.native_methods:
         lines.append(f"- native methods: {rep.native_methods} in "
                      f"{rep.native_classes} classes (no bytecode exists for "

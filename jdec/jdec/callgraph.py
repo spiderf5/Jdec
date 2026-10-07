@@ -439,6 +439,85 @@ def find_path(rep: ReachabilityReport, target: str | MethodRef) -> list[CallEdge
     return best_path
 
 
+def conservative_keepset(target: Path) -> tuple[set[str], dict[str, int]]:
+    """REVIEW 2.3: classes the call graph cannot prove unused, so pruning must
+    keep them.
+
+    Static edges miss several dependency channels; the ones that matter for
+    class-level pruning are:
+
+    1. ``invokedynamic`` targets are recorded as synthetic owner ``<indy>``,
+       so lambda/method-ref bodies are invisible to reachability.  The
+       lambda body lives in the class carrying the BootstrapMethods
+       attribute, but a method-ref can point into a DIFFERENT class via a
+       METHOD_HANDLE constant - deleting that class breaks the lambda at
+       runtime with NoSuchMethodError.
+    2. Reflection / service discovery: ``Class.forName("com.foo.Bar")``
+       creates no bytecode edge at all.  A string constant exactly equal to
+       a class name (internal or dotted form) is the dominant carrier.
+
+    This scans constant pools directly and returns (keepset, counts):
+    - ``bsm``     classes with a BootstrapMethods attribute;
+    - ``handle``  classes referenced by METHOD_HANDLE entries;
+    - ``reflect`` classes whose exact name appears as a string constant.
+
+    False positives (kept-but-unused classes) are acceptable; false
+    negatives would break the jar, so the rules err on the side of keeping.
+    """
+    keep: set[str] = set()
+    counts = {"bsm": 0, "handle": 0, "reflect": 0}
+
+    # Internal names of every class inside the target, plus a dotted lookup.
+    known: set[str] = set()
+    dotted: dict[str, str] = {}
+    parsed: list[tuple[str, CF.ClassFile]] = []
+    for name, data in _read_class_bytes(target).items():
+        try:
+            cf = CF.parse(data)
+        except Exception:
+            continue
+        known.add(cf.name)
+        dotted[cf.name.replace("/", ".")] = cf.name
+        parsed.append((name, cf))
+
+    for _name, cf in parsed:
+        has_bsm = False
+        try:
+            for e in cf.cp:
+                if not e:
+                    continue
+                tag = e[0]
+                if tag == CF.C_UTF8 and not has_bsm and e[1] == b"BootstrapMethods":
+                    # The attribute-name Utf8 exists only when the attribute does.
+                    has_bsm = True
+                elif tag == CF.C_METHOD_HANDLE:
+                    ref_idx = e[1][1]
+                    if ref_idx < len(cf.cp) and cf.cp[ref_idx]:
+                        mr = cf.cp[ref_idx]
+                        if mr[0] in (CF.C_METHODREF, CF.C_INTERFACE_METHODREF):
+                            cls_idx = mr[1][0]
+                            keep.add(cf.class_name(cls_idx))
+                            counts["handle"] += 1
+                elif tag == CF.C_STRING:
+                    utf8_idx = e[1][0]
+                    if utf8_idx < len(cf.cp) and cf.cp[utf8_idx]:
+                        try:
+                            sval = cf.utf8(utf8_idx)
+                        except Exception:
+                            continue
+                        if sval in known or sval in dotted:
+                            keep.add(dotted.get(sval, sval))
+                            counts["reflect"] += 1
+        except Exception:
+            continue
+        if has_bsm and cf.name in known:
+            keep.add(cf.name)
+            counts["bsm"] += 1
+
+    keep &= known
+    return keep, counts
+
+
 def prune_jar(input_jar: Path, output_jar: Path, reachable_classes: set[str]) -> tuple[int, int, int]:
     """Create a slimmed jar containing only reachable classes and resource files.
 
