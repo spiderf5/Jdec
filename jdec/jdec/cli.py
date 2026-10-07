@@ -530,37 +530,40 @@ def cmd_deflat(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bvm(args: argparse.Namespace) -> int:
-    from . import bvm_devirt as BVM
+def cmd_devirt(args: argparse.Namespace) -> int:
+    from . import devirt as DV
     p = Path(args.input)
     if not p.exists():
         print(f"no such file: {p}")
         return 2
 
     out = Path(args.output) if args.output else p.with_name(p.stem + "_devirt" + p.suffix)
-    code_pool: dict[int, BVM.BVMMethod] = {}
+    code_pool: dict[int, DV.VMMethod] = {}
     if getattr(args, "pool", None):
         pool_p = Path(args.pool)
         if pool_p.exists():
-            code_pool = BVM.BVMDevirtualizer.load_code_pool(pool_p)
+            code_pool = DV.Devirtualizer.load_code_pool(pool_p)
         else:
             print(f"pool file not found: {pool_p}")
             return 2
 
     if p.suffix.lower() == ".jar":
-        res = BVM.BVMDevirtualizer.devirtualize_jar(p, out, code_pool)
-        print(f"bvm devirt : {res['devirtualized_methods']} method(s) in {res['devirtualized_classes']} class(es) devirtualized")
+        res = DV.Devirtualizer.devirtualize_jar(p, out, code_pool)
+        print(f"devirt     : {res['devirtualized_methods']} method(s) in {res['devirtualized_classes']} class(es) devirtualized")
         print(f"output     : {out}")
         return 0
     elif p.suffix.lower() == ".class":
         cf = CF.parse(p.read_bytes())
-        cf, count = BVM.BVMDevirtualizer.devirtualize_class_file(cf, code_pool)
+        cf, count = DV.Devirtualizer.devirtualize_class_file(cf, code_pool)
         out.write_bytes(cf.serialize())
-        print(f"bvm devirt : {count} method(s) devirtualized -> {out}")
+        print(f"devirt     : {count} method(s) devirtualized -> {out}")
         return 0
     else:
         print(f"unsupported format: {p.suffix}")
         return 2
+
+
+cmd_bvm = cmd_devirt  # backward-compatibility alias
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
@@ -956,14 +959,21 @@ def build_parser() -> argparse.ArgumentParser:
                       help="output jar path (default: <input>_deflat.jar)")
     sdef.set_defaults(func=cmd_deflat)
 
+    def _add_devirt_args(parser):
+        parser.add_argument("input", help="target jar or class file to devirtualize")
+        parser.add_argument("-o", "--output", default=None,
+                            help="output path (default: <input>_devirt.<ext>)")
+        parser.add_argument("--pool", default=None,
+                            help="JSON file containing dumped virtual code pools / methods")
+        parser.set_defaults(func=cmd_devirt)
+
+    sdevirt = sub.add_parser("devirt",
+                             help="devirtualize custom bytecode instruction streams to standard JVM bytecode")
+    _add_devirt_args(sdevirt)
+
     sbvm = sub.add_parser("bvm",
-                          help="devirtualize BytecodeVM custom instruction streams to standard JVM bytecode")
-    sbvm.add_argument("input", help="target jar or class file to devirtualize")
-    sbvm.add_argument("-o", "--output", default=None,
-                      help="output path (default: <input>_devirt.<ext>)")
-    sbvm.add_argument("--pool", default=None,
-                      help="JSON file containing dumped BytecodeVM code pools / methods")
-    sbvm.set_defaults(func=cmd_bvm)
+                          help="alias for 'devirt' devirtualization")
+    _add_devirt_args(sbvm)
 
     def _add_auto_args(parser):
         parser.add_argument("input", help="target jar or directory")

@@ -445,3 +445,31 @@
 ## 3. 验证结果
 - **测试命令**：`python jdec/tests/run_tests.py`
 - **执行结果**：**472 passed, 0 failed**（100% PASS，0 失败）。
+
+---
+
+# 变更报告：通用化重命名与模块对齐（`devirt` 反虚拟化子系统）
+
+> 生成时间：2026-10-07 13:10  
+> 模式：子系统通用化重构与架构命名对齐  
+
+## 1. 重构背景与动因
+原虚拟化重译引擎命名为 `bvm_devirt.py` / `jdec bvm` / `BVMDevirtualizer`，其命名形态容易被误解为针对特定私有混淆器（如 BytecodeVM）的临时补丁，掩盖了该模块作为“通用 JVM 栈机字节码反虚拟化重译流水线”的核心基础设施定位。
+
+为与项目的核心子命令体系对齐（如 `deflat` 反控制流平坦化、`recover` 动态解密、`project` 工程化导出），将该引擎正式通用化重命名为 **`devirt`**（Devirtualization，反虚拟化）。
+
+## 2. 变更详情
+1. **模块通用化迁移**：
+   - 创建 `jdec/jdec/devirt.py` 作为官方主模块；
+   - 核心类统一抽象为通用名称：`Devirtualizer`、`VMDecoder`、`VMTranslator`、`VMMethod`、`VMInstruction`；
+   - 保留 `jdec/jdec/bvm_devirt.py` 作为向后兼容 facade（`from .devirt import *`），原有调用代码 100% 无感兼容。
+2. **CLI 子命令与别名对齐**：
+   - 正式子命令变更为 **`jdec devirt`**（与 `jdec deflat` 形成标准对称）；
+   - 保留 **`jdec bvm`** 作为同义别名（alias），现有工作流和外部脚本调用不受任何影响。
+3. **顶层导出与测试回归**：
+   - `jdec/__init__.py` 导出 `devirt` 与 `bvm_devirt`；
+   - `jdec/tests/run_tests.py` 新增 5 项双向命名与兼容性校验断言。
+
+## 3. 验证结果
+- **测试命令**：`python jdec/tests/run_tests.py`
+- **执行结果**：**477 passed, 0 failed**（100% PASS，全部通过）。

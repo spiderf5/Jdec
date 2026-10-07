@@ -2723,6 +2723,16 @@ def test_bvm_and_native_extensions() -> None:
     san_kw, kw_c = PJ.sanitize_keyword_identifiers(code_kw_types)
     check("keywords escaped for short and byte types", "short default_ = 1;" in san_kw and "byte goto_ = 2;" in san_kw)
 
+    # 14. Devirtualizer generic naming and alias compatibility
+    from jdec import devirt as DV
+    check("Devirtualizer is aliased to BVMDevirtualizer", DV.Devirtualizer is BVM.BVMDevirtualizer)
+    check("VMDecoder is aliased to BVMDecoder", DV.VMDecoder is BVM.BVMDecoder)
+    check("VMTranslator is aliased to BVMTranslator", DV.VMTranslator is BVM.BVMTranslator)
+    check("VMMethod is aliased to BVMMethod", DV.VMMethod is BVM.BVMMethod)
+    target_method.attrs_blob = struct.pack(">H", 1) + code_attr
+    dv_res = DV.Devirtualizer.devirtualize_class_file(cf_host, {101: vm_meth})
+    check("Devirtualizer devirtualize_class_file returns success", dv_res[1] == 1)
+
 
 def main() -> int:
     with_mc = "--with-mc" in sys.argv
