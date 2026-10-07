@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jdec"
+version = "0.1.0"
+description = "Multi-engine Java decompiler driver with bytecode-verified output selection"
+readme = "jdec/README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "jdec contributors"}
+]
+keywords = [
+    "java",
+    "decompiler",
+    "deobfuscator",
+    "minecraft",
+    "bytecode",
+    "cfr",
+    "vineflower",
+    "procyon"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Disassemblers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.scripts]
+jdec = "jdec.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "jdec"}
+
+[tool.setuptools.packages.find]
+where = ["jdec"]
+include = ["jdec*"]
+
+[tool.setuptools.package-data]
+jdec = [
+    "fingerprints.json",
+    "*.java",
+    "*.js"
+]

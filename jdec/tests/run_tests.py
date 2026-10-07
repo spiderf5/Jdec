@@ -2519,6 +2519,153 @@ def test_cfg_and_dynamic_mocks() -> None:
     check("deflat_class executed without crashing", isinstance(edits, int))
 
 
+def test_bvm_and_native_extensions() -> None:
+    print("bvm & native: BytecodeVM devirtualization, far CFG reassembly, and Frida dynamic ingest")
+    from jdec import bvm_devirt as BVM
+    from jdec import recover as RC
+    from jdec import stubs as SB
+
+    # 1. BVMDecoder: decode standard virtual instruction stream
+    code_seq = [
+        BVM.ORDINAL_BY_NAME["ICONST_1"],
+        BVM.ORDINAL_BY_NAME["BIPUSH"], 42,
+        BVM.ORDINAL_BY_NAME["IADD"],
+        BVM.ORDINAL_BY_NAME["IRETURN"]
+    ]
+    insns = BVM.BVMDecoder.decode(code_seq)
+    check("BVMDecoder decoded all instructions", len(insns) == 4)
+    check("BVMDecoder resolved BIPUSH opcode", insns[1].opcode_name == "BIPUSH" and insns[1].operands == [42])
+
+    # 2. Mutator map decoding (random permutation)
+    mut_map = {999: BVM.ORDINAL_BY_NAME["ICONST_5"], 888: "RETURN"}
+    mut_insns = BVM.BVMDecoder.decode([999, 888], mutator_map=mut_map)
+    check("BVMDecoder resolved mutated opcodes", mut_insns[0].opcode_name == "ICONST_5" and mut_insns[1].opcode_name == "RETURN")
+
+    # 3. BVMTranslator: translate simple method into valid JVM bytecode
+    vm_meth = BVM.BVMMethod(
+        code_id=101,
+        name="calculate",
+        desc="()I",
+        code=code_seq,
+        constants=[],
+        max_locals=1,
+        max_stack=2
+    )
+    cf_host = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
+    res = BVM.BVMTranslator.translate_method(vm_meth, cf_host)
+    check("BVMTranslator translated bytecode length", len(res.bytecode) == 5)
+    check("BVMTranslator bytecode matches JVM ops", res.bytecode == bytes([0x04, 0x10, 42, 0x60, 0xAC]))
+
+    # 4. BVMTranslator: branch resolution and far jump widening (>32KB)
+    far_code = [BVM.ORDINAL_BY_NAME["GOTO"], 33002]
+    far_code.extend([BVM.ORDINAL_BY_NAME["NOP"]] * 33000)
+    far_code.append(BVM.ORDINAL_BY_NAME["RETURN"])
+
+    vm_meth_far = BVM.BVMMethod(
+        code_id=102,
+        name="farBranch",
+        desc="()V",
+        code=far_code,
+        constants=[],
+        max_locals=1,
+        max_stack=1
+    )
+    res_far = BVM.BVMTranslator.translate_method(vm_meth_far, cf_host)
+    check("BVMTranslator widened far virtual branch to goto_w", res_far.stats.get("widened_goto", 0) == 1)
+    dec_far = BC.decode(res_far.bytecode)
+    check("BVMTranslator decoded first insn is goto_w", dec_far[0].op == BC.OP_GOTO_W)
+
+    # 5. Exception handler mapping
+    eh_code = [
+        BVM.ORDINAL_BY_NAME["ICONST_0"],
+        BVM.ORDINAL_BY_NAME["ICONST_1"],
+        BVM.ORDINAL_BY_NAME["IDIV"],
+        BVM.ORDINAL_BY_NAME["IRETURN"],
+        BVM.ORDINAL_BY_NAME["POP"],
+        BVM.ORDINAL_BY_NAME["ICONST_M1"],
+        BVM.ORDINAL_BY_NAME["IRETURN"]
+    ]
+    vm_meth_eh = BVM.BVMMethod(
+        code_id=103,
+        name="safeDiv",
+        desc="()I",
+        code=eh_code,
+        constants=["java/lang/ArithmeticException"],
+        exception_handlers=[0, 3, 4, 0],
+        max_locals=1,
+        max_stack=2
+    )
+    res_eh = BVM.BVMTranslator.translate_method(vm_meth_eh, cf_host)
+    check("BVMTranslator translated exception handler", len(res_eh.handlers) == 1)
+    check("BVMTranslator handler start_pc is 0", res_eh.handlers[0].start_pc == 0)
+    check("BVMTranslator handler handler_pc points to POP", res_eh.bytecode[res_eh.handlers[0].handler_pc] == 0x57)
+
+    # 6. Devirtualizer class file injection
+    cp_helper = BVM.ConstantPoolHelper(cf_host)
+    mref_idx = cp_helper.add_methodref("com/example/VM", "execute", "(I)V")
+
+    code_blob = bytearray([0x10, 101, 0xB8, (mref_idx >> 8) & 0xFF, mref_idx & 0xFF, 0xB1])
+    code_attr = BVM.BVMDevirtualizer.build_code_attribute(cf_host, 2, 1, bytes(code_blob), [])
+    target_method = CF.Member(
+        access_flags=CF.ACC_PUBLIC | CF.ACC_STATIC,
+        name_index=cf_host.intern_utf8("testTarget"),
+        descriptor_index=cf_host.intern_utf8("()I"),
+        attrs_blob=struct.pack(">H", 1) + code_attr
+    )
+    cf_host.methods.append(target_method)
+
+    extracted_id = BVM.BVMDevirtualizer.extract_code_id(cf_host, target_method)
+    check("BVMDevirtualizer extracted codeId from bytecode", extracted_id == 101)
+
+    code_pool = {101: vm_meth}
+    devirt_cf, devirt_count = BVM.BVMDevirtualizer.devirtualize_class_file(cf_host, code_pool)
+    check("BVMDevirtualizer devirtualized target method", devirt_count == 1)
+
+    # 7. Code pool JSON round-trip
+    with tempfile.TemporaryDirectory() as td:
+        p_json = Path(td) / "code_pool.json"
+        BVM.BVMDevirtualizer.save_code_pool(code_pool, p_json)
+        check("BVMDevirtualizer saved code pool JSON", p_json.exists())
+        loaded_pool = BVM.BVMDevirtualizer.load_code_pool(p_json)
+        check("BVMDevirtualizer loaded code pool roundtrip", 101 in loaded_pool and loaded_pool[101].name == "calculate")
+
+    # 8. Frida dynamic TSV ingestion
+    frida_6col_content = (
+        "OK\tcom.example.Target\tdecrypt\tCIPHER_A\t1001\tHelloFrida\n"
+        "OK\tcom.example.Target\tresolve\tCIPHER_B\t1002\tSecretFrida\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        tsv_path = Path(td) / "frida.tsv"
+        tsv_path.write_text(frida_6col_content, encoding="utf-8")
+        rows = RC.ingest_frida_tsv(tsv_path)
+        check("ingest_frida_tsv parsed 6-col rows", len(rows) == 2)
+        check("ingest_frida_tsv parsed string plaintext", rows.get(("CIPHER_A", "1001")) == "HelloFrida")
+        check("ingest_frida_tsv parsed second plaintext", rows.get(("CIPHER_B", "1002")) == "SecretFrida")
+
+        # Test 3-col format
+        frida_3col_content = "CIPHER_C\t2001\tPlain3Col\n"
+        tsv_3col = Path(td) / "frida_3col.tsv"
+        tsv_3col.write_text(frida_3col_content, encoding="utf-8")
+        rows_3col = RC.ingest_frida_tsv(tsv_3col)
+        check("ingest_frida_tsv parsed 3-col rows", rows_3col.get(("CIPHER_C", "2001")) == "Plain3Col")
+
+        # Test jnitrace format
+        jnitrace_content = (
+            "1234\tNewStringUTF\tjni_decrypted_secret\n"
+        )
+        (Path(td) / "jnitrace.tsv").write_text(jnitrace_content, encoding="utf-8")
+        jni_rows = RC.ingest_frida_tsv(Path(td) / "jnitrace.tsv")
+        check("ingest_frida_tsv parsed jnitrace rows", len(jni_rows) == 1 and jni_rows.get(("jni_decrypted_secret", "0")) == "jni_decrypted_secret")
+
+    # 9. MockAgent JAR generation and instrumentation verification
+    agent_jar = SB.ensure_mock_agent_jar()
+    check("ensure_mock_agent_jar returns existing jar", agent_jar.is_file())
+    with zipfile.ZipFile(agent_jar, "r") as zf:
+        mf = zf.read("META-INF/MANIFEST.MF").decode("utf-8")
+        check("mock agent manifest contains Premain-Class", "Premain-Class: jdec.mock.MockAgent" in mf)
+        check("mock agent contains MockAgent.class", "jdec/mock/MockAgent.class" in zf.namelist())
+
+
 def main() -> int:
     with_mc = "--with-mc" in sys.argv
     if not SAMPLE.exists():
@@ -2564,6 +2711,7 @@ def main() -> int:
     test_decompiler_trap_pruning()
     test_project_export_and_recompilability()
     test_cfg_and_dynamic_mocks()
+    test_bvm_and_native_extensions()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")

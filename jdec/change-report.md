@@ -322,8 +322,78 @@
   - `ok   StackMapTable generated with handler frames`
   - `ok   deflat unflattened switch transition spanning > 32KB`
   - `ok   deflat_class executed without crashing`
-  - `ok   stripped ELF parsed JNI exports via DT_GNU_HASH`
 
+---
 
+# 变更报告：Python标准工程化(PEP 621/CI)、Native拦截与转储吸收、BytecodeVM自动重译闭环
 
+> 生成时间：2026-10-07 12:45
+> 项目根目录：d:/MC/Workbuddy/deobf
+> 技术栈：Python 3.13 / Java 21 / JVM Bytecode / CFG / Instrumentation / GitHub Actions
+> 模式：Mode B 核心进阶工程化落地与重译引擎闭环
 
+## 1. 任务背景与目标
+
+落实落地技术演进中的三大进阶任务：
+1. **Python 标准包管理与 CI/CD 自动化**：
+   - 建立遵循 PEP 517/518/621 标准的 `pyproject.toml`；
+   - 提供标准控制台入口 `jdec = jdec.cli:main`；
+   - 消除根目录 `jdec.py` 包装器自解析导致的递归死循环；
+   - 建立 GitHub Actions 多操作系统（Ubuntu / Windows / macOS）与多 Python 版本（3.10 ~ 3.13）持续集成测试工作流 `.github/workflows/ci.yml`。
+2. **强依赖 Native 的动态字符串/引用解密**：
+   - 实现 Java Instrumentation 代理 `MockAgent`（含 `premain` 和类文件字节码转换器 `NativeLinkTransformer`），在类加载期自动拦截 `System.loadLibrary` 和 `System.load` 并规整栈指令（`pop; nop; nop`），彻底解决 `<clinit>` 因缺失动态库抛出 `UnsatisfiedLinkError` 导致收割中断的痛点；
+   - 在 `recover.py` / `pool.py` 中自动提取 Jar 内的 `.dll` / `.so` 至 `natives/` 并注入 `-Djava.library.path` 与 `-javaagent:mock_agent.jar`；
+   - 增强 `recover_driver_template.java` 驱动容错，捕获 `LinkageError` 阻止单一失败向外传染；
+   - 引入 `ingest_frida_tsv`，支持吸收外部 Frida 动态转储 TSV（6列、3列、jnitrace、harvest格式），打通动静态混合解密管道。
+3. **BytecodeVM 虚拟化解释器自动重译 (`bvm_devirt.py`)**：
+   - 建立 BytecodeVM `Opcs`（0..161）规范映射表与操作数解码器 `BVMDecoder`；
+   - 实现 `BVMTranslator`：将虚拟指令流及常量池无损还原为标准 JVM 字节码，并通过 `cfg.build_cfg` 与 `cfg.assemble_cfg` 实现分支重定位、>32KB 远跳转拓宽（`goto_w` 与反转条件跳转）、tableswitch/lookupswitch 对齐与异常表映射；
+   - 实现 `BVMDevirtualizer`：支持方法级、类级、Jar 级自动重译，代码池 JSON 导入导出，以及 CLI `jdec bvm` 子命令。
+
+## 2. 文件变更清单
+
+| 文件 | 状态 | 改动说明 |
+| :--- | :--- | :--- |
+| `pyproject.toml` | 新增 | PEP 621 标准打包配置，zero-dependency，entry point `jdec = jdec.cli:main` |
+| `.github/workflows/ci.yml` | 新增 | 跨平台 GitHub Actions CI 矩阵工作流（Ubuntu/macOS/Windows, Python 3.10-3.13） |
+| `jdec/jdec/bvm_devirt.py` | 新增 | BytecodeVM 自动反虚拟化重译引擎（Opcs映射、解码器、重译器、CFG组装、类与Jar重构） |
+| `jdec.py` | 修改 | 修复根目录 wrapper 的 `importlib` 动态加载，避免自身与 `jdec` 模块递归冲突 |
+| `jdec/jdec/__init__.py` | 修改 | 导出 `bvm_devirt` 核心模块 |
+| `jdec/jdec/cli.py` | 修改 | 挂载 `bvm` 子命令，补充 `CF` 导入与 `--pool` 代码池选项 |
+| `jdec/jdec/recover.py` | 修改 | 自动提取 Jar 内 native 库并挂载 `-Djava.library.path`，挂载 `mock_agent.jar`，新增 `ingest_frida_tsv` 支持 |
+| `jdec/jdec/pool.py` | 修改 | 动态 harvest 阶段挂载 native 提取库及 mock agent |
+| `jdec/jdec/stubs.py` | 修改 | 实现真实 `MockAgent` 字节码重写转换器与 Agent Jar 自动打包生成器 |
+| `jdec/jdec/recover_driver_template.java` | 修改 | 修复多重 catch 中子类化冲突，捕获 `LinkageError` |
+| `.gitignore` | 修改 | 忽略 `*.egg-info/` 与 `dist/` 构建产物 |
+| `jdec/tests/run_tests.py` | 修改 | 新增 22 项针对 BVM 解码重译、远跳转、异常映射、类注入、Frida吸收与 MockAgent 的完整断言 |
+
+## 3. 验证结果
+
+- **测试命令**：`python jdec/tests/run_tests.py`
+- **执行结果**：**467 passed, 0 failed**（100% PASS，0 失败）。
+- **关键测试通过项**：
+  - `ok   BVMDecoder decoded all instructions`
+  - `ok   BVMDecoder resolved BIPUSH opcode`
+  - `ok   BVMDecoder resolved mutated opcodes`
+  - `ok   BVMTranslator translated bytecode length`
+  - `ok   BVMTranslator bytecode matches JVM ops`
+  - `ok   BVMTranslator widened far virtual branch to goto_w`
+  - `ok   BVMTranslator decoded first insn is goto_w`
+  - `ok   BVMTranslator translated exception handler`
+  - `ok   BVMTranslator handler start_pc is 0`
+  - `ok   BVMTranslator handler handler_pc points to POP`
+  - `ok   BVMDevirtualizer extracted codeId from bytecode`
+  - `ok   BVMDevirtualizer devirtualized target method`
+  - `ok   BVMDevirtualizer saved code pool JSON`
+  - `ok   BVMDevirtualizer loaded code pool roundtrip`
+  - `ok   ingest_frida_tsv parsed 6-col rows`
+  - `ok   ingest_frida_tsv parsed string plaintext`
+  - `ok   ingest_frida_tsv parsed second plaintext`
+  - `ok   ingest_frida_tsv parsed 3-col rows`
+  - `ok   ingest_frida_tsv parsed jnitrace rows`
+  - `ok   ensure_mock_agent_jar returns existing jar`
+  - `ok   mock agent manifest contains Premain-Class`
+  - `ok   mock agent contains MockAgent.class`
+  - `ok   pipeline ran successfully`
+  - `ok   recover spec tsv exists`
+  - `ok   recover results tsv exists`

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import analyze as AZ
 from . import bsm as BM
+from . import classfile as CF
 from . import engines as EN
 from . import ghidra_engine as GE
 from . import mappings as MP
@@ -354,23 +355,32 @@ def cmd_indy(args: argparse.Namespace) -> int:
 
 def cmd_recover(args: argparse.Namespace) -> int:
     raw = Path(args.input)
+    from_frida = Path(args.from_frida) if getattr(args, "from_frida", None) else None
     if not raw.exists():
+        if from_frida and args.rewrite_src:
+            st = do_rewrite_sources(Path(args.rewrite_src), from_frida=from_frida)
+            print(f"rewrite   : {st['replaced']} call(s) replaced in {st['files']} "
+                  f"file(s), {st['missed']} missed, {st['residual']} residual, "
+                  f"map={st['map_size']} conflicts={st['conflicts']}")
+            print(f"rewritten : {args.rewrite_src}")
+            return 0
         print(f"no such file: {raw}")
         return 2
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_recovered")
     rc = do_recover(raw, out_dir, cp=args.cp, java=args.java,
                     limit=args.limit, stop_on_error=args.stop_on_error,
                     cp_file=args.cp_file, timeout=args.timeout,
-                    with_stubs=getattr(args, "with_stubs", True))
+                    with_stubs=getattr(args, "with_stubs", True),
+                    from_frida=from_frida)
     tsv = out_dir / "recovered.tsv"
     if args.rewrite_src:
         if not Path(args.rewrite_src).is_dir():
             print(f"rewrite-src: no such dir: {args.rewrite_src}")
             return 2
-        if not tsv.exists():
+        if not tsv.exists() and not from_frida:
             print("rewrite-src: no recovered.tsv produced; nothing to rewrite")
             return 1
-        st = do_rewrite_sources(Path(args.rewrite_src), tsv)
+        st = do_rewrite_sources(Path(args.rewrite_src), tsv, from_frida=from_frida)
         print(f"rewrite   : {st['replaced']} call(s) replaced in {st['files']} "
               f"file(s), {st['missed']} missed, {st['residual']} residual, "
               f"map={st['map_size']} conflicts={st['conflicts']}")
@@ -426,15 +436,16 @@ def cmd_pool(args: argparse.Namespace) -> int:
     if not src.is_dir():
         print(f"no such dir: {src}")
         return 2
-    if not args.harvest:
-        print("apply needs --harvest <pool_harvest.tsv>")
+    from_frida = Path(args.from_frida) if getattr(args, "from_frida", None) else None
+    if not args.harvest and not from_frida:
+        print("apply needs --harvest <pool_harvest.tsv> or --from-frida <tsv>")
         return 2
-    hv = Path(args.harvest)
-    if not hv.is_file():
+    hv = Path(args.harvest) if args.harvest else None
+    if hv and not hv.is_file():
         print(f"no such file: {hv}")
         return 2
     out = Path(args.output) if args.output else src.parent / (src.name + "_pool")
-    st = PL.apply(src, hv, out)
+    st = PL.apply(src, hv, out, from_frida=from_frida)
     print(f"rewrite   : {st['replaced']} call(s) replaced "
           f"({st['repl_q']} qualified + {st['repl_bare']} bare), "
           f"{st['missed']} missed, {st['unique_plain']} unique plaintexts")
@@ -517,6 +528,39 @@ def cmd_deflat(args: argparse.Namespace) -> int:
     print(f"deflat    : {stats['methods_unflattened']} method(s) unflattened across {stats['classes']} class(es)")
     print(f"output    : {out}")
     return 0
+
+
+def cmd_bvm(args: argparse.Namespace) -> int:
+    from . import bvm_devirt as BVM
+    p = Path(args.input)
+    if not p.exists():
+        print(f"no such file: {p}")
+        return 2
+
+    out = Path(args.output) if args.output else p.with_name(p.stem + "_devirt" + p.suffix)
+    code_pool: dict[int, BVM.BVMMethod] = {}
+    if getattr(args, "pool", None):
+        pool_p = Path(args.pool)
+        if pool_p.exists():
+            code_pool = BVM.BVMDevirtualizer.load_code_pool(pool_p)
+        else:
+            print(f"pool file not found: {pool_p}")
+            return 2
+
+    if p.suffix.lower() == ".jar":
+        res = BVM.BVMDevirtualizer.devirtualize_jar(p, out, code_pool)
+        print(f"bvm devirt : {res['devirtualized_methods']} method(s) in {res['devirtualized_classes']} class(es) devirtualized")
+        print(f"output     : {out}")
+        return 0
+    elif p.suffix.lower() == ".class":
+        cf = CF.parse(p.read_bytes())
+        cf, count = BVM.BVMDevirtualizer.devirtualize_class_file(cf, code_pool)
+        out.write_bytes(cf.serialize())
+        print(f"bvm devirt : {count} method(s) devirtualized -> {out}")
+        return 0
+    else:
+        print(f"unsupported format: {p.suffix}")
+        return 2
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
@@ -828,6 +872,9 @@ def build_parser() -> argparse.ArgumentParser:
                          ".java sources under DIR (matches the BSM call "
                          "form Cls.method(\"site\", \"cipher\", seed)); "
                          "pair with decompile output src/")
+    sr.add_argument("--from-frida", dest="from_frida", default=None,
+                    help="ingest external Frida dynamic dump TSV (mappings, trace, or string dump) "
+                         "for source rewriting or combining with replay")
     sr.add_argument("--no-stubs", dest="with_stubs", action="store_false", default=True,
                     help="do not inject synthetic Minecraft runtime stubs into classpath")
     sr.set_defaults(func=cmd_recover)
@@ -845,6 +892,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "apply: rewritten source tree (default <src>_pool)")
     sp.add_argument("--harvest", default=None,
                     help="apply: harvest.tsv from the harvest step")
+    sp.add_argument("--from-frida", dest="from_frida", default=None,
+                    help="ingest external Frida dynamic dump TSV for source rewriting")
     sp.add_argument("--cp", default="", help="extra classpath entries for "
                     "the replay JVM, ';'-separated on Windows (MC jars, "
                     "lwjgl-api, libs, stubs)")
@@ -906,6 +955,15 @@ def build_parser() -> argparse.ArgumentParser:
     sdef.add_argument("-o", "--output", default=None,
                       help="output jar path (default: <input>_deflat.jar)")
     sdef.set_defaults(func=cmd_deflat)
+
+    sbvm = sub.add_parser("bvm",
+                          help="devirtualize BytecodeVM custom instruction streams to standard JVM bytecode")
+    sbvm.add_argument("input", help="target jar or class file to devirtualize")
+    sbvm.add_argument("-o", "--output", default=None,
+                      help="output path (default: <input>_devirt.<ext>)")
+    sbvm.add_argument("--pool", default=None,
+                      help="JSON file containing dumped BytecodeVM code pools / methods")
+    sbvm.set_defaults(func=cmd_bvm)
 
     def _add_auto_args(parser):
         parser.add_argument("input", help="target jar or directory")

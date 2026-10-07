@@ -259,11 +259,16 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
         java = EN.find_java() or java
 
     sep = ";" if os.name == "nt" else ":"
+    agent_jvm_arg = ""
+    native_jvm_arg = ""
     if with_stubs:
         try:
             from . import stubs
             stub_jar = stubs.ensure_stubs_jar()
             cp = str(stub_jar) + (sep if cp else "") + cp
+            agent_jar = stubs.ensure_mock_agent_jar()
+            if agent_jar.is_file():
+                agent_jvm_arg = "-javaagent:" + norm_classpath(str(agent_jar)) + _LF
         except Exception:
             pass
     if cp_file:
@@ -271,9 +276,25 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
         cp = cp + (";" if cp and not cp.endswith(";") else "") + extra.strip()
     classpath = sep.join([str(work_dir), cp]) if cp else str(work_dir)
     classpath = norm_classpath(classpath)
+
+    # 提取目标 Native 动态库并挂载 -Djava.library.path
+    try:
+        from . import native_scan
+        natives_dir = work_dir / "natives"
+        for cp_part in classpath.split(sep):
+            cp_p = Path(cp_part.strip())
+            if cp_p.is_file() and cp_p.suffix.lower() == ".jar":
+                native_scan.extract_libs(cp_p, natives_dir)
+        if any(natives_dir.glob("*")):
+            native_jvm_arg = "-Djava.library.path=" + norm_classpath(str(natives_dir)) + _LF
+    except Exception:
+        pass
+
     argsfile = work_dir / "java_args.txt"
     argsfile.write_text(
-        "-Xverify:none" + _LF
+        agent_jvm_arg
+        + native_jvm_arg
+        + "-Xverify:none" + _LF
         + '-cp "' + classpath.replace('"', _BS + '"') + '"' + _LF
         + "PoolDriver" + _LF
         + '"' + spec_path.resolve().as_posix() + '"' + _LF
@@ -332,18 +353,36 @@ def _check_lit(lit: str, plain: str) -> None:
             f"escaping broken (must be " + _BS + "uXXXX form)")
 
 
-def apply(src_dir: Path, harvest_path: Path, out_dir: Path) -> dict:
+def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
+          from_frida: Path | None = None) -> dict:
     """回填明文进源码副本（out_dir），替换 + verify + 失败归因。"""
     plain: dict[tuple, str] = {}
     fail_lines: list[str] = []
-    for line in harvest_path.read_text(encoding="utf-8",
-                                       errors="replace").splitlines():
-        q = line.split(_TAB)
-        if q and q[0] == "R" and len(q) >= 6:
-            plain[(q[1], q[2], int(q[3]), int(q[4]))] = \
-                base64.b64decode(q[5]).decode("utf-8", errors="replace")
-        elif q and q[0] == "E" and len(q) >= 6:
-            fail_lines.append("FAIL" + _TAB + q[1] + _TAB + q[2] + _TAB + q[5])
+    if harvest_path and Path(harvest_path).is_file():
+        for line in Path(harvest_path).read_text(encoding="utf-8",
+                                           errors="replace").splitlines():
+            q = line.split(_TAB)
+            if q and q[0] == "R" and len(q) >= 6:
+                plain[(q[1], q[2], int(q[3]), int(q[4]))] = \
+                    base64.b64decode(q[5]).decode("utf-8", errors="replace")
+            elif q and q[0] == "E" and len(q) >= 6:
+                fail_lines.append("FAIL" + _TAB + q[1] + _TAB + q[2] + _TAB + q[5])
+
+    if from_frida and Path(from_frida).is_file():
+        for line in Path(from_frida).read_text(encoding="utf-8",
+                                               errors="replace").splitlines():
+            q = line.strip().split(_TAB)
+            if q and q[0] == "R" and len(q) >= 6:
+                try:
+                    plain[(q[1], q[2], int(q[3]), int(q[4]))] = \
+                        base64.b64decode(q[5]).decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+            elif len(q) >= 5 and q[0] not in ("OK", "R", "E"):
+                try:
+                    plain[(q[0], q[1], int(q[2]), int(q[3]))] = q[4]
+                except Exception:
+                    pass
 
     if out_dir.exists():
         shutil.rmtree(out_dir)

@@ -66,7 +66,16 @@ public class RecoverDriver {
                     // bsmStatics 按 B 行条目 idx 键存（idx 类内有效），换类必须清——
                     // 否则上个类的残留会喂给本类同 idx 的站点
                     bsmStatics.clear();
-                    Class<?> c = Class.forName(fqcn, true, cl);
+                    Class<?> c;
+                    try {
+                        c = Class.forName(fqcn, true, cl);
+                    } catch (LinkageError err) {
+                        try {
+                            c = Class.forName(fqcn, false, cl);
+                        } catch (Throwable ignored) {
+                            throw err;
+                        }
+                    }
                     for (Field f : c.getDeclaredFields())
                         if (f.getType() == long.class
                                 && Modifier.isStatic(f.getModifiers())) {
@@ -174,7 +183,8 @@ public class RecoverDriver {
                 }
             } catch (Throwable t) {
                 Throwable r = t; while (r.getCause() != null) r = r.getCause();
-                String tag = line.split("\t", 3)[1];
+                String[] lp = line.split("\t", 3);
+                String tag = lp.length > 1 ? lp[1] : "?";
                 System.out.println("FAIL\t" + (fqcn == null ? "?" : fqcn) + "\t" + tag
                         + "\t" + esc(String.valueOf(r)));
                 if (t instanceof WrongMethodTypeException && fail < 999999)

@@ -362,36 +362,82 @@ def norm_classpath(cp: str) -> str:
                   chr(92) + r"1" + chr(92) + r"2:/", cp)
 
 
-def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
-    """把 recovered.tsv 的解密明文回填进反编译源码（CFR/其他引擎的 .java）。
+def ingest_frida_tsv(tsv_path: Path) -> dict[tuple[str, str], str]:
+    """把外部 Frida 动态转储 TSV 吸收为 (cipher, seed) -> plain 映射。
+
+    支持：
+    - 6 列 recovered 格式: OK \\t fqcn \\t site \\t cipher \\t seed \\t raw_plain
+    - 3 列通用格式: cipher \\t seed \\t plain
+    - Frida jnitrace TSV: tid \\t NewStringUTF \\t plain
+    - 5/6 列 pool harvest 格式: R \\t fqcn \\t meth \\t idx \\t seed \\t b64_plain
+    """
+    out: dict[tuple[str, str], str] = {}
+    if not tsv_path.exists():
+        return out
+    for line in tsv_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if parts[0] == "OK" and len(parts) >= 6:
+            cipher, seed, raw_plain = parts[3], parts[4], parts[-1]
+            plain = decode_plain_field(raw_plain)
+            if cipher != "-" and seed != "-":
+                out[(cipher, seed)] = plain
+        elif len(parts) >= 3 and parts[1] == "NewStringUTF":
+            plain = parts[2]
+            out[(plain, "0")] = plain
+        elif parts[0] == "R" and len(parts) >= 6:
+            idx, seed, raw_plain = parts[3], parts[4], parts[5]
+            try:
+                plain = base64.b64decode(raw_plain).decode("utf-8", errors="replace")
+                out[(str(idx), str(seed))] = plain
+            except Exception:
+                pass
+        elif len(parts) == 3 and parts[0] not in ("R", "E"):
+            cipher, seed, raw_plain = parts[0], parts[1], parts[2]
+            plain = decode_plain_field(raw_plain)
+            out[(cipher, seed)] = plain
+    return out
+
+
+def rewrite_sources(src_dir: Path, tsv_path: Path | None = None,
+                    from_frida: Path | None = None) -> dict:
+    """把 recovered.tsv 与/或 Frida 转储的解密明文回填进反编译源码。
 
     匹配源码里 indy 被还原成的 BSM 调用形态:
         Cls.method("siteName", "cipher", seed)
-    匹配键 = (cipher, seed)——driver 的 OK 行已携带这两个静态参数。
-    适用条件: BSM 静态参数为 (String cipher, 整数 seed) 的字符串解密家族；
-    REF 型（成员引用）与其他参数布局不在范围内。
-
-    正则用零反斜杠的字符类写法（[.] [(] 等）——传输链路会改写反斜杠，
-    字符类写法免疫。返回统计 dict。
+    匹配键 = (cipher, seed)。支持吸收 Frida TSV 联合回填。
     """
     plain_map: dict = {}
     conflicts = 0
-    for line in tsv_path.read_text(encoding="utf-8").splitlines():
-        parts = line.split("\t")
-        if len(parts) < 6 or parts[0] != "OK":
-            continue
-        cipher, seed, raw_plain = parts[3], parts[4], parts[-1]
-        plain = decode_plain_field(raw_plain)
-        if cipher == "-" or seed == "-":
-            continue
-        if plain.startswith("[L") or re.search(r"@[0-9a-f]{4,}$", plain):
-            continue
-        key = (cipher, seed)
-        if key in plain_map:
-            if plain_map[key] != plain:
-                conflicts += 1
-            continue
-        plain_map[key] = plain
+
+    if tsv_path and tsv_path.exists():
+        for line in tsv_path.read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 6 or parts[0] != "OK":
+                continue
+            cipher, seed, raw_plain = parts[3], parts[4], parts[-1]
+            plain = decode_plain_field(raw_plain)
+            if cipher == "-" or seed == "-":
+                continue
+            if plain.startswith("[L") or re.search(r"@[0-9a-f]{4,}$", plain):
+                continue
+            key = (cipher, seed)
+            if key in plain_map:
+                if plain_map[key] != plain:
+                    conflicts += 1
+                continue
+            plain_map[key] = plain
+
+    if from_frida:
+        fmap = ingest_frida_tsv(Path(from_frida))
+        for key, plain in fmap.items():
+            if key in plain_map:
+                if plain_map[key] != plain:
+                    conflicts += 1
+                continue
+            plain_map[key] = plain
 
     # 空白类含 CR/LF：CFR 之外的引擎（vineflower/procyon）会把长参数折行
     WS = "[ \t\r\n]*"
@@ -447,16 +493,32 @@ def rewrite_sources(src_dir: Path, tsv_path: Path) -> dict:
 def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             limit: int = 0, stop_on_error: bool = False,
             cp_file: Path | None = None, timeout: int = 1800,
-            with_stubs: bool = True) -> int:
+            with_stubs: bool = True, from_frida: Path | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     sep = ";" if __import__("os").name == "nt" else ":"
+    agent_jvm_arg = ""
+    native_jvm_arg = ""
     if with_stubs:
         try:
             from . import stubs
             stub_jar = stubs.ensure_stubs_jar()
             cp = str(stub_jar) + (sep if cp else "") + cp
+            agent_jar = stubs.ensure_mock_agent_jar()
+            if agent_jar.is_file():
+                agent_jvm_arg = f"-javaagent:{norm_classpath(str(agent_jar))}\n"
         except Exception:
             pass
+
+    # 提取目标 Native 库并挂载 -Djava.library.path
+    try:
+        from . import native_scan
+        natives_dir = out_dir / "natives"
+        found_libs = native_scan.extract_libs(jar, natives_dir)
+        if found_libs or any(natives_dir.glob("*")):
+            native_jvm_arg = f"-Djava.library.path={norm_classpath(str(natives_dir))}\n"
+    except Exception:
+        pass
+
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
         cp = cp + (";" if cp and not cp.endswith(";") else "") + extra.strip()
@@ -486,7 +548,7 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
     cp_line = classpath.replace('"', '\\"')
     head = "-XX:+ShowMessageBoxOnError\n" if stop_on_error else ""
     argsfile.write_text(
-        head + f'-Xverify:none\n-cp "{cp_line}"\nRecoverDriver\n"{spec_path.as_posix()}"\n',
+        head + agent_jvm_arg + native_jvm_arg + f'-Xverify:none\n-cp "{cp_line}"\nRecoverDriver\n"{spec_path.as_posix()}"\n',
         encoding="utf-8")
     try:
         r = subprocess.run([java, "@" + str(argsfile)], capture_output=True,
@@ -518,9 +580,19 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         elif q[0] == "FAIL":
             fail += 1
             fail_lines.append(line)
-        elif q[0] == "SKIP":
-            skip += 1
-    (out_dir / "recovered.tsv").write_text(r.stdout, encoding="utf-8")
+    tsv_content = r.stdout
+    if from_frida and Path(from_frida).is_file():
+        frida_map = ingest_frida_tsv(Path(from_frida))
+        if frida_map:
+            extra_lines = []
+            for (c, s), p in frida_map.items():
+                b64 = "b64:" + base64.b64encode(p.encode("utf-8")).decode("ascii")
+                extra_lines.append(f"OK\tfrida\tfrida\t{c}\t{s}\t{b64}")
+                values.append(extra_lines[-1])
+            if extra_lines:
+                tsv_content = tsv_content + ("\n" if tsv_content and not tsv_content.endswith("\n") else "") + "\n".join(extra_lines) + "\n"
+                ok += len(extra_lines)
+    (out_dir / "recovered.tsv").write_text(tsv_content, encoding="utf-8")
     # 失败归因（硬输出）：分桶 + 每桶处置建议，见 failed_triage.md
     buckets = triage_failures(fail_lines)
     triage_path = write_failed_triage(out_dir, buckets, skip)

@@ -253,8 +253,120 @@ def build_stub_class_bytes(slash_name: str) -> bytes:
     return bytes(buf)
 
 
-def build_mock_agent_jar(dest: Path) -> Path:
-    """Build a lightweight Java Instrumentation Agent jar with Premain-Class."""
+MOCK_AGENT_JAVA = """package jdec.mock;
+
+import java.lang.instrument.ClassFileTransformer;
+import java.lang.instrument.Instrumentation;
+import java.security.ProtectionDomain;
+
+public class MockAgent {
+    public static void premain(String agentArgs, Instrumentation inst) {
+        inst.addTransformer(new NativeLinkTransformer(), true);
+    }
+
+    public static void agentmain(String agentArgs, Instrumentation inst) {
+        premain(agentArgs, inst);
+    }
+
+    static class NativeLinkTransformer implements ClassFileTransformer {
+        @Override
+        public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
+                                ProtectionDomain protectionDomain, byte[] buf) {
+            if (className == null || className.startsWith("java/") || className.startsWith("jdk/") || className.startsWith("sun/")) {
+                return null;
+            }
+            if (buf == null || buf.length < 10) return null;
+            if ((buf[0] & 0xFF) != 0xCA || (buf[1] & 0xFF) != 0xFE ||
+                (buf[2] & 0xFF) != 0xBA || (buf[3] & 0xFF) != 0xBE) return null;
+
+            try {
+                int cpCount = ((buf[8] & 0xFF) << 8) | (buf[9] & 0xFF);
+                int pos = 10;
+                int[] cpOffsets = new int[cpCount];
+                int[] cpTags = new int[cpCount];
+                for (int i = 1; i < cpCount; i++) {
+                    cpOffsets[i] = pos;
+                    int tag = buf[pos++] & 0xFF;
+                    cpTags[i] = tag;
+                    if (tag == 7 || tag == 8 || tag == 16 || tag == 19 || tag == 20) {
+                        pos += 2;
+                    } else if (tag == 9 || tag == 10 || tag == 11 || tag == 3 || tag == 4 || tag == 12 || tag == 17 || tag == 18) {
+                        pos += 4;
+                    } else if (tag == 5 || tag == 6) {
+                        pos += 8;
+                        i++;
+                    } else if (tag == 15) {
+                        pos += 3;
+                    } else if (tag == 1) {
+                        int len = ((buf[pos] & 0xFF) << 8) | (buf[pos + 1] & 0xFF);
+                        pos += 2 + len;
+                    } else {
+                        return null;
+                    }
+                }
+
+                boolean[] isLoadLibMethodref = new boolean[cpCount];
+                boolean hasTarget = false;
+                for (int i = 1; i < cpCount; i++) {
+                    if (cpTags[i] == 10) {
+                        int off = cpOffsets[i] + 1;
+                        int clsIdx = ((buf[off] & 0xFF) << 8) | (buf[off + 1] & 0xFF);
+                        int natIdx = ((buf[off + 2] & 0xFF) << 8) | (buf[off + 3] & 0xFF);
+                        if (clsIdx > 0 && clsIdx < cpCount && cpTags[clsIdx] == 7 &&
+                            natIdx > 0 && natIdx < cpCount && cpTags[natIdx] == 12) {
+                            int clsNameIdx = ((buf[cpOffsets[clsIdx] + 1] & 0xFF) << 8) | (buf[cpOffsets[clsIdx] + 2] & 0xFF);
+                            int natNameIdx = ((buf[cpOffsets[natIdx] + 1] & 0xFF) << 8) | (buf[cpOffsets[natIdx] + 2] & 0xFF);
+                            int natDescIdx = ((buf[cpOffsets[natIdx] + 3] & 0xFF) << 8) | (buf[cpOffsets[natIdx] + 4] & 0xFF);
+
+                            if (utf8Equals(buf, cpOffsets, cpTags, clsNameIdx, "java/lang/System") &&
+                                (utf8Equals(buf, cpOffsets, cpTags, natNameIdx, "loadLibrary") ||
+                                 utf8Equals(buf, cpOffsets, cpTags, natNameIdx, "load")) &&
+                                utf8Equals(buf, cpOffsets, cpTags, natDescIdx, "(Ljava/lang/String;)V")) {
+                                isLoadLibMethodref[i] = true;
+                                hasTarget = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!hasTarget) return null;
+
+                byte[] out = buf.clone();
+                for (int p = pos; p < out.length - 2; p++) {
+                    if ((out[p] & 0xFF) == 0xB8) {
+                        int midx = ((out[p + 1] & 0xFF) << 8) | (out[p + 2] & 0xFF);
+                        if (midx > 0 && midx < cpCount && isLoadLibMethodref[midx]) {
+                            out[p] = (byte) 0x57;     // pop
+                            out[p + 1] = (byte) 0x00; // nop
+                            out[p + 2] = (byte) 0x00; // nop
+                        }
+                    }
+                }
+                return out;
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        private boolean utf8Equals(byte[] buf, int[] cpOffsets, int[] cpTags, int idx, String str) {
+            if (idx <= 0 || idx >= cpTags.length || cpTags[idx] != 1) return false;
+            int off = cpOffsets[idx] + 1;
+            int len = ((buf[off] & 0xFF) << 8) | (buf[off + 1] & 0xFF);
+            byte[] strBytes = str.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            if (len != strBytes.length) return false;
+            off += 2;
+            for (int i = 0; i < len; i++) {
+                if (buf[off + i] != strBytes[i]) return false;
+            }
+            return true;
+        }
+    }
+}
+"""
+
+
+def build_mock_agent_jar(dest: Path, javac_bin: str = "javac") -> Path:
+    """Build a Java Instrumentation Agent jar with Premain-Class to intercept native link errors."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     manifest = (
         "Manifest-Version: 1.0\r\n"
@@ -264,6 +376,27 @@ def build_mock_agent_jar(dest: Path) -> Path:
         "Can-Retransform-Classes: true\r\n"
         "\r\n"
     )
+    tmp_dir = Path(tempfile.mkdtemp(prefix="jdec_agent_build_"))
+    try:
+        agent_src = tmp_dir / "jdec" / "mock" / "MockAgent.java"
+        agent_src.parent.mkdir(parents=True, exist_ok=True)
+        agent_src.write_text(MOCK_AGENT_JAVA, encoding="utf-8")
+        javac_resolved = _find_javac(javac_bin)
+        cmd = [javac_resolved, str(agent_src)]
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if r.returncode == 0:
+            with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("META-INF/MANIFEST.MF", manifest)
+                for cls_file in tmp_dir.rglob("*.class"):
+                    arcname = cls_file.relative_to(tmp_dir).as_posix()
+                    z.write(cls_file, arcname)
+            return dest
+    except Exception:
+        pass
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Fallback to bytecode builder if javac is unavailable
     agent_bytes = build_stub_class_bytes("jdec/mock/MockAgent")
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("META-INF/MANIFEST.MF", manifest)
@@ -280,4 +413,5 @@ def ensure_mock_agent_jar(cache_dir: Path | None = None) -> Path:
     if not agent_jar.is_file():
         build_mock_agent_jar(agent_jar)
     return agent_jar
+
 
