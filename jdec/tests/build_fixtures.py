@@ -37,6 +37,14 @@ COLLIDE_BUILD = ROOT / "tests" / "build" / "collide_upper"
 COLLIDE_BUILD_LOWER = ROOT / "tests" / "build" / "collide_lower"
 COLLIDE_JAR = ROOT / "tests" / "collide.jar"
 
+# The main regression sample: the three demo subtrees plus one class that is
+# compiled and then deliberately truncated (parse must reject it).
+DEMO_SRC = ROOT / "tests" / "samples" / "demo"
+DEMO_BUILD = ROOT / "tests" / "build" / "demo"
+BROKEN_BUILD = ROOT / "tests" / "build" / "broken"
+BROKEN_CLASS = "demo/broken/Truncated.class"
+SAMPLE_JAR = ROOT / "tests" / "sample.jar"
+
 # written at the jar root, as Fabric would ship them
 META_FILES = ("fabric.mod.json", "demo.mixins.json", "demo.refmap.json")
 
@@ -89,7 +97,56 @@ def build() -> Path:
             z.write(p, p.relative_to(FLOW_BUILD).as_posix())
 
     _build_collide(javac)
+    _build_sample_jar(javac)
     return JAR
+
+
+def _build_sample_jar(javac: str) -> Path:
+    """Build tests/sample.jar from the demo sources plus a truncated class.
+
+    The truncated entry is produced by compiling demo/broken/Truncated.java
+    and cutting the class bytes mid-constant-pool, so CF.parse hits EOF and
+    must raise ClassFormatError (the "quarantine, don't crash" behaviour).
+    """
+    for sub in ("legacy", "modern", "obf"):
+        _compile(javac, DEMO_SRC / sub, DEMO_BUILD / sub)
+    _compile(javac, DEMO_SRC / "broken", BROKEN_BUILD)
+    broken_path = BROKEN_BUILD / "demo" / "broken" / "Truncated.class"
+    if not broken_path.exists():
+        raise RuntimeError(f"javac did not produce {broken_path}")
+    broken_bytes = broken_path.read_bytes()
+    # deterministic truncation: keep the header + part of the constant pool
+    cut = max(11, len(broken_bytes) // 2)
+    truncated = broken_bytes[:cut]
+
+    SAMPLE_JAR.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(SAMPLE_JAR, "w", zipfile.ZIP_DEFLATED) as z:
+        for sub in ("legacy", "modern", "obf"):
+            bdir = DEMO_BUILD / sub
+            for p in sorted(bdir.rglob("*.class")):
+                # javac lays classes under <bdir>/demo/<sub>/...; the jar must
+                # carry the package path only
+                z.write(p, p.relative_to(bdir).as_posix())
+        z.writestr(BROKEN_CLASS, truncated)
+        z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\n\r\n")
+    return SAMPLE_JAR
+
+
+def ensure_sample_jar(quiet: bool = True) -> Path | None:
+    if SAMPLE_JAR.exists():
+        return SAMPLE_JAR
+    javac = _javac()
+    if javac is None:
+        return None
+    try:
+        path = _build_sample_jar(javac)
+        if not quiet:
+            print(f"built {path}")
+        return path
+    except Exception as exc:  # noqa: BLE001
+        if not quiet:
+            print(f"could not build sample fixture: {exc}")
+        return None
 
 
 def _build_collide(javac: str) -> Path:

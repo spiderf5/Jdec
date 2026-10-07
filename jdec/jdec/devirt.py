@@ -279,8 +279,27 @@ class VMDecoder:
     """Decodes virtual bytecode integer arrays into structured VMInstructions."""
 
     @classmethod
-    def resolve_opcode(cls, mutated: int, mutator_map: list[int] | dict[int, int] | None) -> str | None:
-        """Resolve a mutated integer opcode to an Opcs name."""
+    def resolve_opcode(cls, mutated: int, mutator_map: list[int] | dict[int, int] | None,
+                       mode: str = "ordinal") -> str | None:
+        """Resolve a mutated integer opcode to an Opcs name.
+
+        The two interpretation spaces overlap for ints 0..161, so a bare int
+        stream is ambiguous by construction — the mode parameter makes the
+        reading explicit instead of silently picking one:
+
+          * "ordinal"    - ints are OPCS ordinals (0..len(OPCS_ORDINALS)-1),
+                           optionally remapped through `mutator_map`; this is
+                           the virtualized-stream default
+          * "jvm-opcode" - ints are raw JVM opcodes (0..0xC9), used when the
+                           stream carries untranslated JVM bytecode
+
+        When a `mutator_map` is supplied it is authoritative: an int the map
+        does not cover resolves to None (the caller raises), never to a
+        coincidental ordinal/JVM-opcode reading.
+        """
+        if mode not in ("ordinal", "jvm-opcode"):
+            raise ValueError(f"unknown opcode mode: {mode!r}")
+
         if mutator_map is not None:
             if isinstance(mutator_map, dict):
                 ord_val = mutator_map.get(mutated)
@@ -294,20 +313,22 @@ class VMDecoder:
                     return OPCS_ORDINALS[ord_val]
                 elif isinstance(ord_val, str) and ord_val in OPCS_SPECS:
                     return ord_val
+            return None  # the map is the truth; no fallback guessing
 
-        # If mutated is an ordinal directly (0..161)
-        if 0 <= mutated < len(OPCS_ORDINALS):
-            return OPCS_ORDINALS[mutated]
-
-        # If mutated is already a direct JVM opcode
-        if mutated in JVM_OPCODE_TO_NAME:
-            return JVM_OPCODE_TO_NAME[mutated]
-
-        return None
+        if mode == "ordinal":
+            if 0 <= mutated < len(OPCS_ORDINALS):
+                return OPCS_ORDINALS[mutated]
+            return None
+        return JVM_OPCODE_TO_NAME.get(mutated)  # mode == "jvm-opcode"
 
     @classmethod
-    def decode(cls, code: list[int], mutator_map: list[int] | dict[int, int] | None = None) -> list[VMInstruction]:
-        """Decode flat list of ints into VMInstruction sequence."""
+    def decode(cls, code: list[int], mutator_map: list[int] | dict[int, int] | None = None,
+               mode: str = "ordinal") -> list[VMInstruction]:
+        """Decode flat list of ints into VMInstruction sequence.
+
+        `mode` is forwarded to resolve_opcode — see there for why the
+        interpretation of a bare int stream must be explicit.
+        """
         instructions: list[VMInstruction] = []
         pc = 0
         code_len = len(code)
@@ -317,7 +338,7 @@ class VMDecoder:
             mutated_op = code[pc]
             pc += 1
 
-            opc_name = cls.resolve_opcode(mutated_op, mutator_map)
+            opc_name = cls.resolve_opcode(mutated_op, mutator_map, mode)
             if not opc_name or opc_name not in OPCS_SPECS:
                 raise ValueError(f"Unknown BytecodeVM mutated opcode {mutated_op} at pc {insn_pc}")
 
@@ -865,7 +886,13 @@ class Devirtualizer:
         code_bytes: bytes,
         handlers: list[Handler]
     ) -> bytes:
-        """Construct a valid JVM Code attribute blob."""
+        """Construct a valid JVM Code attribute blob.
+
+        Note: the rebuilt Code carries no sub-attributes — in particular no
+        StackMapTable.  Java 7+ JVM verification may reject such classes
+        (VerifyError); decompilers recompute the frames themselves, so jdec
+        output is unaffected.  The CLI prints this boundary on every run.
+        """
         code_attr_idx = cf.intern_utf8("Code")
 
         ex_buf = bytearray()
@@ -1056,6 +1083,7 @@ class Devirtualizer:
         total_classes = 0
         devirtualized_classes = 0
         total_methods = 0
+        failed: list[str] = []
 
         with zipfile.ZipFile(input_jar, "r") as zin, zipfile.ZipFile(output_jar, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
@@ -1069,14 +1097,24 @@ class Devirtualizer:
                             devirtualized_classes += 1
                             total_methods += count
                             data = cf.serialize()
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(f"{item.filename}: {exc}")
                 zout.writestr(item, data)
+
+        if failed:
+            limit = 20
+            print(f"devirt: {len(failed)}/{total_classes} class(es) failed to "
+                  f"devirtualize (written back unchanged):")
+            for line in failed[:limit]:
+                print(f"  ! {line}")
+            if len(failed) > limit:
+                print(f"  ! ... and {len(failed) - limit} more")
 
         return {
             "total_classes": total_classes,
             "devirtualized_classes": devirtualized_classes,
             "devirtualized_methods": total_methods,
+            "failed_classes": failed,
             "output": output_jar
         }
 

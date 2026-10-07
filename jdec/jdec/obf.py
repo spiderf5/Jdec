@@ -76,7 +76,8 @@ _MIN_HIT_RATIO = 0.10
 # *inverted* as evidence: an official Minecraft jar has its SourceFile
 # attributes stripped (100% mismatch) and far heavier method overloading
 # (34%) than the ZKM-processed sample (0.1% and 3.7%).
-_GENERIC_KEYS = ("fake-sourcefile", "line-number-reset", "overload-collision")
+# (Currently informational only - attribute() never reads it. Keep the tuple
+# as the canonical "generic signal" list for future gate logic.)
 
 # a class whose every jump is a goto is a flow-obfuscation smell; vanilla sits
 # at 1.3% and ZKM 27 at 13.9%, so this threshold has an order of magnitude of
@@ -341,11 +342,21 @@ def _utf8_index_of(cf, payload: bytes) -> int:
 def attribute(hits: dict[str, int], classes_scanned: int = 0) -> tuple[str | None, float]:
     """Noisy-OR over the ZKM-specific fingerprints, with two guards.
 
-    `hits` maps a fingerprint to the number of *classes* it fired on. A
-    fingerprint only counts when it reaches `_MIN_HIT_RATIO` of the jar, which
-    is what separates "one method happens to be jumpy" from "this whole jar was
-    flow-obfuscated". The floor then stops weak corroboration from producing a
-    vendor at all.
+    `hits` maps a fingerprint to the number of *classes* it fired on — not
+    occurrences. (inspect_class returns occurrence counts per class; the jar
+    walkers must collapse those to one hit per class before calling this, or
+    the 10% gate loses its "share of the jar" meaning.) A fingerprint only
+    counts when it reaches `_MIN_HIT_RATIO` of the jar, which is what
+    separates "one method happens to be jumpy" from "this whole jar was
+    flow-obfuscated".
+
+    The floor is exclusive: confidence must be STRICTLY ABOVE
+    `_ATTRIBUTION_FLOOR` (0.35) to name a vendor. A single `goto-flood`
+    fingerprint (weight 0.35) therefore reads "unknown" on its own — exactly
+    the "weak corroboration is not attribution" rule the floor encodes —
+    while combinations of independent signals (e.g. goto-flood +
+    long-constant-array = 0.42) do attribute. Callers that want the numeric
+    confidence of a non-attributed run can read it from the second element.
     """
     need = _MIN_HIT_RATIO * classes_scanned if classes_scanned else 1
     present = [k for k in _ZKM_WEIGHTS if hits.get(k, 0) >= need and hits.get(k)]
@@ -355,7 +366,7 @@ def attribute(hits: dict[str, int], classes_scanned: int = 0) -> tuple[str | Non
     for k in present:
         miss *= (1.0 - _ZKM_WEIGHTS[k])
     conf = round(1.0 - miss, 2)
-    if conf < _ATTRIBUTION_FLOOR:
+    if conf <= _ATTRIBUTION_FLOOR:
         return None, conf
     return "Zelix KlassMaster (ZKM)", conf
 
@@ -375,7 +386,12 @@ def build_report(totals: dict[str, int], class_hits: dict[str, dict[str, int]],
     rep.methods_flagged = sum(
         v for k, v in totals.items()
         if k in ("handler-backjump", "irreducible-goto"))
-    rep.vendor, rep.confidence = attribute(totals, classes_scanned)
+    # attribute() gates on *class* coverage (see its docstring); totals are
+    # occurrence counts kept for the evidence display, so collapse the
+    # per-class hits to one hit per class here
+    class_counts = {k: sum(1 for h in class_hits.values() if h.get(k))
+                    for k in _ZKM_WEIGHTS}
+    rep.vendor, rep.confidence = attribute(class_counts, classes_scanned)
     rep.evidence = sorted(
         (Evidence(key=k, weight=_ZKM_WEIGHTS.get(k, 0.0), hits=v,
                   classes=sum(1 for h in class_hits.values() if h.get(k)))

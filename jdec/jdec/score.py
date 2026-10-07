@@ -173,7 +173,7 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
         hard_error_class_level = False
 
     leftover = len(_LEFTOVER_RE.findall(src))
-    opens, closes = src.count("{"), src.count("}")
+    opens, closes = _count_braces(src)
     brace_skew = abs(opens - closes) / float(max(1, opens))
     # Proportional, not absolute: a single truncated method in a 6000-line
     # file leaves a handful of unbalanced braces and that is not a failure.
@@ -224,6 +224,59 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
     )
 
 
+def _count_braces(src: str) -> tuple[int, int]:
+    """Count { } outside string/char literals, text blocks and comments.
+
+    Counting every brace in the raw text charged real Java - a format string
+    containing '{', a javadoc brace - as truncation damage (a flat -25 on the
+    score), so only structural braces count now.
+    """
+    opens = closes = 0
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = src.find("\n", i)
+            if j < 0:
+                break
+            i = j + 1
+        elif c == "/" and nxt == "*":
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif c == '"':
+            if src[i:i + 3] == '"""':          # text block
+                j = src.find('"""', i + 3)
+                i = n if j < 0 else j + 3
+                continue
+            i += 1
+            while i < n:                       # string literal
+                if src[i] == "\\":
+                    i += 2
+                elif src[i] == '"':
+                    i += 1
+                    break
+                else:
+                    i += 1
+        elif c == "'":                         # char literal
+            i += 1
+            while i < n:
+                if src[i] == "\\":
+                    i += 2
+                elif src[i] == "'":
+                    i += 1
+                    break
+                else:
+                    i += 1
+        else:
+            if c == "{":
+                opens += 1
+            elif c == "}":
+                closes += 1
+            i += 1
+    return opens, closes
+
+
 def better(a: Quality, b: Quality | None) -> bool:
     if b is None:
         return True
@@ -231,4 +284,10 @@ def better(a: Quality, b: Quality | None) -> bool:
         return a.usable
     if abs(a.score - b.score) > 1.0:
         return a.score > b.score
+    # near tie: prefer the more complete recovery, then the cleaner output;
+    # only when those agree does sheer size break the tie
+    if a.coverage != b.coverage:
+        return a.coverage > b.coverage
+    if len(a.issues) != len(b.issues):
+        return len(a.issues) < len(b.issues)
     return a.lines > b.lines  # more recovered detail wins a near tie

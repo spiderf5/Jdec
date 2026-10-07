@@ -270,7 +270,8 @@ def decompile(
     order = list(engine_order or _default_engine_order(prof))
     order = [e for e in order if e in EN.ENGINES and EN.ENGINES[e].available(engines_dir)]
     if not order:
-        raise SystemExit("no decompiler engine available (run with --install-engines)")
+        raise SystemExit("no decompiler engine available "
+                         "(run: python jdec.py engines)")
     lead = order[0]
     print(f"  engine order: {', '.join(order)}")
 

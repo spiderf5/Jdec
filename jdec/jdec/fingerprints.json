@@ -21,9 +21,9 @@
     {
       "name": "ZKM 27 enhanced 字符串加密（DES）",
       "keywords": [
-        "DES/CBC/PKCS5Padding",
-        "DESKeySpec",
-        "javax/crypto/spec/IvParameterSpec"
+        "des/cbc/pkcs5padding",
+        "deskeyspec",
+        "javax/crypto/spec/ivparameterspec"
       ],
       "tool": "java-deobfuscator 的 zelix.StringEncryptionTransformer（执行引擎；key 藏在多层常量折叠 + indy 里，手写 DES 还原成本过高）"
     },
@@ -255,15 +255,15 @@
       "name": "BytecodeVM",
       "keywords": [
         "nhcm/bytecodevm",
-        "$CodePool"
+        "$codepool"
       ],
-      "tool": "纯字节码 VM 虚拟化器（VM 用 Java 字节码写，无 native；17 种结构 SIMPLE_DISPATCH..REGISTER_BASED，随机 opcode 映射+操作数加密+super instruction+integrity VM）。probe 有专用水印扫描器：常量池 Long 0x42564D57434F4445(\"BVMWCODE\")+AES-GCM 胶囊（key 随密文自包含，静态可解，jdec/bvmw.py 纯 stdlib 解码出 owner/artifactId/时间戳）——源码级验证 study/BytecodeVM SDK。jar 里有 nhcm/bytecodevm SDK 注解类（Virtualize/DoNotVirtualize，CLASS retention，可能被 SdkAnnotationRemover 剥掉）或非重命名模式的 $CodePool 分块类"
+      "tool": "纯字节码 VM 虚拟化器（VM 用 Java 字节码写，无 native；17 种结构 SIMPLE_DISPATCH..REGISTER_BASED，随机 opcode 映射+操作数加密+super instruction+integrity VM）。专属水印解码/反虚拟化工具已移除（原 jdec/bvmw.py，git 历史可取回；解码方法沉淀在 skill references/bytecode-vm.md）。jar 里有 nhcm/bytecodevm SDK 注解类（Virtualize/DoNotVirtualize，CLASS retention，可能被 SdkAnnotationRemover 剥掉）或非重命名模式的 $CodePool 分块类"
     },
     {
       "name": "native-obfuscator (radioegor146)",
       "keywords": [
         "by/radioegor146",
-        "nativeobfuscator/Native"
+        "nativeobfuscator/native"
       ],
       "tool": "字节码→C(JNI) 鼻祖，GPL-3.0。方法体迁入生成的 C++ + 每类 Loader，Java 层剩 native 声明；SDK 注解 @Native/@NotNative（by.radioegor146.nativeobfuscator 包，可能残留）。MyJ2C 未经许可大量复用其代码；ghidra 侧可按其 C 模板识别翻译函数"
     }

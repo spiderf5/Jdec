@@ -22,6 +22,32 @@ from pathlib import Path
 
 MAVEN = "https://repo1.maven.org/maven2"
 
+# Maven Central publishes an official .sha1 per artifact (verified against the
+# local copies 2026-10-07).  A download - and every cached copy, forever - is
+# held to these values, so a truncated or silently swapped jar can never be
+# adopted as an engine.
+_SHA1: dict[str, str] = {
+    "cfr-0.152.jar": "48ef4892cfe8feffddbbd0ff077735140557db74",
+    "vineflower-1.11.1.jar": "77767cdbc76d116c6d5e1565ec387e531085b9f4",
+    "procyon-compilertools-0.6.0.jar": "44c59529227960fec1be237ac97304303caf0ba3",
+    "procyon-core-0.6.0.jar": "8f5a33f81d7027d11f1eeb609d9f467f97454c1c",
+}
+
+
+def _sha1(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha1(data).hexdigest()
+
+
+def cp_sep() -> str:
+    """Classpath separator for the platform the JVM runs on.
+
+    Windows java wants ';', POSIX java wants ':'.  Hardcoding ';' made the
+    Procyon bridge classpath (and CFR/Vineflower extra classpaths) a single
+    invalid path on Linux/macOS.
+    """
+    return ";" if os.name == "nt" else ":"
+
 # engine key -> (file name, maven path or None)
 _ARTIFACTS: dict[str, list[tuple[str, str]]] = {
     "cfr": [("cfr-0.152.jar", f"{MAVEN}/org/benf/cfr/0.152/cfr-0.152.jar")],
@@ -104,12 +130,19 @@ class Engine:
         if self.bridge_dir:
             parts.append(str(engines_dir / self.bridge_dir))
         parts += [str(engines_dir / j) for j in self.jars]
-        return ";".join(parts)
+        return cp_sep().join(parts)
 
     def available(self, engines_dir: Path) -> bool:
-        return all((engines_dir / j).exists() for j in self.jars) and (
-            not self.bridge_dir or (engines_dir / self.bridge_dir / "ProcyonBridge.class").exists()
-        )
+        for j in self.jars:
+            p = engines_dir / j
+            if not p.exists() or p.stat().st_size <= 10_000:
+                return False
+            try:
+                with zipfile.ZipFile(p) as z:
+                    z.namelist()          # reads the central directory
+            except Exception:
+                return False
+        return not self.bridge_dir or (engines_dir / self.bridge_dir / "ProcyonBridge.class").exists()
 
 
 ENGINES: dict[str, Engine] = {
@@ -163,13 +196,31 @@ def ensure_engines(engines_dir: Path, want: list[str] | None = None, quiet: bool
     for key in want or list(ENGINES):
         for fname, url in _ARTIFACTS.get(key, []):
             dest = engines_dir / fname
-            if dest.exists() and dest.stat().st_size > 10_000:
-                continue
+            want_hash = _SHA1.get(fname)
+            if dest.exists():
+                intact = dest.stat().st_size > 10_000
+                if intact and want_hash:
+                    intact = _sha1(dest.read_bytes()) == want_hash
+                if intact:
+                    continue
+                # truncated or tampered cached copy: refuse and re-fetch
+                if not quiet:
+                    print(f"  ! {fname} failed verification, re-downloading ...")
+                try:
+                    dest.unlink()
+                except OSError:
+                    missing.append(key)
+                    break
             if not quiet:
                 print(f"  downloading {fname} ...")
             try:
                 with urllib.request.urlopen(url, timeout=180) as r:
                     data = r.read()
+                if want_hash and _sha1(data) != want_hash:
+                    if not quiet:
+                        print(f"  ! {fname}: sha1 mismatch - refusing to install")
+                    missing.append(key)
+                    break
                 dest.write_bytes(data)
             except Exception as exc:  # noqa: BLE001
                 if not quiet:
@@ -258,9 +309,9 @@ def run_engine(
 
     if extra_cp:
         if engine.key == "cfr":
-            cmd += ["--extraclasspath", ";".join(extra_cp)]
+            cmd += ["--extraclasspath", cp_sep().join(extra_cp)]
         elif engine.key == "vineflower":
-            cmd = cmd[:-2] + [f"-e={';'.join(extra_cp)}"] + cmd[-2:]
+            cmd = cmd[:-2] + [f"-e={cp_sep().join(extra_cp)}"] + cmd[-2:]
 
     t0 = time.time()
     if verbose:

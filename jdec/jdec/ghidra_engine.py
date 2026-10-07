@@ -25,6 +25,11 @@ GHIDRA_RELEASE_URL = (
     "https://github.com/NationalSecurityAgency/ghidra/releases/download/"
     "Ghidra_11.0.3_build/ghidra_11.0.3_PUBLIC_20240410.zip"
 )
+# official release asset hash, cross-corroborated from two independent
+# mirrors of the GitHub release artifact (chocolatey package + pinned build
+# scripts, both 2024-04).  Override with JDEC_GHIDRA_SHA256 when bumping the
+# URL to a newer release.
+_GHIDRA_SHA256 = "2462a2d0ab11e30f9e907cd3b4aa6b48dd2642f325617e3d922c28e752be6761"
 WORKER_JAVA = Path(__file__).resolve().parent / "ghidra_worker.java"
 
 
@@ -118,17 +123,32 @@ def download_ghidra(
         print(f"Downloading Ghidra from {url} ...")
         print("Note: Ghidra release package is ~410MB, this may take a few minutes.")
 
-    def _reporthook(block_num: int, block_size: int, total_size: int) -> None:
-        if not quiet and total_size > 0:
-            downloaded = block_num * block_size
-            pct = min(100.0, downloaded * 100.0 / total_size)
-            mb = downloaded / (1024 * 1024)
-            tot_mb = total_size / (1024 * 1024)
-            sys.stdout.write(f"\r  progress: {mb:.1f}MB / {tot_mb:.1f}MB ({pct:.1f}%)")
-            sys.stdout.flush()
-
     try:
-        urllib.request.urlretrieve(url, zip_tmp, reporthook=_reporthook)
+        import hashlib
+        want = os.environ.get("JDEC_GHIDRA_SHA256") or _GHIDRA_SHA256
+        req = urllib.request.Request(url, headers={"User-Agent": "jdec/0.1"})
+        digest = hashlib.sha256()
+        with urllib.request.urlopen(req, timeout=600) as r, open(zip_tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                f.write(chunk)
+                done += len(chunk)
+                if not quiet and total > 0:
+                    mb, tot = done / (1024 * 1024), total / (1024 * 1024)
+                    sys.stdout.write(f"\r  progress: {mb:.1f}MB / {tot:.1f}MB "
+                                     f"({done * 100.0 / total:.1f}%)")
+                    sys.stdout.flush()
+        got = digest.hexdigest()
+        if want and got != want:
+            zip_tmp.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Ghidra download failed integrity verification: "
+                f"sha256 {got} != expected {want}; nothing was extracted")
         if not quiet:
             sys.stdout.write("\n  extracting Ghidra package ...\n")
             sys.stdout.flush()

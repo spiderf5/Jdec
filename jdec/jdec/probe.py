@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import obf as OB
-from .classfile import parse, ClassFormatError
+from .classfile import parse, C_UTF8, decode_mutf8
 
 # word stems that appear constantly in hand-written Java identifiers.
 # Their absence is the strongest single signal of name obfuscation.
@@ -35,9 +35,12 @@ _STEM_RE = re.compile("|".join(sorted(_COMMON_STEMS, key=len, reverse=True)), re
 _MC_VERSION_IN_PATH = re.compile(r"(?<![\w.])(1\.\d{1,2}(?:\.\d{1,2})?|2[0-9]w\d{1,2}[a-z]?|\d{2}\.\d{1,2})(?![\w.])")
 
 def _load_fingerprints() -> list[dict]:
+    # the skill copy is the single source of truth (the sedimentation rule in
+    # SKILL.md only edits it); the packaged copy is a fallback for when jdec
+    # runs without the skill tree next to it
     candidates = [
-        Path(__file__).resolve().parent / "fingerprints.json",
         Path(__file__).resolve().parent.parent.parent / "java-deobf" / "scripts" / "fingerprints.json",
+        Path(__file__).resolve().parent / "fingerprints.json",
     ]
     for p in candidates:
         if p.is_file():
@@ -47,6 +50,18 @@ def _load_fingerprints() -> list[dict]:
             except Exception:
                 pass
     return []
+
+
+def _pool_strings(cf) -> list[str]:
+    """Every Utf8 constant in the pool - the same domain deobf_scan matches."""
+    out: list[str] = []
+    for e in cf.cp[1:]:
+        if e and e[0] == C_UTF8:
+            try:
+                out.append(decode_mutf8(e[1]))
+            except Exception:
+                pass
+    return out
 
 
 _KNOWN_OBFUSCATORS = {
@@ -229,22 +244,6 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
             except Exception:
                 pass
 
-    joined_lower = joined.lower()
-    for item in _load_fingerprints():
-        name = item.get("name")
-        kws = item.get("keywords", [])
-        if any(kw.lower() in joined_lower for kw in kws):
-            prof.obfuscator = name
-            prof.signatures.append(f"obfuscator signature: {name}")
-            break
-
-    if not prof.obfuscator:
-        for marker, obf in _KNOWN_OBFUSCATORS.items():
-            if marker in joined and obf:
-                prof.obfuscator = obf
-                prof.signatures.append(f"obfuscator package {marker}")
-                break
-
     # bytecode versions across everything: full entry bytes in the SAME
     # pass as the header read (one open per class either way).
     from .classfile import java_version_of
@@ -271,16 +270,21 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
     unicode_names = 0
     structural: dict[str, int] = {}
 
+    cp_strings: list[str] = []
     for n in picked:
         try:
             data = zf.read(n)
             cf = parse(data)
-        except (ClassFormatError, Exception):
+        except Exception:
             continue
         # structural fingerprints: ZKM ships no runtime library, so packages
-        # alone can never identify it - the bytecode shape has to
+        # alone can never identify it - the bytecode shape has to.  Count one
+        # hit per class per fingerprint: attribute() gates on the share of
+        # classes, and occurrence counts would let a single jumpy class carry
+        # the whole jar over the 10% line.
         for k, v in OB.inspect_class(cf).items():
-            structural[k] = structural.get(k, 0) + v
+            structural[k] = structural.get(k, 0) + (1 if v else 0)
+        cp_strings.extend(_pool_strings(cf))
         if "/" in n:
             pkg = n.rsplit("/", 1)[0]
             pkg_counter[pkg] = pkg_counter.get(pkg, 0) + 1
@@ -301,6 +305,27 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
 
     prof.unicode_names = unicode_names
     prof.top_packages = sorted(pkg_counter.items(), key=lambda kv: -kv[1])[:12]
+
+    # keyword fingerprints over entry names + sampled constant pools.  Entry
+    # names alone never see pool-only markers (DESKeySpec, $CodePool); the
+    # sampled classes supply the pool half of the documented search domain.
+    blob = joined.lower()
+    if cp_strings:
+        blob += "\n" + "\n".join(cp_strings).lower()
+    for item in _load_fingerprints():
+        name = item.get("name")
+        kws = item.get("keywords", [])
+        if any(kw.lower() in blob for kw in kws):
+            prof.obfuscator = name
+            prof.signatures.append(f"obfuscator signature: {name}")
+            break
+
+    if not prof.obfuscator:
+        for marker, obf in _KNOWN_OBFUSCATORS.items():
+            if marker in joined and obf:
+                prof.obfuscator = obf
+                prof.signatures.append(f"obfuscator package {marker}")
+                break
 
     if not name_lengths:
         prof.obfuscation = 0.0

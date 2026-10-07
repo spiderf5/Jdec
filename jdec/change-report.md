@@ -473,3 +473,107 @@
 ## 3. 验证结果
 - **测试命令**：`python jdec/tests/run_tests.py`
 - **执行结果**：**477 passed, 0 failed**（100% PASS，全部通过）。
+
+---
+
+# 变更报告 4：ISSUES.md 遗留问题清单全量处置（P0/P1/P2）
+
+> 生成时间：2026-10-07 19:40
+>
+> 输入：`ISSUES.md`（2026-10-07 静态审计交接文档，基线 477 passed）
+>
+> 模式：Mode B 修 bug（每条含复现/验收）
+
+## 1. 任务目标
+
+解决 ISSUES.md §1 P0（2 项）、§2 P1（7 项）、§3 P2（17 项）全部确认问题；
+§4 未复核线索逐条验证并给出判定。交付判定：基线不回退、新增测试能复现
+原缺陷、真实样本回归通过。
+
+## 2. 逐条处置结果
+
+| 条目 | 状态 | 核心改动 |
+| --- | --- | --- |
+| P0-1 CI 无 sample.jar 构建路径 | ✅ | `build_fixtures.py` 新增 `build_sample_jar()`（编译 demo 三子树 + Truncated.java 编译后按 1/2 截断）与 `ensure_sample_jar()`；`run_tests.py` main() 缺 jar 先构建。验收：删 jar 后 477→517 全绿 |
+| P0-2 classpath 分隔符硬编码 `;` | ✅ | `engines.py` 新增 `cp_sep()`，classpath()/CFR/Vineflower extra_cp 三处改走它；`recover.py:524`、`pool.py:276`（ISSUES 未列的同族缺陷）改用既有 `sep`；`norm_classpath()` 加 `os.name != "nt"` 短路（顺带修复 §4 线索 9：POSIX 上 `/a/b` 被改写成 `a:/b`） |
+| P1-1 指纹匹配大小写敏感 | ✅ | `deobf_scan.py:527` 补 `.lower()`；5 条大写死关键词小写化（两份库同步）；`self_test.py` 加"关键词不得含大写"断言 |
+| P1-2 双副本/搜索域分裂 | ✅ | `probe.py` 关键词搜索域对齐 deobf_scan（条目名 + 抽样类全量 Utf8，`_pool_strings()`）；`_load_fingerprints()` 优先读 skill 副本（单一来源，包内副本降为回退）；`self_test.py` 加两份逐字节一致性校验 + `$CodePool` 常量池命中端到端用例（构造最小 class）；SKILL.md §4.7 沉淀规程同步改写 |
+| P1-3 remap 静默吞失败 | ✅ | `remap_jar()` 失败记账（类名+异常打印，上限 20 条）+ `strict` 参数（CLI `--strict-remap`，decompile 子命令）；写回失败兜底分支同记账 |
+| P1-4 devirt 操作码歧义 | ✅ | `resolve_opcode()` 增 `mode="ordinal"|"jvm-opcode"` 显式参数（docstring 写明 0..161 重叠歧义）；mutator_map 在场即为权威（miss → None，不再静默兜底）；`decode()` 透传 mode |
+| P1-5 pool verify/repl 口径不一 | ✅ | 抽出 `_resolve_fq()`，repl_q 与 verify 共用；verify 原先对全限定调用点必然漏检的盲区以单测钉死 |
+| P1-6 StackMapTable 丢弃无告警 | ✅（选项①） | deflat/devirt CLI 输出显式 note（JVM 7+ VerifyError 边界 + 反编译器自行重算）；两处 docstring 写明边界 |
+| P1-7 阈值刀刃 + hits 语义混用 | ✅ | `attribute()` 阈值改 `<=`（严格高于 0.35 才判，docstring+README 写死边界语义：单条 goto-flood=0.35 不成案）；`build_report()` 改传**类计数**（从 class_hits 折算）给 attribute；`probe.py` 结构指纹按类 +1 计数。真实样本回归：Myau0729-obf 723 类 → ZKM conf 0.68（goto-flood 339/723=46.9% 类，与校准注释一致） |
+| P2-1 不存在的 --install-engines | ✅ | 改为 `python jdec.py engines` |
+| P2-2 引擎 jar 无完整性校验 | ✅ | `_SHA1` 固定 Maven 官方 sha1（本机四罐实测 MATCH）；ensure_engines 对缓存与下载双向校验，失败即重下/拒绝；`available()` 加 zipfile 打开检查 |
+| P2-3 Ghidra 下载无校验 | ✅ | SHA-256 固定值 `2462a2d0…be6761`（Chocolatey 审核包与独立构建脚本双源交叉印证）；urlretrieve 改流式下载+边下边算哈希，不匹配拒解压；`JDEC_GHIDRA_SHA256` 环境变量可覆盖（版本升级用） |
+| P2-4 _GENERIC_KEYS 重复 | ✅ | 删第二处定义，第一处加注释（canonical 列表，现无消费者） |
+| P2-5 fingerprints 指向已删 bvmw.py | ✅ | 两份库同步替换为"已移除，git 可取回，方法见 references/bytecode-vm.md" |
+| P2-6 括号平衡误伤字符串/注释 | ✅ | `score.py` 新增 `_count_braces()`（跳过注释/字符串/char/text block 后计数） |
+| P2-7 近分决胜偏好啰嗦 | ✅ | `better()` 近平局先比 coverage 再比 issue 数，行数仅作最终平手裁决 |
+| P2-8 写回用标准 UTF-8 | ✅ | 新增 `encode_mutf8()`（decode_mutf8 的逆，NUL→C0 80、孤立代理→3 字节、辅助平面→CESU-8 代理对）；`set_utf8`/`intern_utf8` 统一改用；intern 缓存比对改 decode_mutf8。往返自检 6 组用例 OK |
+| P2-9 probe/project 临时目录泄漏 | ✅ | cmd_probe try/finally rmtree；cmd_project 的 tmp_decomp try/finally rmtree（导出逻辑拆到 `_do_project_export`） |
+| P2-10 except (ClassFormatError, Exception) | ✅ | probe.py 简化为 `except Exception`（顺带清理失用的 ClassFormatError import） |
+| P2-11 ops_pool 文档/死代码 | ✅ | docstring 改为纯 Python `_des`（有意零依赖）；删 `import ctypes` 与 `_BCRYPT_BLOCK_PADDING` |
+| P2-12 文档路径漂移 | ✅ | README.md 测试段、SKILL.md §6、.gitignore 注释内路径全部改为 `jdec/tests/...` |
+| P2-13 control-flow.md 与代码不符 | ✅ | 文档改为"text 模式显示该值（二值指纹: 异常处理器后跳 N），程序化判读以 JSON 字段为准" |
+| P2-14 不存在的 jdec remap 子命令 | ✅ | 改为实际命令 `python jdec.py decompile client.jar --deobf --mc-version <v> --mapping-set <set>` |
+| P2-15 git-workflow.md 悬空引用+孤儿 | ✅ | run_checks.py/pr-description-template.md 系 37f1647 重构**有意删除的死重**，不复活；自检第 3 条改为本仓唯一校验命令、第 4 条改为 change-report；PR 段指向 change-report-template.md；SKILL.md §4.5 深挖表收录该 reference（孤儿解除） |
+| P2-16 .gitignore 指向已删目录 | ✅ | 删 `jdec/tests/bvmw/bvmtrace/_*` 及其注释行 |
+| P2-17 study/.workbuddy 零版本控制 | ✅（用户拍板：另建私有笔记仓） | 新建 `D:/MC/notes`（独立 git 仓，主仓不动）：study 全部 15 份 .md + .workbuddy/memory 7 份 .md + README（范围/单向镜像更新法），首建 2 提交；只收 .md，DMCA 敏感源码永不入库 |
+
+## 3. §4 未复核线索判定（验证后处置）
+
+| 线索 | 判定 | 处置 |
+| --- | --- | --- |
+| recover.py norm_classpath POSIX 改写 | 确认 | 已随 P0-2 修复（Windows-only 短路） |
+| devirt devirtualize_jar 逐类吞异常 | 确认 | 已随 P1-3 同族修复（failed_classes 记账+打印） |
+| devirt extract_code_id 不校验描述符 | 确认（风险受 code_pool 命中约束，中低） | 未修：行为变更须配真实样本回归，列后续 |
+| deflat 常量压栈 NOP 不查跳转目标 | 确认（理论风险，ZKM 死分支构造下通常无害） | 未修：需 CFG 级目标检查，列后续 |
+| pool/recover 正则改写注释与字符串 | 确认（低危：需注释恰好出现同形态调用） | 未修：列入后续 |
+| project.py 重复声明自动注释 | 确认（启发式固有风险） | 未修：AST 级修复超范围 |
+| callgraph indy owner=<indy> 死类高估 | 确认（设计取舍） | 未修：需 BSM 参数还原，列后续 |
+| web.py 调用图异常返回 null | 确认（展示层问题） | 未修：低危 |
+| rename.py 启发式命名入映射 | 属有意设计（产出标注 heuristic 候选映射） | 不改 |
+
+## 4. 验证
+
+| 检查项 | 命令 | 结果 |
+| --- | --- | --- |
+| 全量测试 | `python jdec/tests/run_tests.py` | **517 passed, 0 failed**（基线 477 + 新增 40 项断言） |
+| 含真实样本 | `python jdec/tests/run_tests.py --with-mc` | 通过（ZKM 归因 conf 0.68；MC 800 类 round-trip） |
+| classfile round-trip（纪律 4） | 含于上（sample 11 类 + mixin + MC 800 类字节级一致） | 通过 |
+| skill 自测 | `python java-deobf/scripts/self_test.py` | 通过（含新大小写/一致性/端到端断言） |
+| 真实样本归因取证 | `OB.scan_obfuscation(Myau0729-obf.jar)` | ZKM conf 0.68，类覆盖率口径与校准注释吻合 |
+| skill 双写（纪律 8） | 七文件同步 + 用户副本 self_test | 同步完成，自测通过 |
+| mUTF-8 往返 | 6 组字节用例（NUL/代理对/多字节） | 全 OK |
+
+### 修复轮次
+
+1. 第 1 轮 — 现象：`build_sample_jar` 打包后缺 `Showcase$Point.class`（javac -d
+   保留包路径，relative_to 多了一层子目录）；改动：打包改为相对各子树构建目录；
+   结果：477 全绿。
+2. 第 2 轮 — 现象：新用例"wide class coverage does attribute"失败（单条
+   goto-flood 权重即 0.35，按新边界语义永不单独成案）；改动：正向用例改为
+   双信号（goto-flood+long-constant-array，conf 0.415）；结果：517 全绿。
+   该失败本身即 P1-7 边界语义生效的证据。
+
+## 5. 遗留风险与未做的事
+
+- §4 线索中 6 项"确认但未修"（见 §3 表）——均需复现测试 + 真实样本回归的
+  独立修复周期，不符合"修工具不做顺手重构"纪律，已列后续。
+- P1-4 的 mutator_map-miss 行为收紧（ miss→None→decode 抛错）：若真实 BVM
+  样本存在"映射不完整"的流，会从静默错译变为显式报错——这是修复目的，
+  但意味着此类样本需要走 `mode` 显式化。BytecodeVM fixture 语料 4 套
+  （study/）未在本轮重跑（run_tests 用例全绿）。
+- 引擎 sha1 固定值如果未来升级 jar 版本需同步更新 `_SHA1` 表。
+- Ghidra sha256 取自第三方镜像的发布工件指纹（双源交叉印证，非 NSA 官网
+  公布值）；版本升级时用 `JDEC_GHIDRA_SHA256` 覆盖。
+- P2-17 按用户决定另建 `D:/MC/notes` 私有仓（单向镜像，主仓 gitignore 不动）；
+  主仓笔记更新后需手动同步（方法见该仓 README）。
+
+## 6. 回滚方式
+
+- 全部改动在工作区未提交：`git checkout -- <文件>` 逐文件回滚，或
+  `git stash` 整体搁置；新增文件仅 `jdec/tests/samples/demo/broken/Truncated.java`
+  （可删）与 `D:/MC/notes/`（独立仓，整目录删除即可）。
+- skill 用户级副本同步的 7 个文件：重拷仓库副本即恢复。

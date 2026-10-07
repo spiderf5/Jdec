@@ -15,7 +15,8 @@ Decrypt time (this module, no JVM needed):
   data[i] = swpInv[data[i] & 0xFF]  ->  DES/CBC/PKCS5 decrypt (zero IV)
   -> SHA-256 verify  ->  split [len_le16][utf8] records.
 
-DES via Windows CNG (bcrypt.dll) through ctypes — keeps jdec zero-dependency.
+DES through the pure-Python `jdec/jdec/_des.py` module (intentional: jdec is
+zero-dependency stdlib-only, and CNG/ctypes would be Windows-only anyway).
 
 Scan strategy: brute-force byte scan (no linear bytecode walk — immune to
 instruction-length table bugs). Every 0xAA byte is probed as a tableswitch
@@ -26,13 +27,11 @@ SHA-256 are rejected, so false probes only cost time, never correctness.
 
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import struct
 
 __all__ = ["decrypt_payload", "decrypt_class", "scan_jar"]
 
-_BCRYPT_BLOCK_PADDING = 1
 _SIGNED = tuple(range(0x02, 0x09))  # iconst_m1..iconst_5
 
 

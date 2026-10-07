@@ -219,8 +219,10 @@ jdec 直接把它解出来，**不需要执行任何东西、不需要加载类*
   javac 的最坏情况是嵌套循环 + break/continue，实测 7.3%。goto 洪水只可能来自  
   字节码改写器。
 
-多个指纹用 noisy-OR 合并，**低于 0.35 一律不给厂商结论** —— 宁可说「未知」，  
-也不把弱迹象说成 Positive identification。
+多个指纹用 noisy-OR 合并，归因门槛是**类覆盖率**：每个指纹命中的类数达到
+抽样/全库类数的 10% 才算在场；合并置信度必须**严格高于** 0.35 才给厂商结论
+（恰好 0.35 不判；单条 goto-flood 的权重即 0.35，单独在场只报「未知」）——
+宁可说「未知」，也不把弱迹象说成 Positive identification。
 
 ## 字符串：混淆之后还能读的线索
 
@@ -450,13 +452,13 @@ Minecraft 1.20.4 客户端（7787 个类，Java 17，官方混淆）：
 ## 测试
 
 ```bash
-python tests/run_tests.py             # 核心
-python tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 tests/mc/ 样本）
+python jdec/tests/run_tests.py             # 核心
+python jdec/tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 jdec/tests/mc/ 样本）
 ```
 
 **真实样本外置**：工具树里不放真实混淆样本。`--with-mc` 里的 ZKM 归因测试
 会依次在 `JDEC_SAMPLE_DIR` 环境变量、jdec 上一级目录、`D:/MC/samples/` 找
-指定的真实 ZKM 27 样本 jar（文件名见 `tests/run_tests.py`）；都不在则该项
+指定的真实 ZKM 27 样本 jar（文件名见 `jdec/tests/run_tests.py`）；都不在则该项
 跳过（其余 115 项照常），放回去即恢复。
 
 关键断言：parse→serialize 字节级一致（否则重映射会静默损坏每个类）、  
@@ -464,16 +466,16 @@ python tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 tests/mc
 mixin 注解里的目标能被提取并过映射翻译、  
 所有方法都能解码到指令流末尾、ZKM 结构指纹该报的报、不该报的不报。
 
-mixin / flow / collide 相关的用例依赖 `tests/mixin.jar`、`tests/flow.jar`、  
-`tests/collide.jar`，由 `tests/samples/` 下的源码编出来（只用 javac，不依赖  
+mixin / flow / collide 相关的用例依赖 `jdec/tests/mixin.jar`、`jdec/tests/flow.jar`、  
+`jdec/tests/collide.jar`，由 `jdec/tests/samples/` 下的源码编出来（只用 javac，不依赖  
 Mixin 库——注解的*形状*才是 jdec 要读的东西）。collide 是一对只靠大小写  
 区分的孪生类，验证 Windows 上 `Widget` 不会拿到 `widget` 的内容：
 
 ```bash
-python tests/build_fixtures.py     # 重新编译 fixture jar
+python jdec/tests/build_fixtures.py     # 重新编译 fixture jar
 ```
 
-`tests/flow.jar` 里有两个角色：`Decryptor` 照着 ZKM 字符串加密的形状写，  
+`jdec/tests/flow.jar` 里有两个角色：`Decryptor` 照着 ZKM 字符串加密的形状写，  
 javac 能诚实地编出来；`Guarded` 是普通 try/catch，测试会**故意把它的异常处理器  
 改成向后跳**——javac 不生成这种形状，要验证检测器只能自己造证据。
 

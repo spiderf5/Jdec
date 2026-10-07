@@ -25,8 +25,8 @@ h.handler_pc < h.start_pc       # 却跳回这段之前  ← javac 绝不生成
 ```
 
 理由是自明的：范围内抛出的异常不可能在范围开始之前就被处理。
-**`deobf_scan.py` 已计算该指标，JSON 字段名为 `backward_handlers`**（`--text`
-输出不显示该项，以 JSON 为准）。
+**`deobf_scan.py` 已计算该指标，JSON 字段名为 `backward_handlers`**；
+`--text` 输出同样显示该值（"二值指纹: 异常处理器后跳 N"），以 JSON 字段为准做程序化判读。
 
 ## 该二值指纹对 ZKM 27 不成立：基线测量
 

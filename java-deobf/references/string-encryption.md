@@ -101,8 +101,10 @@ jdec 命令：`python jdec.py recover X.jar -o out --cp-file <classpath文件>`
 
 ### 4.3 自洽重放的 classpath 工程
 
-- 平台客户端：取原始 client jar（version.json 提供 URL + sha1），用 jdec
-  remap 到所需命名系；**必须剥离 META-INF 签名**（*.SF/*.RSA），否则
+- 平台客户端：取原始 client jar（version.json 提供 URL + sha1），先 remap
+  到所需命名系——`python jdec.py decompile client.jar --deobf --mc-version <v>
+  --mapping-set <set>` 会在 [0/5] 阶段产出 `client_deobf.jar`，后续步骤一律
+  用它；**必须剥离 META-INF 签名**（*.SF/*.RSA），否则
   digest 校验失败；
 - 依赖库：平台 version json 的 libraries 全量；目标 jar `META-INF/jars/*`
   嵌套 jar 是作者锁定的精确版本，直接上 classpath；

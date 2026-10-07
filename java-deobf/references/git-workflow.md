@@ -52,12 +52,14 @@ type 取值：`feat` / `fix` / `refactor` / `perf` / `test` / `docs` / `chore` /
 
 1. `git diff` 逐个文件看一遍，确认没有夹带无关改动、调试代码、临时文件
 2. 确认没有把密钥、`.env`、大文件、构建产物加进去
-3. 确认校验命令全部通过（跑 `run_checks.py`）
-4. 只 `git add` 该提交的文件，不要用 `git add .` 一次全加
+3. 确认校验命令全部通过（本仓库唯一命令：`python jdec/tests/run_tests.py`；
+   改判定类逻辑时另做真实样本回归）
+4. 改动按 `assets/change-report-template.md` 追加变更报告到 `jdec/change-report.md`
+5. 只 `git add` 该提交的文件，不要用 `git add .` 一次全加
 
-## PR 描述
+## PR / 交付描述
 
-用 `assets/pr-description-template.md` 生成，核心是让审阅者不用猜：
+核心是让审阅者不用猜（模板可参考 `assets/change-report-template.md` 的条目结构）：
 
 - 这次改了什么、为什么改
 - 怎么验证（跑什么命令、看什么结果）

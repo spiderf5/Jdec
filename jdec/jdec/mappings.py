@@ -408,14 +408,20 @@ def remap_class(cf, mapping: Mapping) -> int:
 
 
 def remap_jar(src: Path, dest: Path, mapping: Mapping,
-              progress=None) -> tuple[int, int]:
+              progress=None, strict: bool = False) -> tuple[int, int]:
     """Write a remapped copy of `src`. Returns (classes changed, classes total).
 
     Entries are written under their *new* internal name. Renaming only the
     bytes would leave a jar whose class names disagree with their paths, which
     no JVM or decompiler will load correctly.
+
+    A class that fails to remap is written back with its original bytes and
+    original name — never silently: the failures are printed and the caller
+    can turn them fatal with `strict=True` (a half-renamed jar whose class
+    names disagree with their paths is worse than a clean error).
     """
     changed = total = 0
+    failed: list[str] = []
     with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zout:
         for name in zin.namelist():
             data = zin.read(name)
@@ -429,14 +435,25 @@ def remap_jar(src: Path, dest: Path, mapping: Mapping,
                         changed += 1
                     if new_name:
                         out_name = new_name + ".class"
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(f"{name}: {exc}")
                 if progress and total % 1000 == 0:
                     progress(total, changed)
             try:
                 zout.writestr(out_name, data)
             except Exception:
                 zout.writestr(name, data)
+                failed.append(f"{name}: failed to write under remapped name")
+    if failed:
+        limit = 20
+        print(f"remap: {len(failed)}/{total} class(es) NOT remapped "
+              f"(written back unchanged):")
+        for line in failed[:limit]:
+            print(f"  ! {line}")
+        if len(failed) > limit:
+            print(f"  ! ... and {len(failed) - limit} more")
+        if strict:
+            raise RuntimeError(f"strict remap: {len(failed)} class(es) failed")
     return changed, total
 
 

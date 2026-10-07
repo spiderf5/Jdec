@@ -1312,6 +1312,24 @@ def test_probe_fingerprints_json() -> None:
         check("_major_version extracts valid Java 8 major", _major_version(b"\xca\xfe\xba\xbe\x00\x00\x00\x34") == 52)
 
 
+def test_platform_classpath_separator() -> None:
+    print("engines: classpath separator follows the platform")
+    from jdec import engines as EN
+    expected = ";" if os.name == "nt" else ":"
+    check("cp_sep matches os.name", EN.cp_sep() == expected, EN.cp_sep())
+    eng = EN.ENGINES["procyon"]
+    cp = eng.classpath(ROOT / "engines")
+    check("procyon bridge classpath splits on platform separator",
+          len(cp.split(expected)) == 3, cp)
+    real = os.name
+    try:
+        os.name = "posix" if real == "nt" else "nt"
+        want = ";" if os.name == "nt" else ":"
+        check("cp_sep switches with os.name", EN.cp_sep() == want, EN.cp_sep())
+    finally:
+        os.name = real
+
+
 def test_ops_pool() -> None:
     print("opspool: PhantomShield string-pool static decrypt (DES via bundled _des)")
     gen = Path(__file__).resolve().parent / "gen_ops_fixture.py"
@@ -2734,10 +2752,137 @@ def test_bvm_and_native_extensions() -> None:
     check("Devirtualizer devirtualize_class_file returns success", dv_res[1] == 1)
 
 
+def test_remap_failure_accounting() -> None:
+    print("mappings: remap failures are reported (and fatal under strict mode)")
+    from jdec import stubs as SB
+    m = MP.Mapping()
+    m.add_class("demo/good/Keep", "demo/new/Keep")
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "in.jar"
+        with zipfile.ZipFile(src, "w") as z:
+            z.writestr("demo/good/Keep.class", SB.build_stub_class_bytes("demo/good/Keep"))
+            # a class entry that fails to parse -> remap_class_bytes raises
+            z.writestr("demo/bad/Broken.class",
+                       b"\xca\xfe\xba\xbe\x00\x00\x00\x34garbage")
+        dst = Path(td) / "out.jar"
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            changed, total = MP.remap_jar(src, dst, m)
+        check("good class remapped, broken one counted in total",
+              (changed, total) == (1, 2), f"changed={changed} total={total}")
+        check("failure is reported, not swallowed",
+              "NOT remapped" in buf.getvalue() and "demo/bad/Broken.class" in buf.getvalue(),
+              buf.getvalue()[:200])
+        with zipfile.ZipFile(dst) as z:
+            check("broken class written back under its original name",
+                  "demo/bad/Broken.class" in z.namelist(), str(z.namelist()))
+        dst2 = Path(td) / "out_strict.jar"
+        try:
+            MP.remap_jar(src, dst2, m, strict=True)
+            check("strict remap raises on failure", False, "no error")
+        except RuntimeError as exc:
+            check("strict remap raises on failure", "1 class(es) failed" in str(exc), str(exc))
+
+
+def test_devirt_opcode_disambiguation() -> None:
+    print("devirt: opcode interpretation is explicit (ordinal vs jvm-opcode)")
+    from jdec import bvm_devirt as BVM
+    # 0x2E is JVM iaload AND a valid ordinal index (-> POP2): the two spaces
+    # overlap, so the reading must be chosen by mode, not by silent fallback
+    got = BVM.BVMDecoder.resolve_opcode(0x2E, None, mode="ordinal")
+    check("ordinal mode reads 0x2E as an OPCS ordinal (POP2)",
+          got == BVM.OPCS_ORDINALS[0x2E] == "POP2", str(got))
+    got_jvm = BVM.BVMDecoder.resolve_opcode(0x2E, None, mode="jvm-opcode")
+    check("jvm-opcode mode reads 0x2E as IALOAD", got_jvm == "IALOAD", str(got_jvm))
+    # a supplied map is authoritative: unmapped ints stay unmapped even when
+    # they happen to land inside the ordinal range
+    small_map = {7: BVM.ORDINAL_BY_NAME["ICONST_1"]}
+    check("map miss returns None even for in-range ints",
+          BVM.BVMDecoder.resolve_opcode(0x2E, small_map, mode="ordinal") is None)
+    check("map hit resolves through the map",
+          BVM.BVMDecoder.resolve_opcode(7, small_map, mode="ordinal") == "ICONST_1")
+    try:
+        BVM.BVMDecoder.resolve_opcode(1, None, mode="bogus")
+        check("unknown mode rejected", False, "no error raised")
+    except ValueError:
+        check("unknown mode rejected", True)
+
+
+def test_pool_verify_fq_callsites() -> None:
+    print("pool: fully-qualified call sites resolve identically in repl and verify")
+    import base64 as B64
+    from jdec import pool as PL
+    # the old verify resolved via simple-name lookup only, which can never hit
+    # a fully-qualified cls_raw - that blind spot is the regression being pinned
+    acc = {"demo.pool.Acc": {"a": [("int", "int")]}}
+    simple = {"Acc": "demo.pool.Acc"}
+    check("old-style simple-name lookup misses FQ forms",
+          simple.get("demo.pool.Acc") is None)
+    check("_resolve_fq resolves the FQ form",
+          PL._resolve_fq("demo.pool.Acc", acc, simple, set()) == "demo.pool.Acc")
+    check("_resolve_fq resolves the simple form",
+          PL._resolve_fq("Acc", acc, simple, set()) == "demo.pool.Acc")
+    check("_resolve_fq refuses ambiguous simple names",
+          PL._resolve_fq("Acc", acc, simple, {"Acc"}) is None)
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src"
+        out = Path(td) / "out"
+        src.mkdir(parents=True)
+        (src / "Acc.java").write_text(
+            "package demo.pool;\n\npublic class Acc {\n"
+            "    static String a(int idx, int seed) {\n"
+            "        return null;\n    }\n}\n", encoding="utf-8")
+        (src / "Caller.java").write_text(
+            "package demo.caller;\n\npublic class Caller {\n"
+            "    String s = demo.pool.Acc.a(1, 2);\n"
+            "    String t = Acc.a(3, 4);\n}\n", encoding="utf-8")
+        harvest = Path(td) / "h.tsv"
+        rows = ["R\tdemo.pool.Acc\ta\t1\t2\t" + B64.b64encode(b"alpha").decode(),
+                "R\tdemo.pool.Acc\ta\t3\t4\t" + B64.b64encode(b"beta").decode()]
+        harvest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        res = PL.apply(src, harvest, out)
+        check("FQ and simple call sites both replaced",
+              res["repl_q"] == 2, str(res))
+        check("verify agrees: zero residual", res["residual"] == 0, str(res))
+        got = (out / "Caller.java").read_text(encoding="utf-8")
+        check("plaintext landed in the source",
+              '"alpha"' in got and '"beta"' in got, got)
+
+
+def test_attribution_gates() -> None:
+    print("obf: attribution gates on class coverage; the floor is exclusive")
+    # single goto-flood fingerprint = confidence 0.35 -> not a vendor
+    vendor, conf = OB.attribute({"goto-flood": 100}, 1000)
+    check("single goto-flood stays unknown", vendor is None and conf == 0.35,
+          f"{vendor} {conf}")
+    # below the 10%-of-classes gate
+    vendor, _ = OB.attribute({"goto-flood": 9}, 100)
+    check("9% class coverage stays unknown", vendor is None, str(vendor))
+    # independent corroboration crosses the floor
+    vendor, conf = OB.attribute({"goto-flood": 500, "long-constant-array": 200}, 1000)
+    check("corroborated signals attribute to ZKM",
+          vendor == "Zelix KlassMaster (ZKM)" and conf > 0.35, f"{vendor} {conf}")
+    # build_report must gate on *class* counts, not occurrence totals: 500
+    # occurrences from 2 classes must not clear a 100-class 10% gate
+    class_hits = {"a": {"goto-flood": 250}, "b": {"goto-flood": 250}}
+    rep = OB.build_report({"goto-flood": 500}, class_hits, 1000, 2, 0)
+    check("occurrence inflation does not smuggle past the class gate",
+          rep.vendor is None, rep.summary())
+    class_hits2 = {f"c{i}": {"goto-flood": 1, "long-constant-array": 1}
+                   for i in range(120)}
+    rep2 = OB.build_report({"goto-flood": 120, "long-constant-array": 120},
+                           class_hits2, 1000, 120, 0)
+    check("wide corroborated coverage does attribute",
+          rep2.vendor is not None and "ZKM" in rep2.vendor, rep2.summary())
+
+
 def main() -> int:
     with_mc = "--with-mc" in sys.argv
-    if not SAMPLE.exists():
-        print("missing tests/sample.jar - build it first")
+    if not SAMPLE.exists() and build_fixtures.ensure_sample_jar(quiet=False) is None:
+        print("missing tests/sample.jar and could not build it "
+              "(check that javac is on PATH, or run tests/build_fixtures.py)")
         return 2
     test_roundtrip_sample()
     test_synthetic_members_ignored()
@@ -2765,6 +2910,11 @@ def main() -> int:
     test_pool_qualified_and_full_string()
     test_pool_overload_dispatch()
     test_probe_fingerprints_json()
+    test_platform_classpath_separator()
+    test_remap_failure_accounting()
+    test_devirt_opcode_disambiguation()
+    test_pool_verify_fq_callsites()
+    test_attribution_gates()
     test_ops_pool()
     test_jint()
     test_clinit_sim()

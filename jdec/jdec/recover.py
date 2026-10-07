@@ -19,6 +19,7 @@ classpath 由调用者提供（remap 到同命名空间的 MC + 依赖库 + stub
 from __future__ import annotations
 
 import base64
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -356,7 +357,11 @@ def norm_classpath(cp: str) -> str:
 
     java @argfile 把反斜杠当转义符；MSYS 风格路径 java 也不认——
     全部归一成 Windows 正斜杠形式（/d/x -> D:/x）。
+    仅在 Windows 上生效；POSIX 上传入的 classpath 本就是 java 认的
+    形式，任何改写（如把开头的 /a/b 改成 a:/b）都只会损坏它。
     """
+    if os.name != "nt":
+        return cp
     cp = cp.replace(chr(92), "/")
     return re.sub(r"(^|;)/([A-Za-z0-9_])/",
                   chr(92) + r"1" + chr(92) + r"2:/", cp)
@@ -495,7 +500,7 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             cp_file: Path | None = None, timeout: int = 1800,
             with_stubs: bool = True, from_frida: Path | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
-    sep = ";" if __import__("os").name == "nt" else ":"
+    sep = ";" if os.name == "nt" else ":"
     agent_jvm_arg = ""
     native_jvm_arg = ""
     if with_stubs:
@@ -521,7 +526,7 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
 
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
-        cp = cp + (";" if cp and not cp.endswith(";") else "") + extra.strip()
+        cp = cp + (sep if cp and not cp.endswith(sep) else "") + extra.strip()
     spec_path, n_sites, n_skip = build_spec(jar, out_dir, limit=limit)
     print(f"spec      : {n_sites} sites ({n_skip} skipped: args not statically "
           f"recoverable) -> {spec_path.name}")

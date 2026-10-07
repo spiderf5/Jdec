@@ -94,6 +94,22 @@ def _collect_accessors(parsed):
     return acc, sig_bad
 
 
+def _resolve_fq(cls_raw: str, acc: dict, simple: dict[str, str],
+                ambiguous: set[str]) -> str | None:
+    """_CALL_Q 调用点的类名解析口径（回填与 verify 共用）。
+
+    全限定名直接认访问器表；否则退回简单名表，简单名歧义时放弃。
+    两处口径必须一字不差——verify 曾经只看简单名，全限定调用点在
+    校验阶段漏检，造成"校验通过、实际没回填干净"的假零残留。
+    """
+    cls = cls_raw.split(".")[-1]
+    if cls_raw in acc:
+        return cls_raw
+    if cls in ambiguous:
+        return None
+    return simple.get(cls)
+
+
 def _overload_ok(acc, fq: str, meth: str, lit_idx: str, lit_seed: str) -> str:
     """调用点重载分派（三态）。
 
@@ -273,7 +289,7 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
             pass
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
-        cp = cp + (";" if cp and not cp.endswith(";") else "") + extra.strip()
+        cp = cp + (sep if cp and not cp.endswith(sep) else "") + extra.strip()
     classpath = sep.join([str(work_dir), cp]) if cp else str(work_dir)
     classpath = norm_classpath(classpath)
 
@@ -411,9 +427,8 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
 
         def repl_q(m: "re.Match") -> str:
             cls_raw, meth = m.group(1), m.group(2)
-            cls = cls_raw.split(".")[-1]
-            fq = cls_raw if cls_raw in acc else simple.get(cls)
-            if fq is None or (cls in ambiguous and cls_raw not in acc):
+            fq = _resolve_fq(cls_raw, acc, simple, ambiguous)
+            if fq is None:
                 return m.group(0)
             if _overload_ok(acc, fq, meth, m.group(3), m.group(4)) != "ok":
                 return m.group(0)
@@ -457,9 +472,9 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
         txt = _read(f)
         own_acc = acc.get(own_fq, {})
         for m in _CALL_Q.finditer(txt):
-            cls, meth = m.group(1), m.group(2)
-            fq = simple.get(cls)
-            if fq is None or cls in ambiguous:
+            cls_raw, meth = m.group(1), m.group(2)
+            fq = _resolve_fq(cls_raw, acc, simple, ambiguous)
+            if fq is None:
                 continue
             if _overload_ok(acc, fq, meth, m.group(3), m.group(4)) != "ok":
                 continue

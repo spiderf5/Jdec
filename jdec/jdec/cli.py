@@ -41,10 +41,16 @@ def cmd_probe(args: argparse.Namespace) -> int:
     if not p.exists():
         print(f"no such file: {p}")
         return 2
+    tmp_root: Path | None = None
     if p.is_dir():
-        tmp = Path(tempfile.mkdtemp()) / "packed.jar"
-        p = _dir_to_jar(p, tmp)
-    prof = profile_jar(p)
+        tmp_root = Path(tempfile.mkdtemp(prefix="jdec_probe_"))
+        p = _dir_to_jar(p, tmp_root / "packed.jar")
+    try:
+        prof = profile_jar(p)
+    finally:
+        # the packed jar is a throwaway copy of the input; never leak it
+        if tmp_root is not None:
+            shutil.rmtree(tmp_root, ignore_errors=True)
     print(prof.summary())
     return 0
 
@@ -138,7 +144,8 @@ def cmd_decompile(args: argparse.Namespace) -> int:
                 print(f"      {mapping.describe()}")
                 remapped = out_dir.parent / f"{raw.stem}_deobf.jar"
                 remapped.parent.mkdir(parents=True, exist_ok=True)
-                changed, total = MP.remap_jar(input_path, remapped, mapping)
+                changed, total = MP.remap_jar(input_path, remapped, mapping,
+                                              strict=args.strict_remap)
                 print(f"      remapped {changed}/{total} classes -> {remapped.name}")
                 jar_for_work = remapped
                 tmp2 = remapped.parent
@@ -527,6 +534,11 @@ def cmd_deflat(args: argparse.Namespace) -> int:
     stats = deflat.deflat_jar(p, out)
     print(f"deflat    : {stats['methods_unflattened']} method(s) unflattened across {stats['classes']} class(es)")
     print(f"output    : {out}")
+    if stats["methods_unflattened"]:
+        print("note      : unflattened methods carry no StackMapTable (stale "
+              "frames are stripped on purpose); such classes may fail JVM "
+              "verification on Java 7+. Decompilers (CFR/Vineflower) recompute "
+              "the frames, so jdec output is unaffected.")
     return 0
 
 
@@ -551,12 +563,20 @@ def cmd_devirt(args: argparse.Namespace) -> int:
         res = DV.Devirtualizer.devirtualize_jar(p, out, code_pool)
         print(f"devirt     : {res['devirtualized_methods']} method(s) in {res['devirtualized_classes']} class(es) devirtualized")
         print(f"output     : {out}")
+        if res["devirtualized_methods"]:
+            print("note       : rebuilt methods carry no StackMapTable; such "
+                  "classes may fail JVM verification on Java 7+. Decompilers "
+                  "(CFR/Vineflower) recompute the frames, so jdec output is "
+                  "unaffected.")
         return 0
     elif p.suffix.lower() == ".class":
         cf = CF.parse(p.read_bytes())
         cf, count = DV.Devirtualizer.devirtualize_class_file(cf, code_pool)
         out.write_bytes(cf.serialize())
         print(f"devirt     : {count} method(s) devirtualized -> {out}")
+        if count:
+            print("note       : rebuilt methods carry no StackMapTable; such "
+                  "classes may fail JVM verification on Java 7+.")
         return 0
     else:
         print(f"unsupported format: {p.suffix}")
@@ -671,7 +691,6 @@ def cmd_reach(args: argparse.Namespace) -> int:
 
 
 def cmd_project(args: argparse.Namespace) -> int:
-    from . import project
     raw = Path(args.input)
     if not raw.exists():
         print(f"no such file or directory: {raw}")
@@ -679,6 +698,7 @@ def cmd_project(args: argparse.Namespace) -> int:
 
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_project")
     src_dir = Path(args.src) if getattr(args, "src", None) else None
+    tmp_decomp: Path | None = None
 
     # If src_dir not specified, look for candidate decompiled directories
     if src_dir is None:
@@ -699,6 +719,19 @@ def cmd_project(args: argparse.Namespace) -> int:
             DC.write_report(rep, tmp_decomp)
             src_dir = tmp_decomp / "src"
 
+    try:
+        _do_project_export(args, raw, out_dir, src_dir)
+    finally:
+        # the transient decompilation tree exists only to feed the export;
+        # it holds thousands of intermediate files, so never leak it
+        if tmp_decomp is not None:
+            shutil.rmtree(tmp_decomp, ignore_errors=True)
+    return 0
+
+
+def _do_project_export(args: argparse.Namespace, raw: Path, out_dir: Path,
+                       src_dir: Path) -> None:
+    from . import project
     print(f"project export: {raw.name} -> {out_dir}")
     stats = project.export_project(
         source_jar=raw,
@@ -722,7 +755,6 @@ def cmd_project(args: argparse.Namespace) -> int:
                 print(f"    - {iss.file_path.name}:{iss.line_number}: {iss.message}")
 
     print(f"\nProject is ready! Open with IntelliJ IDEA: File -> Open -> {out_dir / 'build.gradle'}")
-    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -800,6 +832,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only decompile the first N classes (quick trial run)")
     sd.add_argument("--no-invert", action="store_true",
                     help="mapping file is already obf -> named (do not invert proguard)")
+    sd.add_argument("--strict-remap", action="store_true",
+                    help="fail the run instead of writing back classes that "
+                         "could not be remapped (default: warn loudly)")
     sd.set_defaults(func=cmd_decompile)
 
     snv = sub.add_parser("natives",

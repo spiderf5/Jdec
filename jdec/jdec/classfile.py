@@ -114,6 +114,44 @@ def decode_mutf8(data: bytes) -> str:
                 i += 1
     return "".join(out)
 
+
+def encode_mutf8(value: str) -> bytes:
+    """JVM-spec modified UTF-8 encoder - the exact inverse of decode_mutf8.
+
+    Plain utf-8 encoding used to run the write path, which breaks twice on
+    hostile-but-legal constant pool contents: NUL encodes as 00 instead of
+    C0 80, and lone surrogates (stored by the JVM as independent UTF-16 code
+    units) raise UnicodeEncodeError outright.  Astral code points are emitted
+    as the CESU-8 style surrogate pair a Java String would carry; the one
+    asymmetry is that decode_mutf8's *lenient* 4-byte branch cannot be
+    re-encoded byte-identically (that branch only exists to survive
+    non-standard input).
+    """
+    out = bytearray()
+    for ch in value:
+        cp = ord(ch)
+        if 0xD800 <= cp <= 0xDFFF:
+            # lone surrogate (or half of a pair): 3-byte mUTF-8, exactly how
+            # the JVM stores each UTF-16 code unit independently
+            out += bytes((0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F),
+                          0x80 | (cp & 0x3F)))
+        elif cp == 0:
+            out += b"\xc0\x80"
+        elif cp < 0x80:
+            out.append(cp)
+        elif cp < 0x800:
+            out += bytes((0xC0 | (cp >> 6), 0x80 | (cp & 0x3F)))
+        elif cp < 0x10000:
+            out += bytes((0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F),
+                          0x80 | (cp & 0x3F)))
+        else:
+            # astral: emit the UTF-16 surrogate pair a Java String would hold
+            v = cp - 0x10000
+            for u in (0xD800 | (v >> 10), 0xDC00 | (v & 0x3FF)):
+                out += bytes((0xE0 | (u >> 12), 0x80 | ((u >> 6) & 0x3F),
+                              0x80 | (u & 0x3F)))
+    return bytes(out)
+
 # major version -> Java release
 _JAVA_MAJOR = {
     45: "1.1", 46: "1.2", 47: "1.3", 48: "1.4", 49: "5", 50: "6", 51: "7",
@@ -234,7 +272,7 @@ class ClassFile:
     # ------------------------------------------------------------- rewriting
 
     def set_utf8(self, index: int, value: str) -> None:
-        raw = value.encode("utf-8")
+        raw = encode_mutf8(value)
         self.cp[index] = (C_UTF8, raw)
         self._utf8_cache.pop(self._utf8_cache_get_key(index), None)
         self._utf8_cache[value] = index
@@ -251,11 +289,11 @@ class ClassFile:
             idx = self._utf8_cache[value]
             if idx < len(self.cp) and self.cp[idx][0] == C_UTF8:
                 try:
-                    if self.cp[idx][1].decode("utf-8", "replace") == value:
+                    if decode_mutf8(self.cp[idx][1]) == value:
                         return idx
                 except Exception:
                     pass
-        raw = value.encode("utf-8")
+        raw = encode_mutf8(value)
         self.cp.append((C_UTF8, raw))
         idx = len(self.cp) - 1
         self._utf8_cache[value] = idx

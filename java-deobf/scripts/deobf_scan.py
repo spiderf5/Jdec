@@ -524,7 +524,9 @@ def analyze(target, classes):
 
     hints = []
     for label, keys, tool in OBFUSCATOR_SIGNATURES:
-        hit = [k for k in keys if k in blob]
+        # blob is lowercased; keywords must be matched case-insensitively or
+        # entries written in mixed case (e.g. "$CodePool", "DES/CBC/...") die
+        hit = [k for k in keys if k.lower() in blob]
         if hit:
             hints.append({"obfuscator": label, "evidence": hit, "suggested_tool": tool})
 

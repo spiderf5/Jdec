@@ -59,6 +59,12 @@ def check(errors):
                     errors.append("obfuscators[%d] 缺少 %s" % (i, key))
             if isinstance(item.get("keywords"), list) and not item["keywords"]:
                 errors.append("obfuscators[%d].keywords 是空数组，等于永不命中" % i)
+            # 匹配是大小写无关的（blob 已转小写）；混入大写的关键词永远是死条目，
+            # 且 schema 校验发现不了——这里按约定直接拒绝
+            for j, kw in enumerate(item.get("keywords") or []):
+                if isinstance(kw, str) and kw != kw.lower():
+                    errors.append("obfuscators[%d].keywords[%d] 含大写（%r）——"
+                                  "匹配前会统一小写，请改写成全小写" % (i, j, kw))
 
     for key in ("html_markers", "normal_bootstrap", "native_lib_exts"):
         if not data.get(key):
@@ -102,9 +108,71 @@ def scan_smoke(target):
     return errors
 
 
+def check_twin(errors):
+    """jdec/jdec/fingerprints.json 必须与 skill 副本逐字节一致。
+
+    probe 优先读 skill 副本（单一来源）；包内副本只是 skill 缺席时的回退。
+    两份分叉时，按 SKILL.md 沉淀规程改 skill 副本对 jdec 侧静默无效。
+    """
+    path = deobf_scan.CONFIG_PATH
+    twin = Path(__file__).resolve().parents[2] / "jdec" / "jdec" / "fingerprints.json"
+    if not path.is_file() or not twin.is_file():
+        return  # 仓库布局不完整（如 skill 单独安装）时无从比对
+    if path.read_bytes() != twin.read_bytes():
+        errors.append("jdec/jdec/fingerprints.json 与 skill 副本内容不一致"
+                      "（probe 优先读 skill 副本，两份必须同步）")
+
+
+def _minimal_class_with_utf8(constant: str) -> bytes:
+    """构造一个最小合法 class 文件，常量池里只多放一个标记 Utf8 常量。"""
+    import struct
+    name = b"demo/ProbeFixture"
+    utf8 = constant.encode("utf-8")
+    sup = b"java/lang/Object"
+    cp = (b"\x01" + struct.pack(">H", len(name)) + name
+          + b"\x07\x00\x01"
+          + b"\x01" + struct.pack(">H", len(sup)) + sup
+          + b"\x07\x00\x03"
+          + b"\x01" + struct.pack(">H", len(utf8)) + utf8)
+    out = b"\xca\xfe\xba\xbe" + struct.pack(">HH", 0, 52)
+    out += struct.pack(">H", 6)               # cp_count = 5 条 + 幻影槽
+    out += cp
+    out += struct.pack(">HHH", 0x0021, 2, 4)  # access / this=#2 / super=#4
+    out += struct.pack(">H", 0)               # interfaces
+    out += struct.pack(">H", 0)               # fields
+    out += struct.pack(">H", 0)               # methods
+    out += struct.pack(">H", 0)               # attributes
+    return out
+
+
+def e2e_constant_pool_hit(errors):
+    """端到端：常量池里的指纹关键词必须能命中（回归 $CodePool 大写死条目）。"""
+    import tempfile
+    import zipfile
+    td = tempfile.mkdtemp(prefix="fp_e2e_")
+    jar = Path(td) / "fixture.jar"
+    with zipfile.ZipFile(jar, "w") as z:
+        z.writestr("demo/ProbeFixture.class", _minimal_class_with_utf8("$CodePool"))
+    collected = deobf_scan.collect_classes(jar, 50)
+    if not collected:
+        errors.append("端到端：fixture jar 无法读取")
+        return
+    classes, _cov = collected
+    if not classes:
+        errors.append("端到端：fixture jar 里没有可解析 class")
+        return
+    info = deobf_scan.analyze(jar, classes)
+    hints = info.get("obfuscator_hints", [])
+    if not any(h.get("obfuscator") == "BytecodeVM" for h in hints):
+        errors.append("端到端：常量池含 $CodePool 未命中 BytecodeVM 指纹，hints=%r"
+                      % (hints,))
+
+
 def main():
     errors = []
     check(errors)
+    check_twin(errors)
+    e2e_constant_pool_hit(errors)
     if len(sys.argv) > 1:
         errors.extend(scan_smoke(sys.argv[1]))
 
