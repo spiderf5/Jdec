@@ -99,6 +99,32 @@ def normalize_unbox(source_code: str) -> tuple[str, int]:
     return cur, edits
 
 
+def normalize_primitive_unboxing(source_code: str) -> tuple[str, int]:
+    """Convert raw unboxing casts into null-safe expressions to prevent NPE on stub returns.
+
+    For example:
+    - boolean b = (boolean)x; -> boolean b = Boolean.TRUE.equals(x);
+    - if ((boolean)x) -> if (Boolean.TRUE.equals(x))
+    - (boolean)x ? a : b -> Boolean.TRUE.equals(x) ? a : b
+    """
+    edits = 0
+    cur = source_code
+
+    p_assign_bool = re.compile(r"(\bboolean\s+[A-Za-z0-9_$]+\s*=\s*)\(boolean\)\s*([A-Za-z0-9_$.()]+)\s*;")
+    cur, c1 = p_assign_bool.subn(r"\1Boolean.TRUE.equals(\2);", cur)
+    edits += c1
+
+    p_if_bool = re.compile(r"(\b(?:if|while)\s*\(\s*)\(boolean\)\s*([A-Za-z0-9_$.()]+)(\s*\))")
+    cur, c2 = p_if_bool.subn(r"\1Boolean.TRUE.equals(\2)\3", cur)
+    edits += c2
+
+    p_ternary_bool = re.compile(r"(?:^|(?<=[^A-Za-z0-9_$]))\(boolean\)\s*([A-Za-z0-9_$.()]+)(\s*\?)")
+    cur, c3 = p_ternary_bool.subn(r"Boolean.TRUE.equals(\1)\2", cur)
+    edits += c3
+
+    return cur, edits
+
+
 @dataclass
 class CompilationIssue:
     file_path: Path
@@ -282,7 +308,129 @@ def clean_source_for_compilation(code: str, expected_package: str | None = None)
     if unbox_edits > 0:
         changes.append(f"Normalized {unbox_edits} unbox cascade expression(s)")
 
+    # 5. Primitive unboxing null-safety
+    cur_code, prim_edits = normalize_primitive_unboxing(cur_code)
+    if prim_edits > 0:
+        changes.append(f"Normalized {prim_edits} primitive unboxing expression(s)")
+
     return cur_code, changes
+
+
+def enrich_safe_fallback_stubs(project_dir: Path) -> int:
+    """Scan synthesized or dispatcher classes and upgrade null collection returns to safe empty collections."""
+    java_src_root = project_dir / "src" / "main" / "java"
+    if not java_src_root.is_dir():
+        return 0
+    edits = 0
+    for j_file in java_src_root.rglob("*.java"):
+        stem = j_file.stem
+        raw = j_file.read_text(encoding="utf-8", errors="replace")
+        if stem in ("d6", "Dispatcher") or stem.endswith("Dispatcher") or "dummyMethod" in raw:
+            content = raw
+            if "import java.util.*;" not in content and "import java.util.Collections;" not in content:
+                p_pkg = re.search(r"package\s+[\w.]+;\s*", content)
+                if p_pkg:
+                    pos = p_pkg.end()
+                    content = content[:pos] + "\nimport java.util.*;\n" + content[pos:]
+                else:
+                    content = "import java.util.*;\n" + content
+
+            content = re.sub(
+                r"(\b(?:List|Collection)\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptyList()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\bMap\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptyMap()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\bSet\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptySet()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\bIterator\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptyIterator()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:List|Collection|Object)\s+aList\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptyList()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:Iterator|Object)\s+aIterator\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptyIterator()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:Map|Object)\s+aMap\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptyMap()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:Set|Object)\s+aSet\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1Collections.emptySet()\2",
+                content,
+            )
+            content = re.sub(
+                r"(\b(?:public\s+static\s+)?boolean\s+aZ\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
+                r"\1false\2",
+                content,
+            )
+            if content != raw:
+                j_file.write_text(content, encoding="utf-8")
+                edits += 1
+    return edits
+
+
+def check_static_hiding_invariance(source_dir: Path) -> int:
+    """Pre-scan Java sources in source_dir for static method hiding return type invariance violations.
+
+    JLS §8.4.8.2 requires that a hiding static method's return type is a subtype of the hidden method's.
+    If a subclass static method returns Object while superclass returns a specific type, narrow it.
+    """
+    edits = 0
+    class_supers: dict[str, str] = {}
+    class_methods: dict[str, dict[tuple[str, int], tuple[str, Path]]] = {}
+
+    m_hdr = re.compile(r"^\s*public\s+(?:abstract\s+)?(class|interface)\s+([A-Za-z0-9_$]+)(?:\s+extends\s+([A-Za-z0-9_$]+))?", re.M)
+    m_static = re.compile(r"^\s*public\s+static\s+([A-Za-z0-9_$.<>\[\]]+)\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)", re.M)
+
+    for j_file in source_dir.rglob("*.java"):
+        txt = j_file.read_text(encoding="utf-8", errors="replace")
+        cls_match = m_hdr.search(txt)
+        if not cls_match:
+            continue
+        c_name = cls_match.group(2)
+        s_name = cls_match.group(3)
+        if s_name:
+            class_supers[c_name] = s_name
+        methods = {}
+        for sm in m_static.finditer(txt):
+            ret_t, m_name, params = sm.groups()
+            p_count = len([p for p in params.split(",") if p.strip()])
+            methods[(m_name, p_count)] = (ret_t, j_file)
+        class_methods[c_name] = methods
+
+    for c_name, s_name in class_supers.items():
+        if s_name in class_methods and c_name in class_methods:
+            s_meths = class_methods[s_name]
+            c_meths = class_methods[c_name]
+            for sig, (s_ret, _) in s_meths.items():
+                if sig in c_meths:
+                    c_ret, c_file = c_meths[sig]
+                    if c_ret == "Object" and s_ret != "Object":
+                        content = c_file.read_text(encoding="utf-8", errors="replace")
+                        old_decl = f"public static {c_ret} {sig[0]}("
+                        new_decl = f"public static {s_ret} {sig[0]}("
+                        if old_decl in content:
+                            content = content.replace(old_decl, new_decl)
+                            c_file.write_text(content, encoding="utf-8")
+                            edits += 1
+    return edits
 
 
 def generate_gradle_scaffold(
@@ -478,6 +626,7 @@ def export_project(
     src_dir: Path | None = None,
     mc_version: str | None = None,
     with_stubs: bool = True,
+    intermediary_jar: Path | str | None = None,
 ) -> dict[str, int]:
     """Export decompiled sources into a complete IDE-ready Gradle project."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -719,11 +868,17 @@ def verify_compilation(
     project_dir: Path,
     javac_bin: str = "javac",
     max_repair_passes: int = 3,
+    intermediary_jar: Path | str | None = None,
 ) -> CompilationReport:
     """Run an automated javac compile loop, diagnosing and auto-repairing compile errors."""
     java_src_root = project_dir / "src" / "main" / "java"
     libs_dir = project_dir / "libs"
     javac_resolved = SB._find_javac(javac_bin)
+
+    grounding = MM.IntermediaryGrounding(intermediary_jar) if intermediary_jar else None
+    if java_src_root.is_dir():
+        check_static_hiding_invariance(java_src_root)
+        enrich_safe_fallback_stubs(project_dir)
 
     java_files = list(java_src_root.rglob("*.java")) if java_src_root.is_dir() else []
     if not java_files:
@@ -864,12 +1019,22 @@ def verify_compilation(
                                         lines = norm_text.splitlines()
                                         modified = True
                                         pass_repairs += 1
+                                # Repair 8: Static method hiding invariance violation (JLS §8.4.8.2)
+                                elif ("cannot hide" in msg and "attempting to use incompatible return type" in msg) or ("无法隐藏" in msg and "不兼容" in msg):
+                                    type_m = re.search(r"return type\s+(\w+)\s+is not\s+(\w+)", msg) or re.search(r"attempting to use incompatible return type:?\s*(\w+)\s+(?:is not|与)\s+(\w+)", msg)
+                                    if type_m:
+                                        bad_t, good_t = type_m.group(1), type_m.group(2)
+                                        m_decl = re.sub(r"\bpublic\s+static\s+" + re.escape(bad_t) + r"\b", f"public static {good_t}", bad_line)
+                                        if m_decl != bad_line:
+                                            lines[l_num - 1] = m_decl
+                                            modified = True
+                                            pass_repairs += 1
                         if modified:
                             file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
                     except Exception:
                         pass
 
-            # Repair 8: Missing package / class symbol auto-synthesis (cross-package imports & same-package symbols)
+            # Repair 9: Missing package / class symbol auto-synthesis (cross-package imports & same-package symbols)
             for file_path in list(files_to_repatch.keys()):
                 if file_path.is_file():
                     try:
@@ -891,17 +1056,28 @@ def verify_compilation(
                                 stub_file = stub_dir / f"{cls_name}.java"
                                 if not stub_file.is_file():
                                     stub_dir.mkdir(parents=True, exist_ok=True)
-                                    stub_code = (
-                                        f"package {pkg_name};\n\n"
-                                        f"public class {cls_name} {{\n"
-                                        f"    public {cls_name}() {{}}\n"
-                                        f"    public static Object dummyField;\n"
-                                        f"    public Object dummyMember;\n"
-                                        f"    public static Object dummyMethod(Object... args) {{ return null; }}\n"
-                                        f"    public Object dummyCall(Object... args) {{ return null; }}\n"
-                                        f"}}\n"
-                                    )
-                                    stub_file.write_text(stub_code, encoding="utf-8")
+                                    grounded = grounding.generate_grounded_stub(f"{pkg_name}/{cls_name}") if grounding and grounding.has_class(f"{pkg_name}/{cls_name}") else None
+                                    if grounded:
+                                        stub_file.write_text(grounded, encoding="utf-8")
+                                    elif cls_name in ("d6", "Dispatcher") or cls_name.endswith("Dispatcher"):
+                                        stub_file.write_text(SB.generate_safe_fallback_dispatcher(f"{pkg_name}.{cls_name}"), encoding="utf-8")
+                                    else:
+                                        stub_code = (
+                                            f"package {pkg_name};\n\n"
+                                            f"import java.util.*;\n\n"
+                                            f"public class {cls_name} {{\n"
+                                            f"    public {cls_name}() {{}}\n"
+                                            f"    public static Object dummyField;\n"
+                                            f"    public Object dummyMember;\n"
+                                            f"    public static Object dummyMethod(Object... args) {{ return null; }}\n"
+                                            f"    public Object dummyCall(Object... args) {{ return null; }}\n"
+                                            f"    public static <T> List<T> aList(Object... args) {{ return Collections.emptyList(); }}\n"
+                                            f"    public static <T> Iterator<T> aIterator(Object... args) {{ return Collections.emptyIterator(); }}\n"
+                                            f"    public static boolean aZ(Object... args) {{ return false; }}\n"
+                                            f"    public static int aI(Object... args) {{ return 0; }}\n"
+                                            f"}}\n"
+                                        )
+                                        stub_file.write_text(stub_code, encoding="utf-8")
                                     if stub_file not in java_files:
                                         java_files.append(stub_file)
                                     pass_repairs += 1
@@ -911,23 +1087,35 @@ def verify_compilation(
                             pkg_dir = file_path.parent
                             stub_file = pkg_dir / f"{cls_name}.java"
                             if not stub_file.is_file():
-                                pkg_decl = ""
+                                pkg_name = ""
                                 first_lines = code_txt.splitlines()[:5]
                                 for fl in first_lines:
                                     if fl.strip().startswith("package "):
-                                        pkg_decl = fl.strip() + "\n\n"
+                                        pkg_name = fl.strip()[8:].rstrip(";").strip()
                                         break
-                                stub_code = (
-                                    f"{pkg_decl}"
-                                    f"public class {cls_name} {{\n"
-                                    f"    public {cls_name}() {{}}\n"
-                                    f"    public static Object dummyField;\n"
-                                    f"    public Object dummyMember;\n"
-                                    f"    public static Object dummyMethod(Object... args) {{ return null; }}\n"
-                                    f"    public Object dummyCall(Object... args) {{ return null; }}\n"
-                                    f"}}\n"
-                                )
-                                stub_file.write_text(stub_code, encoding="utf-8")
+                                grounded = grounding.generate_grounded_stub(f"{pkg_name}/{cls_name}" if pkg_name else cls_name) if grounding and grounding.has_class(f"{pkg_name}/{cls_name}" if pkg_name else cls_name) else None
+                                if grounded:
+                                    stub_file.write_text(grounded, encoding="utf-8")
+                                elif cls_name in ("d6", "Dispatcher") or cls_name.endswith("Dispatcher"):
+                                    stub_file.write_text(SB.generate_safe_fallback_dispatcher(f"{pkg_name}.{cls_name}" if pkg_name else cls_name), encoding="utf-8")
+                                else:
+                                    pkg_decl = f"package {pkg_name};\n\n" if pkg_name else ""
+                                    stub_code = (
+                                        f"{pkg_decl}"
+                                        f"import java.util.*;\n\n"
+                                        f"public class {cls_name} {{\n"
+                                        f"    public {cls_name}() {{}}\n"
+                                        f"    public static Object dummyField;\n"
+                                        f"    public Object dummyMember;\n"
+                                        f"    public static Object dummyMethod(Object... args) {{ return null; }}\n"
+                                        f"    public Object dummyCall(Object... args) {{ return null; }}\n"
+                                        f"    public static <T> List<T> aList(Object... args) {{ return Collections.emptyList(); }}\n"
+                                        f"    public static <T> Iterator<T> aIterator(Object... args) {{ return Collections.emptyIterator(); }}\n"
+                                        f"    public static boolean aZ(Object... args) {{ return false; }}\n"
+                                        f"    public static int aI(Object... args) {{ return 0; }}\n"
+                                        f"}}\n"
+                                    )
+                                    stub_file.write_text(stub_code, encoding="utf-8")
                                 if stub_file not in java_files:
                                     java_files.append(stub_file)
                                 pass_repairs += 1

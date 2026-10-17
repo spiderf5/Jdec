@@ -1,5 +1,7 @@
 # agent workspace state (session memory, not project code)
 .workbuddy/
+.workbuddy-ai/
+tools/
 
 # python
 __pycache__/

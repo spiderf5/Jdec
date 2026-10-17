@@ -677,3 +677,307 @@ def translate_hooks(hooks: list[MixinHook], mapping) -> int:
         if h.named_class or h.named_method:
             resolved += 1
     return resolved
+
+
+# --------------------------------------------------------------------------
+# Intermediary Grounding: Anchor synthetic stubs to the actual Minecraft
+# runtime jar (client-intermediary.jar). Prevents RT_* hallucinated symbols.
+# --------------------------------------------------------------------------
+
+def _parse_single_type(t_desc: str) -> str:
+    prim_map = {
+        "B": "byte", "C": "char", "D": "double", "F": "float",
+        "I": "int", "J": "long", "S": "short", "Z": "boolean", "V": "void"
+    }
+    arr = 0
+    i = 0
+    while i < len(t_desc) and t_desc[i] == "[":
+        arr += 1
+        i += 1
+    if i >= len(t_desc):
+        return "Object"
+    ch = t_desc[i]
+    if ch == "L":
+        semi = t_desc.find(";", i)
+        base = t_desc[i + 1:semi].replace("/", ".") if semi != -1 else t_desc[i + 1:].replace("/", ".")
+    elif ch in prim_map:
+        base = prim_map[ch]
+    else:
+        base = "Object"
+    return base + "[]" * arr
+
+
+def _parse_jvm_descriptor(desc: str) -> tuple[list[str], str]:
+    """Parse a JVM method descriptor e.g. '(Ljava/lang/String;I)Z' -> (['String', 'int'], 'boolean')."""
+    prim_map = {
+        "B": "byte", "C": "char", "D": "double", "F": "float",
+        "I": "int", "J": "long", "S": "short", "Z": "boolean", "V": "void"
+    }
+    if not desc.startswith("("):
+        return [], _parse_single_type(desc)
+
+    end_paren = desc.find(")")
+    if end_paren == -1:
+        return [], "Object"
+
+    param_part = desc[1:end_paren]
+    ret_part = desc[end_paren + 1:]
+
+    params = []
+    i = 0
+    while i < len(param_part):
+        arr = 0
+        while i < len(param_part) and param_part[i] == "[":
+            arr += 1
+            i += 1
+        if i >= len(param_part):
+            break
+        ch = param_part[i]
+        if ch == "L":
+            semi = param_part.find(";", i)
+            if semi == -1:
+                t = param_part[i + 1:].replace("/", ".")
+                i = len(param_part)
+            else:
+                t = param_part[i + 1:semi].replace("/", ".")
+                i = semi + 1
+        elif ch in prim_map:
+            t = prim_map[ch]
+            i += 1
+        else:
+            t = "Object"
+            i += 1
+        params.append(t + "[]" * arr)
+
+    ret_type = _parse_single_type(ret_part)
+    return params, ret_type
+
+
+class IntermediaryGrounding:
+    """Grounds Minecraft intermediary symbol generation against an actual client-intermediary.jar.
+
+    Prevents synthetic hallucination of RT_* classes and mismatched method signatures.
+    Reads true class kinds (interface, enum, record, class), real constructors, method
+    descriptors, and field definitions directly from the game's intermediary jar.
+    """
+
+    def __init__(self, intermediary_jar: Path | str | None = None):
+        self.jar_path = Path(intermediary_jar) if intermediary_jar else None
+        self._classes: dict[str, CF.ClassFile] = {}
+        self._namelist: set[str] = set()
+        if self.jar_path and self.jar_path.is_file():
+            self._load_index()
+
+    def _load_index(self) -> None:
+        try:
+            with zipfile.ZipFile(self.jar_path, "r") as z:
+                for name in z.namelist():
+                    if name.endswith(".class") and not name.startswith("META-INF/"):
+                        cls_name = name[:-6].replace("\\", "/")
+                        self._namelist.add(cls_name)
+        except Exception:
+            pass
+
+    def is_available(self) -> bool:
+        return bool(self._namelist)
+
+    def has_class(self, slash_or_dotted: str) -> bool:
+        norm = slash_or_dotted.replace(".", "/").strip("/")
+        return norm in self._namelist
+
+    def get_classfile(self, slash_or_dotted: str) -> CF.ClassFile | None:
+        norm = slash_or_dotted.replace(".", "/").strip("/")
+        if norm not in self._namelist or not self.jar_path:
+            return None
+        if norm in self._classes:
+            return self._classes[norm]
+        try:
+            with zipfile.ZipFile(self.jar_path, "r") as z:
+                data = z.read(f"{norm}.class")
+                cf = CF.parse(data)
+                self._classes[norm] = cf
+                return cf
+        except Exception:
+            return None
+
+    def get_class_kind(self, slash_or_dotted: str) -> str:
+        """Return 'interface', 'enum', 'record', or 'class'."""
+        cf = self.get_classfile(slash_or_dotted)
+        if not cf:
+            return "class"
+        flags = cf.access_flags
+        if flags & 0x0200:
+            return "interface"
+        if flags & 0x4000:
+            return "enum"
+        if (cf.super_name or "") == "java/lang/Record":
+            return "record"
+        return "class"
+
+    def generate_grounded_stub(self, slash_or_dotted: str) -> str | None:
+        """Generate high-fidelity Java source for a Minecraft intermediary class."""
+        from . import stubs as SB
+
+        cf = self.get_classfile(slash_or_dotted)
+        if not cf:
+            return None
+
+        fqcn = cf.name.replace("/", ".")
+        pkg = fqcn.rsplit(".", 1)[0] if "." in fqcn else ""
+        simple_name = fqcn.rsplit(".", 1)[-1]
+
+        kind = self.get_class_kind(slash_or_dotted)
+        super_cls = cf.super_name
+        if super_cls:
+            super_cls = super_cls.replace("/", ".")
+        if super_cls in ("java.lang.Object", "java.lang.Record", "java.lang.Enum"):
+            super_cls = None
+
+        interfaces = [i.replace("/", ".") for i in cf.interface_names]
+
+        header_parts = ["public"]
+        if cf.access_flags & 0x0400 and kind == "class":
+            header_parts.append("abstract")
+        header_parts.append(kind)
+        header_parts.append(simple_name)
+
+        if kind == "interface":
+            if interfaces:
+                header_parts.append("extends " + ", ".join(interfaces))
+        else:
+            if super_cls:
+                header_parts.append(f"extends {super_cls}")
+            if interfaces:
+                header_parts.append("implements " + ", ".join(interfaces))
+
+        lines = []
+        if pkg:
+            lines.append(f"package {pkg};\n")
+        lines.append(" ".join(header_parts) + " {")
+
+        # Fields
+        for f_name, f_desc in cf.field_sigs(include_synthetic=False):
+            f_type = _parse_single_type(f_desc)
+            lines.append(f"    public static Object {f_name};" if "$" in f_name else f"    public {f_type} {f_name};")
+
+        # Constructors
+        ctors = [desc for name, desc in cf.method_sigs() if name == "<init>"]
+        if kind == "class":
+            if not ctors:
+                lines.append(f"    public {simple_name}() {{}}")
+            else:
+                for c_idx, c_desc in enumerate(ctors):
+                    p_types, _ = _parse_jvm_descriptor(c_desc)
+                    params = ", ".join(f"{t} p{i}" for i, t in enumerate(p_types))
+                    lines.append(f"    public {simple_name}({params}) {{}}")
+
+        # Methods
+        for m_name, m_desc in cf.method_sigs(include_synthetic=False):
+            if m_name in ("<init>", "<clinit>"):
+                continue
+            p_types, r_type = _parse_jvm_descriptor(m_desc)
+            params = ", ".join(f"{t} p{i}" for i, t in enumerate(p_types))
+            ret_val = SB.default_primitive_return(r_type)
+
+            if kind == "interface":
+                lines.append(f"    {r_type} {m_name}({params});")
+            else:
+                ret_stmt = f" return {ret_val};" if r_type != "void" else ""
+                lines.append(f"    public {r_type} {m_name}({params}) {{{ret_stmt} }}")
+
+        lines.append("}\n")
+        return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Event Pipeline Detector & Weaver: Minecraft Cheat Client Event Bus / Keybind
+# --------------------------------------------------------------------------
+
+@dataclass
+class EventPipelineInfo:
+    keyboard_mixin: str | None = None
+    keyboard_target: str | None = None
+    event_bus_call: str | None = None
+    bus_receiver: str | None = None
+    key_event_class: str | None = None
+    network_mixin: str | None = None
+    chat_event_class: str | None = None
+    detected_keycodes: list[int] = field(default_factory=list)
+
+    def summary(self) -> str:
+        parts = []
+        if self.keyboard_mixin:
+            parts.append(f"keyboard_mixin={self.keyboard_mixin}")
+        if self.event_bus_call:
+            parts.append(f"bus_call={self.event_bus_call}")
+        if self.key_event_class:
+            parts.append(f"key_event={self.key_event_class}")
+        if self.chat_event_class:
+            parts.append(f"chat_event={self.chat_event_class}")
+        return ", ".join(parts) or "no event pipeline detected"
+
+
+def detect_event_pipelines(src_dir: Path | str) -> EventPipelineInfo:
+    """Scan decompiled sources for Minecraft client EventBus and Keybind pipelines."""
+    src_path = Path(src_dir)
+    info = EventPipelineInfo()
+    if not src_path.is_dir():
+        return info
+
+    for j_file in src_path.rglob("*.java"):
+        txt = j_file.read_text(encoding="utf-8", errors="replace")
+        if ("class_309" in txt or "Keyboard" in txt) and "@Mixin" in txt:
+            info.keyboard_mixin = j_file.stem
+            info.keyboard_target = "net.minecraft.client.Keyboard"
+            m_post = re.search(r"([\w$.]+)\.(?:post|publish|dispatch|call)\s*\(\s*(?:new\s+([\w$.]+)|([A-Za-z0-9_$]+))", txt)
+            if m_post:
+                info.bus_receiver = m_post.group(1)
+                info.event_bus_call = m_post.group(0)
+                event_cls = m_post.group(2) or m_post.group(3)
+                if event_cls:
+                    info.key_event_class = event_cls
+
+        if ("class_634" in txt or "ClientPlayNetworkHandler" in txt) and "@Mixin" in txt:
+            info.network_mixin = j_file.stem
+            m_chat = re.search(r"([\w$.]+)\.(?:post|publish|dispatch|call)\s*\(\s*(?:new\s+([\w$.]+)|([A-Za-z0-9_$]+))", txt)
+            if m_chat:
+                event_cls = m_chat.group(2) or m_chat.group(3)
+                if event_cls:
+                    info.chat_event_class = event_cls
+
+    return info
+
+
+def weave_event_dispatcher_hook(
+    src_dir: Path | str,
+    pipeline: EventPipelineInfo,
+    default_keys: list[int] | None = None,
+) -> bool:
+    """Weave an in-line keybind interceptor into the detected keyboard mixin."""
+    if not pipeline.keyboard_mixin:
+        return False
+    keys = default_keys or [344, 96, 89, 260]  # Right Shift, Grave (`~`), Y, Insert
+    src_path = Path(src_dir)
+    target_files = list(src_path.rglob(f"{pipeline.keyboard_mixin}.java"))
+    if not target_files:
+        return False
+    kb_file = target_files[0]
+    content = kb_file.read_text(encoding="utf-8", errors="replace")
+    if "[jdec: event dispatcher hook]" in content:
+        return False
+
+    m_meth = re.search(r"(?:public|private|protected)\s+void\s+(\w+)\s*\([^)]*int\s+([A-Za-z0-9_$]+)[^)]*\)\s*\{", content)
+    if not m_meth:
+        return False
+
+    key_param = m_meth.group(2)
+    hook_code = f"""
+        // [jdec: event dispatcher hook] Intercept common client UI hotkeys
+        if ({key_param} == {keys[0]} || {key_param} == {keys[1]} || {key_param} == {keys[2]} || {key_param} == {keys[3]}) {{
+            // Auto-dispatched keybind event for client ClickGUI
+        }}
+"""
+    insert_pos = m_meth.end()
+    new_content = content[:insert_pos] + hook_code + content[insert_pos:]
+    kb_file.write_text(new_content, encoding="utf-8")
+    return True

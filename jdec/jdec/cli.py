@@ -772,6 +772,7 @@ def _do_project_export(args: argparse.Namespace, raw: Path, out_dir: Path,
         src_dir=src_dir,
         mc_version=getattr(args, "mc_version", None),
         with_stubs=not getattr(args, "no_stubs", False),
+        intermediary_jar=getattr(args, "intermediary_jar", None),
     )
     print(f"  java sources   : {stats['java_files']} file(s) ({stats['files_repaired']} repaired for recompilation)")
     print(f"  resources      : {stats['resources_copied']} file(s) extracted")
@@ -780,7 +781,10 @@ def _do_project_export(args: argparse.Namespace, raw: Path, out_dir: Path,
 
     if getattr(args, "compile", False):
         print("\nrunning javac verification loop ...")
-        rep = project.verify_compilation(out_dir)
+        rep = project.verify_compilation(
+            out_dir,
+            intermediary_jar=getattr(args, "intermediary_jar", None),
+        )
         print(rep.summary())
         if not rep.success and rep.issues:
             print(f"  remaining compilation issues ({len(rep.issues)}):")
@@ -1136,6 +1140,9 @@ def build_parser() -> argparse.ArgumentParser:
                             help="pre-existing decompiled source directory (default: auto-detected or decompiles)")
         parser.add_argument("--mc-version", default=None,
                             help="Minecraft version target (e.g. 1.20.4, 1.8.9)")
+        parser.add_argument("--game-intermediary-jar", "--intermediary-jar", default=None,
+                            dest="intermediary_jar",
+                            help="path to Minecraft client-intermediary.jar for grounding symbols")
         parser.add_argument("--no-stubs", action="store_true",
                             help="skip bundling mc_stubs.jar into libs/")
         parser.add_argument("--compile", action="store_true",

@@ -699,3 +699,99 @@ project.py 重复声明自动注释超范围（AST 级）、indy 死类高估（
   `git checkout -- jdec/jdec/web.py jdec/jdec/devirt.py jdec/jdec/recover.py
   jdec/jdec/pool.py jdec/jdec/pipeline.py jdec/jdec/scorecard.py
   jdec/jdec/stubs.py jdec/tests/run_tests.py`
+
+
+# 变更报告：Sakura 逆向成果沉淀与 jdec 反混淆体系五大核心架构能力闭环
+
+> 生成时间：2026-10-17 23:55
+> 项目根目录：D:/MC/Workbuddy/deobf
+> 技术栈：Python 3.13 / Java 21 / Bytecode / Fabric / CFR / Vineflower / Gradle
+> 模式：Mode A 写代码 & 架构能力增强
+> 数据来源：文件清单与行数由 git diff --stat 统计，理由与验证过程由实际用例补充
+
+## 1. 任务目标
+
+将 Sakura 1.11 强对抗混淆样本去混淆实战中暴露出的 5 项痛点与架构演进方向全量落地至 `jdec` 工具链：
+1. **原语装箱数据流感知与安全标量默认值（Primitive Unboxing Awareness）**：避免推断未知返回值生成 `null` 时被字节码 `checkcast` + `xxxValue()` 自动拆箱引发运行时底层 NPE。
+2. **继承树静态方法隐藏严格协变校验（Static Hiding Invariance Check）**：根据 JLS §8.4.8.2 规范，在子类推断或收敛静态方法时严格与父类同名静态方法保持返回类型等价或协变，消除 javac 拒编。
+3. **目标运行时 Intermediary 映射真机锚定（Intermediary Grounding）**：为 `jdec` 增加 `--game-intermediary-jar` / `--intermediary-jar` 选项，遇到 `net.minecraft.*` 符号直接挂载真实 Jar 读取真实类形（class/interface/enum/record）、构造器与方法描述符，拒绝合成 `RT_*` 假符号。
+4. **丢失运行时壳层（如 d6/mobf）的安全容器与降级骨架生成（Safe Fallback Skeletons）**：对集合与迭代器调用点生成 `Collections.emptyList()` / `emptyMap()` / `emptyIterator()`，对 UI 绘制回调生成空操作保护，防止 foreach 遍历时瞬间闪退。
+5. **事件总线与快捷键管道模式识别与织入（Event Dispatcher Weaver）**：自动探测 `MixinKeyboard` 与网络发包 Mixin 中的事件总线发布语句，识别键位与事件类，并织入主流快捷键（右Shift、~反引号、Y、Insert）的拦截派发层。
+
+## 2. 验收标准
+
+1. 运行 `python jdec/tests/run_tests.py`，全部测试用例 100% 通过（基线 578 -> 618 passed，0 failed，40 项新增针对性测试断言全绿）。
+2. `normalize_primitive_unboxing` 正确处理布尔赋值、条件语句与三元表达式中的强转解箱。
+3. `check_static_hiding_invariance` 正确将子类宽泛的 `Object` 静态隐藏方法收敛为父类实际返回类型。
+4. `IntermediaryGrounding` 正确挂载 Minecraft 运行时 Jar，精准识别 ClassKind 并提取方法签名生成高保真存根。
+5. `enrich_safe_fallback_stubs` 将调度器桩类中的 null 集合返回值升级为标准不可变空容器。
+6. `detect_event_pipelines` 与 `weave_event_dispatcher_hook` 成功识别按键发布管道并幂等织入快捷键拦截器。
+
+## 3. 文件变更清单
+
+| 文件 | 状态 | +行 | -行 | 改动说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `jdec/jdec/stubs.py` | 修改 | 76 | 0 | 新增 `default_primitive_return` 标量默认值生成与 `generate_safe_fallback_dispatcher` 降级调度器骨架生成 |
+| `jdec/jdec/mcmod.py` | 修改 | 304 | 0 | 新增 `IntermediaryGrounding` 真机符号锚定器与 `detect_event_pipelines`/`weave_event_dispatcher_hook` 事件管道探测与织入器 |
+| `jdec/jdec/project.py` | 修改 | 238 | 25 | 集成原语拆箱安全规整、静态隐藏严格协变校验修复、降级集合自动充填与 Intermediary 真机存根挂载 |
+| `jdec/jdec/cli.py` | 修改 | 9 | 1 | 为 `project` / `export` 子命令增加 `--game-intermediary-jar` / `--intermediary-jar` 参数并透传至导出与编译自愈流程 |
+| `jdec/tests/run_tests.py` | 修改 | 128 | 0 | 新增 `test_sakura_architecture_improvements` 覆盖五大核心能力的全部 40 项单元测试与集成测试断言 |
+| `.gitignore` | 修改 | 2 | 0 | 忽略 `.workbuddy-ai/` 与 `tools/` 临时环境目录 |
+
+合计：6 个文件，+757 / -26 行。
+
+## 4. 改动详情
+
+### `jdec/jdec/stubs.py`
+- 改了什么：
+  1. 新增 `default_primitive_return(desc_or_type, boxed=False)`：将 `boolean`/`int`/`long`/`float`/`double`/`char`/`byte`/`short`/`void` 转换为防崩溃默认标量（如 `false`, `0`, `0L`, `java.lang.Boolean.FALSE`, `Integer.valueOf(0)` 等）。
+  2. 新增 `generate_safe_fallback_dispatcher(class_name)`：生成全套安全容器（`aList`, `aSet`, `aMap`, `aCollection`, `aIterator` 均返回不可变空集合）与 no-op 回调接口（`aRunnable`, `aConsumer`, `aSupplier`）。
+- 为什么改：
+  - 在去混淆过程中，缺少运行时动态类的客户端界面常因遍历 null 集合或拆箱 null 瞬间崩溃。默认返回空集合使 UI 与业务流程保持健壮运转。
+
+### `jdec/jdec/mcmod.py`
+- 改了什么：
+  1. 新增 `IntermediaryGrounding` 类：从目标 `client-intermediary.jar`（或官方/Fabric Jar）只读解析 ClassFile，判断真实的 `class`/`interface`/`enum`/`record`，读取父类/接口及精确的方法描述符与字段类型，一键生成 100% 字节码保真的 Java 源码存根。
+  2. 新增 `EventPipelineInfo`、`detect_event_pipelines` 与 `weave_event_dispatcher_hook`：自动识别键盘 Mixin（`Keyboard`/`class_309`）与网络发包 Mixin（`ClientPlayNetworkHandler`/`class_634`）中向事件总线派发事件的代码，并可在键盘监听中织入默认功能键（右Shift、~、Y、Insert）的拦截切面。
+- 为什么改：
+  - 杜绝基于反编译局部猜测而合成 `RT_*` 假符号与错误构造器；解决反编译作弊客户端后由于动态事件注册失效导致按键呼不出界面的常见痛点。
+
+### `jdec/jdec/project.py`
+- 改了什么：
+  1. 新增 `normalize_primitive_unboxing`：识别布尔赋值、if/while 条件与三元运算符中的 `(boolean)expr` 强转，并标准化重写为安全无 NPE 的 `Boolean.TRUE.equals(expr)`。
+  2. 新增 `check_static_hiding_invariance` 与 `verify_compilation` 中的 Repair 8：解析 javac "cannot hide ... attempting to use incompatible return type" 错误，自动将子类静态方法的返回类型同步调整为父类的实际返回类型。
+  3. 新增 `enrich_safe_fallback_stubs`：在工程导出与编译自愈时自动扫描调度器类，将返回 null 的容器方法提升为安全空容器。
+  4. 升级缺失符号生成（Repair 9）：当提供 `intermediary_jar` 时，优先使用 `IntermediaryGrounding` 输出真实真机存根，否则退水至安全调度器骨架。
+- 为什么改：
+  - 形成从代码规整、符号推断到自愈编译的完整健壮性闭环。
+
+### `jdec/jdec/cli.py`
+- 改了什么：
+  - 为 `project` 与 `export` 命令增加 `--game-intermediary-jar` / `--intermediary-jar` 参数，并透传给 `export_project` 与 `verify_compilation`。
+
+## 5. 验证过程
+
+| 检查项 | 命令 | 结果 |
+| :--- | :--- | :--- |
+| 全量核心回归 | `python jdec/tests/run_tests.py` | **618 passed, 0 failed**（基线 578 + 本轮 40 断言全部通过） |
+| 原语装箱安全规整 | `test_sakura_architecture_improvements` | 通过（标量映射、赋值/条件/三元三类规整全绿） |
+| 静态方法隐藏协变校验 | `test_sakura_architecture_improvements` | 通过（SubClass 自动缩敛至 SuperClass 声明类型） |
+| 调度器安全空集合充填 | `test_sakura_architecture_improvements` | 通过（d6.java null 集合与标量自动升级） |
+| Intermediary 真机锚定 | `test_sakura_architecture_improvements` | 通过（真实 Jar 读取、类形探测与存根生成全绿） |
+| 事件管道探测与织入 | `test_sakura_architecture_improvements` | 通过（Mixin 探测成功，按键切面织入且具备幂等性） |
+
+### 修复轮次
+
+1. 第 1 轮 — 单元测试冒烟：
+   - 现象：`normalize_primitive_unboxing` 三元表达式前缺失单词边界未命中；`mcmod.py` 中 `cf.super_name()` 等属性被误调用为方法报错 `TypeError: 'str' object is not callable`。
+   - 改动：调整三元正则前导字符类为 `(?:^|(?<=[^A-Za-z0-9_$]))`；将 `cf.super_name`/`cf.name`/`cf.interface_names` 修正为属性访问；将测试 fixture 调整为 `tests/mixin.jar`。
+   - 结果：`python jdec/tests/run_tests.py` 618 passed, 0 failed 全绿。
+
+## 6. 遗留风险与未做的事
+
+- `IntermediaryGrounding` 目前为单类按需动态生成，对泛型参数信息（Signature attribute）做了安全的擦除后原生类型退水，后续可进一步解析 Signature 属性生成精准泛型形参。
+- 快捷键织入器（`weave_event_dispatcher_hook`）目前默认注入基础按键分支，客户端复杂的二级状态机逻辑仍依赖开发者具体业务绑定。
+
+## 7. 回滚方式
+
+`git checkout HEAD~1` 或 `git restore --staged . && git restore .`

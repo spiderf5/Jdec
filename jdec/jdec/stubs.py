@@ -418,3 +418,79 @@ def ensure_mock_agent_jar(cache_dir: Path | None = None) -> Path:
     return agent_jar
 
 
+def default_primitive_return(desc_or_type: str, boxed: bool = False) -> str:
+    """Return a defensive scalar literal or boxed value for primitive types.
+
+    Prevents runtime NullPointerException when bytecode unboxes a stub return value
+    via checkcast + xxxValue() (e.g. (boolean)obj -> Boolean.FALSE).
+    """
+    t = desc_or_type.strip()
+    if t in ("V", "void", "Void"):
+        return ""
+    if t in ("Z", "boolean", "Boolean", "java.lang.Boolean", "java/lang/Boolean"):
+        return "java.lang.Boolean.FALSE" if boxed else "false"
+    if t in ("I", "int", "Integer", "java.lang.Integer", "java/lang/Integer"):
+        return "Integer.valueOf(0)" if boxed else "0"
+    if t in ("J", "long", "Long", "java.lang.Long", "java/lang/Long"):
+        return "Long.valueOf(0L)" if boxed else "0L"
+    if t in ("F", "float", "Float", "java.lang.Float", "java/lang/Float"):
+        return "Float.valueOf(0.0F)" if boxed else "0.0F"
+    if t in ("D", "double", "Double", "java.lang.Double", "java/lang/Double"):
+        return "Double.valueOf(0.0)" if boxed else "0.0"
+    if t in ("C", "char", "Character", "java.lang.Character", "java/lang/Character"):
+        return "Character.valueOf('\\0')" if boxed else "'\\0'"
+    if t in ("B", "byte", "Byte", "java.lang.Byte", "java/lang/Byte"):
+        return "Byte.valueOf((byte)0)" if boxed else "(byte)0"
+    if t in ("S", "short", "Short", "java.lang.Short", "java/lang/Short"):
+        return "Short.valueOf((short)0)" if boxed else "(short)0"
+    if t in ("String", "java.lang.String", "Ljava/lang/String;"):
+        return '""'
+    return "null"
+
+
+def generate_safe_fallback_dispatcher(class_name: str) -> str:
+    """Generate safe non-null fallback implementations for runtime reflection/dispatch layers.
+
+    Collection and iterator return points return Collections.empty*() to prevent
+    NullPointerExceptions during foreach iterations. UI and callback functions return
+    safe no-op lambdas.
+    """
+    pkg = ""
+    simple_name = class_name
+    if "." in class_name:
+        pkg, simple_name = class_name.rsplit(".", 1)
+    elif "/" in class_name:
+        pkg, simple_name = class_name.rsplit("/", 1)
+        pkg = pkg.replace("/", ".")
+
+    pkg_decl = f"package {pkg};\n\n" if pkg else ""
+    return f"""{pkg_decl}import java.util.*;
+
+public class {simple_name} {{
+    public {simple_name}() {{}}
+
+    // Safe collection and iterator fallbacks
+    public static <T> List<T> aList(Object... args) {{ return Collections.emptyList(); }}
+    public static <T> Set<T> aSet(Object... args) {{ return Collections.emptySet(); }}
+    public static <K, V> Map<K, V> aMap(Object... args) {{ return Collections.emptyMap(); }}
+    public static <T> Collection<T> aCollection(Object... args) {{ return Collections.emptyList(); }}
+    public static <T> Iterator<T> aIterator(Object... args) {{ return Collections.emptyIterator(); }}
+
+    // Safe scalar defaults
+    public static boolean aZ(Object... args) {{ return false; }}
+    public static int aI(Object... args) {{ return 0; }}
+    public static long aJ(Object... args) {{ return 0L; }}
+    public static float aF(Object... args) {{ return 0.0f; }}
+    public static double aD(Object... args) {{ return 0.0; }}
+    public static String aStr(Object... args) {{ return ""; }}
+    public static Object aObj(Object... args) {{ return null; }}
+    public static void aV(Object... args) {{}}
+
+    // Safe callback / functional interface no-ops
+    public static Runnable aRunnable(Object... args) {{ return () -> {{}}; }}
+    public static java.util.function.Consumer<Object> aConsumer(Object... args) {{ return x -> {{}}; }}
+    public static java.util.function.Supplier<Object> aSupplier(Object... args) {{ return () -> null; }}
+}}
+"""
+
+

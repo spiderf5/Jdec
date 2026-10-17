@@ -3349,6 +3349,133 @@ def test_selfheal_audit() -> None:
               and stats.get("repair_rules_applied", 0) >= 2, str(stats))
 
 
+def test_sakura_architecture_improvements() -> None:
+    print("sakura improvements: unboxing awareness, static hiding invariance, intermediary grounding, safe fallbacks & event weaver")
+    from jdec import stubs as SB
+    from jdec import project as PJ
+    from jdec import mcmod as MM
+
+    # 1. Primitive unboxing awareness
+    check("default primitive boolean is false", SB.default_primitive_return("Z") == "false")
+    check("default primitive boxed boolean", SB.default_primitive_return("boolean", boxed=True) == "java.lang.Boolean.FALSE")
+    check("default primitive int is 0", SB.default_primitive_return("I") == "0")
+    check("default primitive boxed int", SB.default_primitive_return("int", boxed=True) == "Integer.valueOf(0)")
+    check("default primitive long is 0L", SB.default_primitive_return("J") == "0L")
+    check("default primitive float is 0.0F", SB.default_primitive_return("F") == "0.0F")
+    check("default primitive double is 0.0", SB.default_primitive_return("D") == "0.0")
+    check("default primitive char is '\\0'", SB.default_primitive_return("C") == "'\\0'")
+    check("default primitive void is empty", SB.default_primitive_return("V") == "")
+    check("default reference object is null", SB.default_primitive_return("Object") == "null")
+
+    # Unbox normalization in conditions and assignments
+    src_test = (
+        "boolean b = (boolean)x;\n"
+        "if ((boolean)myObj) { doSomething(); }\n"
+        "while ((boolean)flag) { loop(); }\n"
+        "int val = (boolean)cond ? 1 : 2;\n"
+    )
+    norm_src, edits = PJ.normalize_primitive_unboxing(src_test)
+    check("normalize_primitive_unboxing applied edits", edits == 4)
+    check("normalize_primitive_unboxing converted assignment", "boolean b = Boolean.TRUE.equals(x);" in norm_src)
+    check("normalize_primitive_unboxing converted if condition", "if (Boolean.TRUE.equals(myObj))" in norm_src)
+    check("normalize_primitive_unboxing converted while condition", "while (Boolean.TRUE.equals(flag))" in norm_src)
+    check("normalize_primitive_unboxing converted ternary", "Boolean.TRUE.equals(cond) ?" in norm_src)
+
+    # 2. Static hiding invariance check
+    with tempfile.TemporaryDirectory(prefix="jdec_test_hiding_") as td:
+        tdp = Path(td)
+        super_cls = tdp / "SuperClass.java"
+        sub_cls = tdp / "SubClass.java"
+        super_cls.write_text("public class SuperClass {\n    public static String get(Object[] args) { return null; }\n}\n")
+        sub_cls.write_text("public class SubClass extends SuperClass {\n    public static Object get(Object[] args) { return null; }\n}\n")
+        h_edits = PJ.check_static_hiding_invariance(tdp)
+        check("check_static_hiding_invariance applied edit", h_edits == 1)
+        sub_txt = sub_cls.read_text()
+        check("subclass static method return type narrowed to superclass", "public static String get(" in sub_txt)
+
+    # 3. Safe fallback dispatcher and skeletons
+    d6_code = SB.generate_safe_fallback_dispatcher("dev.sakura.client.d6")
+    check("dispatcher stub has package", "package dev.sakura.client;" in d6_code)
+    check("dispatcher stub returns emptyList", "return Collections.emptyList();" in d6_code)
+    check("dispatcher stub returns emptyMap", "return Collections.emptyMap();" in d6_code)
+    check("dispatcher stub returns emptySet", "return Collections.emptySet();" in d6_code)
+    check("dispatcher stub returns emptyIterator", "return Collections.emptyIterator();" in d6_code)
+    check("dispatcher stub returns false for aZ", "return false;" in d6_code)
+    check("dispatcher stub returns no-op runnable", "return () -> {};" in d6_code)
+
+    # Enrich fallback stubs in a project
+    with tempfile.TemporaryDirectory(prefix="jdec_test_enrich_") as td:
+        tdp = Path(td)
+        src_dir = tdp / "src" / "main" / "java" / "dev" / "sakura" / "client"
+        src_dir.mkdir(parents=True)
+        stub_f = src_dir / "d6.java"
+        stub_f.write_text(
+            "package dev.sakura.client;\n"
+            "public class d6 {\n"
+            "    public static <T> List<T> aList(Object... args) { return null; }\n"
+            "    public static boolean aZ(Object... args) { return null; }\n"
+            "}\n"
+        )
+        enr_count = PJ.enrich_safe_fallback_stubs(tdp)
+        check("enrich_safe_fallback_stubs applied", enr_count == 1)
+        enr_txt = stub_f.read_text()
+        check("stub upgraded to Collections.emptyList()", "Collections.emptyList()" in enr_txt)
+        check("stub upgraded aZ to false", "return false;" in enr_txt)
+
+    # 4. Intermediary Grounding
+    mc_fixture = MIXIN if MIXIN.is_file() else build_fixtures.ensure_mixin_jar()
+    if mc_fixture and Path(mc_fixture).is_file():
+        grounding = MM.IntermediaryGrounding(mc_fixture)
+        check("grounding is available with fixture", grounding.is_available())
+        check("grounding has Minecraft class", grounding.has_class("net/minecraft/client/Minecraft"))
+        check("grounding detects class kind", grounding.get_class_kind("net/minecraft/client/Minecraft") == "class")
+        grounded_src = grounding.generate_grounded_stub("net/minecraft/client/Minecraft")
+        check("grounding generates valid stub", grounded_src is not None and "public class Minecraft" in grounded_src)
+
+    empty_grounding = MM.IntermediaryGrounding(None)
+    check("empty grounding is not available", not empty_grounding.is_available())
+    check("empty grounding returns None for stub", empty_grounding.generate_grounded_stub("Foo") is None)
+
+    # 5. Event Pipeline Detector & Weaver
+    with tempfile.TemporaryDirectory(prefix="jdec_test_event_") as td:
+        tdp = Path(td)
+        kb_file = tdp / "MixinKeyboard.java"
+        kb_file.write_text(
+            "package dev.sakura.client.mixin;\n"
+            "import org.spongepowered.asm.mixin.Mixin;\n"
+            "@Mixin(net.minecraft.client.Keyboard.class)\n"
+            "public class MixinKeyboard {\n"
+            "    public void onKey(int key, int scancode, int action) {\n"
+            "        uf.v.post(new YG(key));\n"
+            "    }\n"
+            "}\n"
+        )
+        net_file = tdp / "MixinNetwork.java"
+        net_file.write_text(
+            "package dev.sakura.client.mixin;\n"
+            "import org.spongepowered.asm.mixin.Mixin;\n"
+            "@Mixin(net.minecraft.class_634.class)\n"
+            "public class MixinNetwork {\n"
+            "    public void sendChat(String msg) {\n"
+            "        uf.v.post(new Ym(msg));\n"
+            "    }\n"
+            "}\n"
+        )
+        pipe_info = MM.detect_event_pipelines(tdp)
+        check("event pipeline detected keyboard mixin", pipe_info.keyboard_mixin == "MixinKeyboard")
+        check("event pipeline detected key event class", pipe_info.key_event_class == "YG")
+        check("event pipeline detected network mixin", pipe_info.network_mixin == "MixinNetwork")
+        check("event pipeline detected chat event class", pipe_info.chat_event_class == "Ym")
+
+        woven = MM.weave_event_dispatcher_hook(tdp, pipe_info, default_keys=[344, 96, 89, 260])
+        check("event dispatcher hook woven successfully", woven)
+        kb_after = kb_file.read_text()
+        check("keyboard mixin has event dispatcher hook", "[jdec: event dispatcher hook]" in kb_after and "344" in kb_after)
+
+        woven_second = MM.weave_event_dispatcher_hook(tdp, pipe_info)
+        check("event dispatcher hook is idempotent", not woven_second)
+
+
 def main() -> int:
     with_mc = "--with-mc" in sys.argv
     if not SAMPLE.exists() and build_fixtures.ensure_sample_jar(quiet=False) is None:
@@ -3411,6 +3538,7 @@ def main() -> int:
     test_selfheal_audit()
     test_cfg_and_dynamic_mocks()
     test_bvm_and_native_extensions()
+    test_sakura_architecture_improvements()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")
