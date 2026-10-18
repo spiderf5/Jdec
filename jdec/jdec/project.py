@@ -99,30 +99,331 @@ def normalize_unbox(source_code: str) -> tuple[str, int]:
     return cur, edits
 
 
-def normalize_primitive_unboxing(source_code: str) -> tuple[str, int]:
-    """Convert raw unboxing casts into null-safe expressions to prevent NPE on stub returns.
+def _mask_noncode(src: str) -> str:
+    """Blank out comments and string/char literals, preserving offsets and newlines.
 
-    For example:
-    - boolean b = (boolean)x; -> boolean b = Boolean.TRUE.equals(x);
-    - if ((boolean)x) -> if (Boolean.TRUE.equals(x))
-    - (boolean)x ? a : b -> Boolean.TRUE.equals(x) ? a : b
+    Rewrites are computed on the masked text and applied to the original by
+    offset, so text that merely *looks* like a cast inside a comment or literal
+    is never modified.
     """
-    edits = 0
-    cur = source_code
+    out = list(src)
+    i, n = 0, len(src)
 
-    p_assign_bool = re.compile(r"(\bboolean\s+[A-Za-z0-9_$]+\s*=\s*)\(boolean\)\s*([A-Za-z0-9_$.()]+)\s*;")
-    cur, c1 = p_assign_bool.subn(r"\1Boolean.TRUE.equals(\2);", cur)
-    edits += c1
+    def blank(a: int, b: int) -> None:
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
 
-    p_if_bool = re.compile(r"(\b(?:if|while)\s*\(\s*)\(boolean\)\s*([A-Za-z0-9_$.()]+)(\s*\))")
-    cur, c2 = p_if_bool.subn(r"\1Boolean.TRUE.equals(\2)\3", cur)
-    edits += c2
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = src.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif c == "/" and nxt == "*":
+            j = src.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+        elif c == '"':
+            if src[i:i + 3] == '"""':
+                j = src.find('"""', i + 3)
+                j = n if j < 0 else j + 3
+            else:
+                j = i + 1
+                while j < n:
+                    if src[j] == "\\":
+                        j += 2
+                    elif src[j] == '"':
+                        j += 1
+                        break
+                    else:
+                        j += 1
+            blank(i, j)
+            i = j
+        elif c == "'":
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                elif src[j] == "'":
+                    j += 1
+                    break
+                else:
+                    j += 1
+            blank(i, j)
+            i = j
+        else:
+            i += 1
+    return "".join(out)
 
-    p_ternary_bool = re.compile(r"(?:^|(?<=[^A-Za-z0-9_$]))\(boolean\)\s*([A-Za-z0-9_$.()]+)(\s*\?)")
-    cur, c3 = p_ternary_bool.subn(r"Boolean.TRUE.equals(\1)\2", cur)
-    edits += c3
 
-    return cur, edits
+# Operand shapes the rewriter accepts. A simple identifier / field chain is safe
+# to evaluate twice; a call is only accepted for the boolean form, which
+# evaluates it once via Boolean.TRUE.equals(...).
+_OPERAND_SIMPLE = r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*"
+_OPERAND_CALL = r"[A-Za-z_$][A-Za-z0-9_$.]*(?:\([^()]*\))?"
+_OPERAND = rf"(?:{_OPERAND_CALL}|{_OPERAND_SIMPLE})"
+
+_BOOL_CAST = r"\(\s*boolean\s*\)\s*"
+_NUM_CAST = r"\(\s*(int|long|float|double|char|byte|short)\s*\)\s*"
+
+_UNBOX_PATTERNS = [
+    # boolean b = (boolean)x;   (group 1 = cast+operand, group 2 = operand)
+    re.compile(rf"\bboolean\s+[A-Za-z_$][\w$]*\s*=\s*({_BOOL_CAST}({_OPERAND}))"),
+    # if ((boolean)x) / while ((boolean)x)
+    re.compile(rf"\b(?:if|while)\s*\(\s*({_BOOL_CAST}({_OPERAND}))"),
+    # (boolean)x ? a : b
+    re.compile(rf"({_BOOL_CAST}({_OPERAND}))\s*\?"),
+]
+
+_NUMERIC_DEFAULTS = {
+    "int": ("0", "intValue"), "long": ("0L", "longValue"),
+    "float": ("0.0F", "floatValue"), "double": ("0.0", "doubleValue"),
+    "byte": ("(byte)0", "byteValue"), "short": ("(short)0", "shortValue"),
+    "char": ("'\\0'", "charValue"),
+}
+
+_PRIMITIVE_TYPES = frozenset({
+    "byte", "short", "int", "long", "float", "double", "boolean", "char",
+})
+_BOXED_TYPES = frozenset({
+    "Byte", "Short", "Integer", "Long", "Float", "Double", "Boolean",
+    "Character", "Number", "Object", "String",
+})
+
+# declaration / parameter: <type> <name> followed by = ; , ) :
+_DECL_RE = re.compile(
+    r"(?:^|[;{}(,])\s*(?:final\s+)?"
+    r"([A-Za-z_$][A-Za-z0-9_$.]*(?:\s*<[^;{}()]*>)?(?:\[\])*)\s+"
+    r"([A-Za-z_$][A-Za-z0-9_$]*)\s*(?=[=;,):])",
+    re.M,
+)
+
+
+def _declared_types(src: str) -> dict[str, str]:
+    """Best-effort map of local/field/parameter name -> declared type text.
+
+    Used only to decide whether `(int)x` is an unboxing (x is a reference) or a
+    no-op cast on an int. Unknown names are treated as "do not rewrite".
+    """
+    masked = _mask_noncode(src)
+    out: dict[str, str] = {}
+    for m in _DECL_RE.finditer(masked):
+        type_txt, name = m.group(1), m.group(2)
+        if type_txt.strip() == "var":
+            continue          # inferred below
+        head = type_txt.split("<", 1)[0].rsplit(".", 1)[-1]
+        if head in JAVA_KEYWORDS or type_txt in JAVA_KEYWORDS:
+            continue
+        out.setdefault(name, type_txt)
+
+    # `var` has no declared type; recover the obvious initializer shapes only.
+    for m in _VAR_DECL_RE.finditer(masked):
+        name, rhs = m.group(1), m.group(2).strip()
+        inferred = None
+        mm = re.match(r"new\s+([A-Za-z_$][\w$.]*(?:\s*<[^;>]*>)?)", rhs)
+        if mm:
+            inferred = mm.group(1)
+        else:
+            mm = re.match(r"\(\s*([A-Za-z_$][\w$.]*(?:\s*<[^>]*>)?)\s*\)", rhs)
+            if mm:
+                inferred = mm.group(1)
+            elif re.fullmatch(r"[A-Za-z_$][\w$]*", rhs) and rhs in out:
+                inferred = out[rhs]
+        if inferred:
+            out.setdefault(name, inferred)
+    return out
+
+
+def _reference_kind(type_txt: str | None) -> bool | None:
+    """True = reference, False = primitive, None = cannot tell."""
+    if not type_txt:
+        return None
+    base = re.sub(r"(\[\])+$", "", type_txt.strip())
+    base = base.split("<", 1)[0].strip()
+    simple = base.rsplit(".", 1)[-1].strip()
+    if simple in _PRIMITIVE_TYPES:
+        return False
+    if simple in _BOXED_TYPES:
+        return True
+    if simple[:1].isupper():
+        return True
+    return None
+
+
+def _simple_class_name(type_txt: str) -> str:
+    base = re.sub(r"(\[\])+$", "", type_txt.strip())
+    base = base.split("<", 1)[0].strip()
+    return base.rsplit(".", 1)[-1].strip()
+
+
+_CLASS_HEADER_RE = re.compile(
+    r"^\s*(?:public\s+)?(?:abstract\s+|final\s+)?(?:class|interface|enum|record)\s+"
+    r"([A-Za-z_$][\w$]*)(?:\s*<[^>{}]*>)?"
+    r"(?:\s+extends\s+([A-Za-z_$][\w$.]*))?", re.M)
+
+_FIELD_DECL_RE = re.compile(
+    r"^(?:(?:public|protected|private|static|final|transient|volatile)\s+)*"
+    r"([A-Za-z_$][\w$.]*(?:\s*<[^;{}]*>)?(?:\[\])*)\s+"
+    r"([A-Za-z_$][\w$]*)\s*(?:=|;)")
+
+_VAR_DECL_RE = re.compile(r"\bvar\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);")
+
+
+@dataclass
+class SourceTypeIndex:
+    """Project-wide field map used to resolve cross-class unboxing operands.
+
+    Deliberately shallow: one entry per class, fields only, no method return
+    inference. Unknown stays unknown, which keeps the rewrite conservative.
+    """
+    fields: dict[str, dict[str, str]] = field(default_factory=dict)
+    supers: dict[str, str] = field(default_factory=dict)
+
+    def add_file(self, code: str) -> None:
+        masked = _mask_noncode(code)
+        m = _CLASS_HEADER_RE.search(masked)
+        if not m:
+            return
+        cls, sup = m.group(1), m.group(2)
+        if sup:
+            self.supers.setdefault(cls, _simple_class_name(sup))
+        depth = 0
+        for line in masked.splitlines():
+            if depth == 1:
+                fm = _FIELD_DECL_RE.match(line.strip())
+                if fm and _simple_class_name(fm.group(1)) not in JAVA_KEYWORDS:
+                    self.fields.setdefault(cls, {}).setdefault(fm.group(2), fm.group(1))
+            depth += line.count("{") - line.count("}")
+            if depth < 0:
+                depth = 0
+
+    def field_type(self, cls: str | None, name: str) -> str | None:
+        seen: set[str] = set()
+        cur = cls
+        while cur and cur not in seen:
+            seen.add(cur)
+            fields = self.fields.get(cur)
+            if fields and name in fields:
+                return fields[name]
+            cur = self.supers.get(cur)
+        return None
+
+
+def build_source_type_index(root: Path) -> SourceTypeIndex:
+    """Index every .java under `root` so operands like `other.field` can resolve."""
+    idx = SourceTypeIndex()
+    if not root.is_dir():
+        return idx
+    for j_file in root.rglob("*.java"):
+        try:
+            idx.add_file(j_file.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return idx
+
+
+def _resolve_operand_type(
+    operand: str,
+    declared: dict[str, str],
+    type_index: SourceTypeIndex | None,
+    current_class: str | None,
+) -> str | None:
+    parts = operand.split(".")
+    if parts[0] == "this":
+        parts = parts[1:]
+        if len(parts) == 1 and type_index:
+            return type_index.field_type(current_class, parts[0])
+        return None
+    if len(parts) == 1:
+        if operand in declared:
+            return declared[operand]
+        if type_index:
+            return type_index.field_type(current_class, operand)
+        return None
+    cur = declared.get(parts[0])
+    if cur is None and type_index:
+        cur = type_index.field_type(current_class, parts[0])
+    if cur is None or type_index is None:
+        return None
+    for seg in parts[1:]:
+        cur = type_index.field_type(_simple_class_name(cur), seg)
+        if cur is None:
+            return None
+    return cur
+
+
+def normalize_primitive_unboxing(
+    source_code: str,
+    include_numeric: bool = True,
+    type_index: "SourceTypeIndex | None" = None,
+    current_class: str | None = None,
+) -> tuple[str, int]:
+    """Rewrite raw unboxing casts so a null stub return cannot throw NPE.
+
+    boolean (always):
+        (boolean)x              -> Boolean.TRUE.equals(x)
+    numeric (include_numeric, default on):
+        (int)x                  -> (x == null ? 0 : ((Number)x).intValue())
+        (char)x                 -> (x == null ? '\\0' : ((Character)x).charValue())
+
+    Numeric rewriting only fires when the operand is a declared reference type
+    (boxed class, Object, String, or a class name) and a simple identifier /
+    field chain. `(int)someInt` is a legal no-op cast and is left alone, as are
+    operands whose declaration cannot be found — the duplicated read in the
+    ternary is only safe when it has no side effects.
+
+    Operand types come from local declarations and, when supplied, a project-wide
+    `SourceTypeIndex` for `this.field` / `other.field` chains.
+
+    Comments and string/char literals are masked before matching, so text that
+    merely looks like a cast is left untouched.
+    """
+    if not source_code:
+        return source_code, 0
+
+    masked = _mask_noncode(source_code)
+    spans: list[tuple[int, int, str]] = []
+
+    for pat in _UNBOX_PATTERNS:
+        for m in pat.finditer(masked):
+            start, end = m.span(1)
+            operand = m.group(2)
+            spans.append((start, end, f"Boolean.TRUE.equals({operand})"))
+
+    if include_numeric:
+        # `(int)call()` and `(int)arr[0]` are not simple lvalues: a duplicated
+        # read would change behaviour, so they are left untouched.
+        pat_num = re.compile(rf"{_NUM_CAST}({_OPERAND_SIMPLE})(?!\s*[\(\[]|[A-Za-z0-9_$])")
+        declared = _declared_types(source_code)
+        for m in pat_num.finditer(masked):
+            prim, operand = m.group(1), m.group(2)
+            type_txt = _resolve_operand_type(operand, declared, type_index, current_class)
+            if _reference_kind(type_txt) is not True:
+                continue
+            default, accessor = _NUMERIC_DEFAULTS[prim]
+            box = "Character" if prim == "char" else "Number"
+            repl = f"({operand} == null ? {default} : (({box}){operand}).{accessor}())"
+            spans.append((m.start(), m.end(), repl))
+
+    if not spans:
+        return source_code, 0
+
+    # right-to-left so earlier offsets stay valid; drop overlaps
+    spans.sort(key=lambda s: (s[0], s[1]), reverse=True)
+    out = source_code
+    last_start = len(source_code) + 1
+    applied = 0
+    for start, end, repl in spans:
+        if end > last_start:
+            continue
+        out = out[:start] + repl + out[end:]
+        last_start = start
+        applied += 1
+    return out, applied
 
 
 @dataclass
@@ -208,73 +509,92 @@ def sanitize_keyword_identifiers(source_code: str) -> tuple[str, int]:
 
 
 def prune_duplicate_bridge_methods(source_code: str) -> tuple[str, int]:
-    """Identify and comment out duplicate synthetic bridge methods that differ only by return type."""
-    edits = 0
-    lines = source_code.splitlines()
+    """Comment out duplicate synthetic bridge methods that differ only by return type.
 
-    # Match method declaration headers: [modifiers] [generic] <ReturnType> <methodName>(<params>)
+    Every line of the chosen method is prefixed with `//`, so the result stays
+    brace-balanced for javac and for the scoring pass. A method whose end cannot
+    be located is left alone rather than truncated.
+    """
+    lines = source_code.splitlines()
+    masked_lines = _mask_noncode(source_code).splitlines()
+
     m_decl_pat = re.compile(
         r"^[ \t]*(?:(?:public|protected|private|static|final|synchronized|abstract|default)\s+)*"
         r"(?:<[^>]+>\s+)?([A-Za-z0-9_$.<>\[\]]+)\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)"
     )
 
-    methods_seen: dict[tuple[str, int], list[int]] = {}
-    for idx, line in enumerate(lines):
+    methods_seen: dict[tuple[str, tuple[str, ...]], list[int]] = {}
+    for idx, line in enumerate(masked_lines):
         m = m_decl_pat.match(line)
-        if m:
-            ret_type, m_name, params = m.groups()
-            if m_name in ("if", "for", "while", "switch", "catch"):
-                continue
-            # Approximate parameter signature by count
-            param_list = [p.strip().split()[0] for p in params.split(",") if p.strip()]
-            sig_key = (m_name, len(param_list))
-            methods_seen.setdefault(sig_key, []).append(idx)
+        if not m:
+            continue
+        _ret_type, m_name, params = m.groups()
+        if m_name in ("if", "for", "while", "switch", "catch"):
+            continue
+        methods_seen.setdefault((m_name, _param_types(params)), []).append(idx)
 
-    # For any duplicate signatures in the same class
+    def method_end(start: int) -> int | None:
+        depth = 0
+        started = False
+        for j in range(start, len(masked_lines)):
+            line = masked_lines[j]
+            depth += line.count("{") - line.count("}")
+            if "{" in line:
+                started = True
+            if started and depth <= 0:
+                return j
+            if not started and line.rstrip().endswith(";"):
+                return j
+        return None
+
+    def has_marker(l_idx: int) -> bool:
+        # markers live in comments, which the mask blanks: read the raw lines
+        prev = "\n".join(lines[max(0, l_idx - 3):l_idx])
+        return ("$FF: bridge method" in prev or "$FF: synthetic method" in prev
+                or "/* bridge */" in prev)
+
+    def delegates(l_idx: int, name: str) -> bool:
+        body = "\n".join(masked_lines[l_idx:min(len(masked_lines), l_idx + 4)])
+        return f"return this.{name}(" in body or f"return {name}(" in body
+
     lines_to_comment: set[int] = set()
-    for sig_key, line_indices in methods_seen.items():
-        if len(line_indices) > 1:
-            # Check which one is a synthetic bridge method
-            bridge_idx = None
-            for l_idx in line_indices:
-                # Look at previous 3 lines for decompiler bridge markers
-                prev_chunk = "\n".join(lines[max(0, l_idx - 3):l_idx])
-                if "$FF: bridge method" in prev_chunk or "$FF: synthetic method" in prev_chunk or "/* bridge */" in prev_chunk:
-                    bridge_idx = l_idx
-                    break
-                # Check method body for simple delegation: return this.<m_name>(...)
-                body_chunk = "\n".join(lines[l_idx:min(len(lines), l_idx + 4)])
-                if f"return this.{sig_key[0]}(" in body_chunk or f"return {sig_key[0]}(" in body_chunk:
-                    bridge_idx = l_idx
+    edits = 0
+    for (m_name, _ptypes), idxs in methods_seen.items():
+        if len(idxs) < 2:
+            continue
+        marked = [i for i in idxs if has_marker(i)]
+        if marked:
+            drop = list(marked)
+        else:
+            delegating = [i for i in idxs if delegates(i, m_name)]
+            drop = delegating if len(delegating) == 1 else idxs[1:]
+        keep = next((i for i in idxs if i not in drop), idxs[0])
+        drop = [i for i in drop if i != keep]
 
-            if bridge_idx is None:
-                # Default: comment out the later one
-                bridge_idx = line_indices[-1]
-
-            # Find the end of the method body (matching brace)
-            brace_count = 0
-            start_brace = False
-            for curr_i in range(bridge_idx, min(len(lines), bridge_idx + 30)):
-                line_content = lines[curr_i]
-                brace_count += line_content.count("{") - line_content.count("}")
-                lines_to_comment.add(curr_i)
-                if "{" in line_content:
-                    start_brace = True
-                if start_brace and brace_count <= 0:
-                    break
+        for start in drop:
+            end = method_end(start)
+            if end is None:
+                continue                    # cannot locate the body: do not touch
+            for j in range(start, end + 1):
+                lines_to_comment.add(j)
             edits += 1
 
-    out_lines = []
-    for idx, line in enumerate(lines):
-        if idx in lines_to_comment:
-            out_lines.append("// [jdec: stripped duplicate bridge method] " + line)
-        else:
-            out_lines.append(line)
+    if not edits:
+        return source_code, 0
 
+    out_lines = [
+        "// [jdec: stripped duplicate bridge method] " + line if idx in lines_to_comment else line
+        for idx, line in enumerate(lines)
+    ]
     return "\n".join(out_lines), edits
 
 
-def clean_source_for_compilation(code: str, expected_package: str | None = None) -> tuple[str, list[str]]:
+def clean_source_for_compilation(
+    code: str,
+    expected_package: str | None = None,
+    type_index: SourceTypeIndex | None = None,
+    current_class: str | None = None,
+) -> tuple[str, list[str]]:
     """Master source cleanup pass: strips zero-width chars, ensures package headers, escapes keywords, and strips bridge duplicates."""
     changes = []
     cur_code = code
@@ -309,92 +629,99 @@ def clean_source_for_compilation(code: str, expected_package: str | None = None)
         changes.append(f"Normalized {unbox_edits} unbox cascade expression(s)")
 
     # 5. Primitive unboxing null-safety
-    cur_code, prim_edits = normalize_primitive_unboxing(cur_code)
+    cur_code, prim_edits = normalize_primitive_unboxing(
+        cur_code, type_index=type_index, current_class=current_class)
     if prim_edits > 0:
         changes.append(f"Normalized {prim_edits} primitive unboxing expression(s)")
+
+    # line-joining steps drop trailing newlines; normalise once so a second
+    # pass over the output is byte-identical
+    if cur_code and not cur_code.endswith("\n"):
+        cur_code += "\n"
 
     return cur_code, changes
 
 
-def enrich_safe_fallback_stubs(project_dir: Path) -> int:
-    """Scan synthesized or dispatcher classes and upgrade null collection returns to safe empty collections."""
-    java_src_root = project_dir / "src" / "main" / "java"
-    if not java_src_root.is_dir():
-        return 0
-    edits = 0
-    for j_file in java_src_root.rglob("*.java"):
-        stem = j_file.stem
-        raw = j_file.read_text(encoding="utf-8", errors="replace")
-        if stem in ("d6", "Dispatcher") or stem.endswith("Dispatcher") or "dummyMethod" in raw:
-            content = raw
-            if "import java.util.*;" not in content and "import java.util.Collections;" not in content:
-                p_pkg = re.search(r"package\s+[\w.]+;\s*", content)
-                if p_pkg:
-                    pos = p_pkg.end()
-                    content = content[:pos] + "\nimport java.util.*;\n" + content[pos:]
-                else:
-                    content = "import java.util.*;\n" + content
+def enrich_safe_fallback_stubs(project_dir: Path, stub_files: list[Path] | None = None) -> int:
+    """Upgrade null collection/iterator returns to immutable empty values.
 
+    Only machine-synthesised stubs are touched: either the explicit `stub_files`
+    list, or files carrying stubs.STUB_MARKER. A real class that happens to be
+    named "Dispatcher" (or to contain a member called "dummyMethod") is never
+    rewritten, because there is no reliable way to tell it apart from a stub by
+    name alone.
+    """
+    java_src_root = project_dir / "src" / "main" / "java"
+    if stub_files is not None:
+        candidates = [p for p in stub_files if p.is_file()]
+    elif java_src_root.is_dir():
+        candidates = [p for p in java_src_root.rglob("*.java")
+                      if SB.STUB_MARKER in p.read_text(encoding="utf-8", errors="replace")]
+    else:
+        return 0
+
+    edits = 0
+    rules = [
+        (r"\b(?:List|Collection)\s*<[^>]*>", "Collections.emptyList()"),
+        (r"\bMap\s*<[^>]*>", "Collections.emptyMap()"),
+        (r"\bSet\s*<[^>]*>", "Collections.emptySet()"),
+        (r"\bIterator\s*<[^>]*>", "Collections.emptyIterator()"),
+    ]
+    for j_file in candidates:
+        raw = j_file.read_text(encoding="utf-8", errors="replace")
+        content = raw
+
+        for type_pat, replacement in rules:
             content = re.sub(
-                r"(\b(?:List|Collection)\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptyList()\2",
+                rf"(\b{type_pat}\s+[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{{\s*return\s+)null(\s*;\s*\}})",
+                rf"\1{replacement}\2",
                 content,
             )
-            content = re.sub(
-                r"(\bMap\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptyMap()\2",
-                content,
-            )
-            content = re.sub(
-                r"(\bSet\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptySet()\2",
-                content,
-            )
-            content = re.sub(
-                r"(\bIterator\s*<[^>]*>\s+\w+\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptyIterator()\2",
-                content,
-            )
-            content = re.sub(
-                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:List|Collection|Object)\s+aList\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptyList()\2",
-                content,
-            )
-            content = re.sub(
-                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:Iterator|Object)\s+aIterator\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptyIterator()\2",
-                content,
-            )
-            content = re.sub(
-                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:Map|Object)\s+aMap\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptyMap()\2",
-                content,
-            )
-            content = re.sub(
-                r"(\b(?:public\s+static\s+)?(?:<[^>]*>\s+)?(?:Set|Object)\s+aSet\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1Collections.emptySet()\2",
-                content,
-            )
-            content = re.sub(
-                r"(\b(?:public\s+static\s+)?boolean\s+aZ\s*\([^)]*\)\s*\{\s*return\s+)null(\s*;\s*\})",
-                r"\1false\2",
-                content,
-            )
-            if content != raw:
-                j_file.write_text(content, encoding="utf-8")
-                edits += 1
+        if content == raw:
+            continue
+
+        if "import java.util.*;" not in content and "import java.util.Collections;" not in content:
+            p_pkg = re.search(r"package\s+[\w.]+;\s*", content)
+            if p_pkg:
+                content = content[:p_pkg.end()] + "\nimport java.util.*;\n" + content[p_pkg.end():]
+            else:
+                content = "import java.util.*;\n" + content
+        j_file.write_text(content, encoding="utf-8")
+        edits += 1
     return edits
 
 
-def check_static_hiding_invariance(source_dir: Path) -> int:
-    """Pre-scan Java sources in source_dir for static method hiding return type invariance violations.
+def _param_types(params: str) -> tuple[str, ...]:
+    """Extract erased parameter types from a Java parameter list.
 
-    JLS §8.4.8.2 requires that a hiding static method's return type is a subtype of the hidden method's.
-    If a subclass static method returns Object while superclass returns a specific type, narrow it.
+    Used to key static methods by real signature rather than by arity: `get(int)`
+    and `get(String)` are different methods and must not be conflated.
+    """
+    out: list[str] = []
+    for raw in params.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        raw = re.sub(r"\bfinal\b", "", raw).strip()
+        raw = re.sub(r"@[\w.]+(?:\([^)]*\))?\s*", "", raw).strip()
+        tokens = raw.split()
+        out.append(" ".join(tokens[:-1]) if len(tokens) >= 2 else raw)
+    return tuple(out)
+
+
+def check_static_hiding_invariance(source_dir: Path) -> int:
+    """Narrow a hiding static method's `Object` return type to the hidden one.
+
+    JLS §8.4.8.2 requires a hiding static method to be return-type-substitutable
+    for the method it hides. Decompilers often widen the subclass return to
+    `Object`, which javac rejects. Only the safe direction is applied: `Object`
+    is narrowed to the superclass's concrete type. Methods are matched by
+    (name, parameter types) — never by arity alone.
     """
     edits = 0
     class_supers: dict[str, str] = {}
-    class_methods: dict[str, dict[tuple[str, int], tuple[str, Path]]] = {}
+    class_files: dict[str, Path] = {}
+    class_methods: dict[str, dict[tuple[str, tuple[str, ...]], tuple[str, tuple[str, ...]]]] = {}
 
     m_hdr = re.compile(r"^\s*public\s+(?:abstract\s+)?(class|interface)\s+([A-Za-z0-9_$]+)(?:\s+extends\s+([A-Za-z0-9_$]+))?", re.M)
     m_static = re.compile(r"^\s*public\s+static\s+([A-Za-z0-9_$.<>\[\]]+)\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)", re.M)
@@ -408,28 +735,39 @@ def check_static_hiding_invariance(source_dir: Path) -> int:
         s_name = cls_match.group(3)
         if s_name:
             class_supers[c_name] = s_name
+        class_files.setdefault(c_name, j_file)
         methods = {}
         for sm in m_static.finditer(txt):
             ret_t, m_name, params = sm.groups()
-            p_count = len([p for p in params.split(",") if p.strip()])
-            methods[(m_name, p_count)] = (ret_t, j_file)
+            p_types = _param_types(params)
+            methods[(m_name, p_types)] = (ret_t, p_types)
         class_methods[c_name] = methods
 
     for c_name, s_name in class_supers.items():
-        if s_name in class_methods and c_name in class_methods:
-            s_meths = class_methods[s_name]
-            c_meths = class_methods[c_name]
-            for sig, (s_ret, _) in s_meths.items():
-                if sig in c_meths:
-                    c_ret, c_file = c_meths[sig]
-                    if c_ret == "Object" and s_ret != "Object":
-                        content = c_file.read_text(encoding="utf-8", errors="replace")
-                        old_decl = f"public static {c_ret} {sig[0]}("
-                        new_decl = f"public static {s_ret} {sig[0]}("
-                        if old_decl in content:
-                            content = content.replace(old_decl, new_decl)
-                            c_file.write_text(content, encoding="utf-8")
-                            edits += 1
+        if s_name not in class_methods or c_name not in class_methods:
+            continue
+        for sig, (s_ret, s_types) in class_methods[s_name].items():
+            if sig not in class_methods[c_name]:
+                continue
+            c_ret, _ = class_methods[c_name][sig]
+            if c_ret != "Object" or s_ret == "Object":
+                continue
+
+            c_file = class_files.get(c_name)
+            if c_file is None:
+                continue
+            content = c_file.read_text(encoding="utf-8", errors="replace")
+            if s_types:
+                param_pat = r"\s*,\s*".join(
+                    re.escape(t) + r"\s+[A-Za-z_$][\w$]*" for t in s_types)
+            else:
+                param_pat = r"\s*"
+            decl = re.compile(
+                r"(public\s+static\s+)Object(\s+" + re.escape(sig[0]) + r"\s*\(" + param_pat + r"\s*\))")
+            new_content, n = decl.subn(rf"\g<1>{s_ret}\g<2>", content, count=1)
+            if n:
+                c_file.write_text(new_content, encoding="utf-8")
+                edits += n
     return edits
 
 
@@ -749,6 +1087,7 @@ def export_project(
             })
 
         # Pass 2: Apply cross-file reference rewriting and compilation sanitation
+        type_index = build_source_type_index(target_src)
         for item in file_plans:
             j_file = item["src"]
             dest_file = item["dest"]
@@ -783,7 +1122,10 @@ def export_project(
                             code = re.sub(r"\b" + re.escape(old_name) + r"\b", new_name, code)
 
             expected_pkg = pkg if pkg else None
-            cleaned_code, changes = clean_source_for_compilation(code, expected_package=expected_pkg)
+            cleaned_code, changes = clean_source_for_compilation(
+                code, expected_package=expected_pkg,
+                type_index=type_index,
+                current_class=renamed_cls or orig_cls)
             if changes or renamed_cls:
                 stats["files_repaired"] += 1
                 # REVIEW 2.4: keep the pre-repair source and log the exact rules.
@@ -876,9 +1218,6 @@ def verify_compilation(
     javac_resolved = SB._find_javac(javac_bin)
 
     grounding = MM.IntermediaryGrounding(intermediary_jar) if intermediary_jar else None
-    if java_src_root.is_dir():
-        check_static_hiding_invariance(java_src_root)
-        enrich_safe_fallback_stubs(project_dir)
 
     java_files = list(java_src_root.rglob("*.java")) if java_src_root.is_dir() else []
     if not java_files:
@@ -889,6 +1228,11 @@ def verify_compilation(
     output = ""
 
     for pass_num in range(max_repair_passes):
+        # stubs synthesised in an earlier pass are now on disk: normalise them
+        # before compiling, and re-check hiding invariants introduced by them
+        if java_src_root.is_dir():
+            check_static_hiding_invariance(java_src_root)
+            enrich_safe_fallback_stubs(project_dir)
         tmp_classes = Path(tempfile.mkdtemp(prefix=f"jdec_compile_pass_{pass_num}_"))
         try:
             # Build classpath from libs/*.jar
@@ -1059,11 +1403,10 @@ def verify_compilation(
                                     grounded = grounding.generate_grounded_stub(f"{pkg_name}/{cls_name}") if grounding and grounding.has_class(f"{pkg_name}/{cls_name}") else None
                                     if grounded:
                                         stub_file.write_text(grounded, encoding="utf-8")
-                                    elif cls_name in ("d6", "Dispatcher") or cls_name.endswith("Dispatcher"):
-                                        stub_file.write_text(SB.generate_safe_fallback_dispatcher(f"{pkg_name}.{cls_name}"), encoding="utf-8")
                                     else:
                                         stub_code = (
                                             f"package {pkg_name};\n\n"
+                                            f"{SB.STUB_MARKER}\n"
                                             f"import java.util.*;\n\n"
                                             f"public class {cls_name} {{\n"
                                             f"    public {cls_name}() {{}}\n"
@@ -1071,10 +1414,6 @@ def verify_compilation(
                                             f"    public Object dummyMember;\n"
                                             f"    public static Object dummyMethod(Object... args) {{ return null; }}\n"
                                             f"    public Object dummyCall(Object... args) {{ return null; }}\n"
-                                            f"    public static <T> List<T> aList(Object... args) {{ return Collections.emptyList(); }}\n"
-                                            f"    public static <T> Iterator<T> aIterator(Object... args) {{ return Collections.emptyIterator(); }}\n"
-                                            f"    public static boolean aZ(Object... args) {{ return false; }}\n"
-                                            f"    public static int aI(Object... args) {{ return 0; }}\n"
                                             f"}}\n"
                                         )
                                         stub_file.write_text(stub_code, encoding="utf-8")
@@ -1096,12 +1435,11 @@ def verify_compilation(
                                 grounded = grounding.generate_grounded_stub(f"{pkg_name}/{cls_name}" if pkg_name else cls_name) if grounding and grounding.has_class(f"{pkg_name}/{cls_name}" if pkg_name else cls_name) else None
                                 if grounded:
                                     stub_file.write_text(grounded, encoding="utf-8")
-                                elif cls_name in ("d6", "Dispatcher") or cls_name.endswith("Dispatcher"):
-                                    stub_file.write_text(SB.generate_safe_fallback_dispatcher(f"{pkg_name}.{cls_name}" if pkg_name else cls_name), encoding="utf-8")
                                 else:
                                     pkg_decl = f"package {pkg_name};\n\n" if pkg_name else ""
                                     stub_code = (
                                         f"{pkg_decl}"
+                                        f"{SB.STUB_MARKER}\n"
                                         f"import java.util.*;\n\n"
                                         f"public class {cls_name} {{\n"
                                         f"    public {cls_name}() {{}}\n"
@@ -1109,10 +1447,6 @@ def verify_compilation(
                                         f"    public Object dummyMember;\n"
                                         f"    public static Object dummyMethod(Object... args) {{ return null; }}\n"
                                         f"    public Object dummyCall(Object... args) {{ return null; }}\n"
-                                        f"    public static <T> List<T> aList(Object... args) {{ return Collections.emptyList(); }}\n"
-                                        f"    public static <T> Iterator<T> aIterator(Object... args) {{ return Collections.emptyIterator(); }}\n"
-                                        f"    public static boolean aZ(Object... args) {{ return false; }}\n"
-                                        f"    public static int aI(Object... args) {{ return 0; }}\n"
                                         f"}}\n"
                                     )
                                     stub_file.write_text(stub_code, encoding="utf-8")

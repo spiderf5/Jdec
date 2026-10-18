@@ -448,12 +448,47 @@ def default_primitive_return(desc_or_type: str, boxed: bool = False) -> str:
     return "null"
 
 
-def generate_safe_fallback_dispatcher(class_name: str) -> str:
-    """Generate safe non-null fallback implementations for runtime reflection/dispatch layers.
+# Marks a source file as machine-synthesised. Only marked files may be rewritten
+# by project.enrich_safe_fallback_stubs(), so a real class that happens to be
+# named "Dispatcher" or to contain "dummyMethod" is never touched.
+STUB_MARKER = "// [jdec: synthesized stub]"
+
+# Explicit, opt-in profile. These member names were observed in the Sakura-family
+# sample; they are NOT emitted automatically and are NOT a claim about other
+# obfuscators. Callers must ask for this profile by name.
+SAFE_FALLBACK_PROFILE: dict[str, str] = {
+    "aList": "public static <T> List<T> aList(Object... args) { return Collections.emptyList(); }",
+    "aSet": "public static <T> Set<T> aSet(Object... args) { return Collections.emptySet(); }",
+    "aMap": "public static <K, V> Map<K, V> aMap(Object... args) { return Collections.emptyMap(); }",
+    "aCollection": "public static <T> Collection<T> aCollection(Object... args) { return Collections.emptyList(); }",
+    "aIterator": "public static <T> Iterator<T> aIterator(Object... args) { return Collections.emptyIterator(); }",
+    "aZ": "public static boolean aZ(Object... args) { return false; }",
+    "aI": "public static int aI(Object... args) { return 0; }",
+    "aJ": "public static long aJ(Object... args) { return 0L; }",
+    "aF": "public static float aF(Object... args) { return 0.0f; }",
+    "aD": "public static double aD(Object... args) { return 0.0; }",
+    "aStr": 'public static String aStr(Object... args) { return ""; }',
+    "aObj": "public static Object aObj(Object... args) { return null; }",
+    "aV": "public static void aV(Object... args) {}",
+    "aRunnable": "public static Runnable aRunnable(Object... args) { return () -> {}; }",
+    "aConsumer": "public static java.util.function.Consumer<Object> aConsumer(Object... args) { return x -> {}; }",
+    "aSupplier": "public static java.util.function.Supplier<Object> aSupplier(Object... args) { return () -> null; }",
+}
+
+
+def generate_safe_fallback_dispatcher(
+    class_name: str,
+    profile: dict[str, str] | None = None,
+) -> str:
+    """Generate a stub whose collection/iterator members return empty values.
+
+    `profile` defaults to SAFE_FALLBACK_PROFILE, which is an explicit
+    Sakura-family naming profile. Nothing in the export pipeline selects it
+    automatically: pass it only when the target is known to use those names.
 
     Collection and iterator return points return Collections.empty*() to prevent
-    NullPointerExceptions during foreach iterations. UI and callback functions return
-    safe no-op lambdas.
+    NullPointerExceptions during foreach iterations. Callback members return
+    no-op lambdas.
     """
     pkg = ""
     simple_name = class_name
@@ -463,33 +498,17 @@ def generate_safe_fallback_dispatcher(class_name: str) -> str:
         pkg, simple_name = class_name.rsplit("/", 1)
         pkg = pkg.replace("/", ".")
 
+    members = profile if profile is not None else SAFE_FALLBACK_PROFILE
+    body = "\n".join(f"    {line}" for line in members.values())
+
     pkg_decl = f"package {pkg};\n\n" if pkg else ""
-    return f"""{pkg_decl}import java.util.*;
+    return f"""{pkg_decl}{STUB_MARKER}
+import java.util.*;
 
 public class {simple_name} {{
     public {simple_name}() {{}}
 
-    // Safe collection and iterator fallbacks
-    public static <T> List<T> aList(Object... args) {{ return Collections.emptyList(); }}
-    public static <T> Set<T> aSet(Object... args) {{ return Collections.emptySet(); }}
-    public static <K, V> Map<K, V> aMap(Object... args) {{ return Collections.emptyMap(); }}
-    public static <T> Collection<T> aCollection(Object... args) {{ return Collections.emptyList(); }}
-    public static <T> Iterator<T> aIterator(Object... args) {{ return Collections.emptyIterator(); }}
-
-    // Safe scalar defaults
-    public static boolean aZ(Object... args) {{ return false; }}
-    public static int aI(Object... args) {{ return 0; }}
-    public static long aJ(Object... args) {{ return 0L; }}
-    public static float aF(Object... args) {{ return 0.0f; }}
-    public static double aD(Object... args) {{ return 0.0; }}
-    public static String aStr(Object... args) {{ return ""; }}
-    public static Object aObj(Object... args) {{ return null; }}
-    public static void aV(Object... args) {{}}
-
-    // Safe callback / functional interface no-ops
-    public static Runnable aRunnable(Object... args) {{ return () -> {{}}; }}
-    public static java.util.function.Consumer<Object> aConsumer(Object... args) {{ return x -> {{}}; }}
-    public static java.util.function.Supplier<Object> aSupplier(Object... args) {{ return () -> null; }}
+{body}
 }}
 """
 

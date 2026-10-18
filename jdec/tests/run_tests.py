@@ -3350,7 +3350,7 @@ def test_selfheal_audit() -> None:
 
 
 def test_sakura_architecture_improvements() -> None:
-    print("sakura improvements: unboxing awareness, static hiding invariance, intermediary grounding, safe fallbacks & event weaver")
+    print("grounding & source safety: unboxing, static hiding, stub synthesis, event detection")
     from jdec import stubs as SB
     from jdec import project as PJ
     from jdec import mcmod as MM
@@ -3381,46 +3381,121 @@ def test_sakura_architecture_improvements() -> None:
     check("normalize_primitive_unboxing converted while condition", "while (Boolean.TRUE.equals(flag))" in norm_src)
     check("normalize_primitive_unboxing converted ternary", "Boolean.TRUE.equals(cond) ?" in norm_src)
 
-    # 2. Static hiding invariance check
+    # negative: comments and literals must never be rewritten
+    noise = (
+        "// boolean c = (boolean)commented;\n"
+        "/* if ((boolean)blockComment) {} */\n"
+        'String s = "(boolean)inString";\n'
+        "char q = '(';\n"
+    )
+    noise_out, noise_edits = PJ.normalize_primitive_unboxing(noise)
+    check("unboxing leaves comments and literals alone",
+          noise_edits == 0 and noise_out == noise, f"edits={noise_edits}")
+
+    # numeric unboxing: on by default, but only for declared reference operands
+    num_src = (
+        "Integer boxed = null;\n"
+        "Object generic = null;\n"
+        "int plain = 1;\n"
+        "int a = (int)boxed;\n"
+        "int b = (int)generic;\n"
+        "int c = (int)plain;\n"
+        "int d = (int)unknown;\n"
+        "int e = (int)call();\n"
+    )
+    num_out, n_num = PJ.normalize_primitive_unboxing(num_src)
+    check("numeric unboxing rewrites declared references only", n_num == 2, str(n_num))
+    check("boxed rewrite is null-safe",
+          "boxed == null ? 0 : ((Number)boxed).intValue()" in num_out, num_out)
+    check("Object rewrite is null-safe", "generic == null ? 0" in num_out, num_out)
+    check("no-op cast on int is left alone", "(int)plain" in num_out, num_out)
+    check("unknown declaration is left alone", "(int)unknown" in num_out, num_out)
+    check("call operand is not duplicated", "(int)call()" in num_out, num_out)
+
+    # cross-class fields / this.x / var are resolved through the project index
+    with tempfile.TemporaryDirectory(prefix="jdec_test_typeindex_") as td:
+        tdp = Path(td)
+        (tdp / "Holder.java").write_text(
+            "public class Holder {\n    public Integer value;\n}\n")
+        (tdp / "A.java").write_text(
+            "public class A {\n"
+            "    Integer boxed;\n"
+            "    Holder holder;\n"
+            "    int f() { return (int)boxed; }\n"
+            "    int g() { return (int)this.boxed; }\n"
+            "    int h() { return (int)holder.value; }\n"
+            "    int i() { var v = new Integer(1); return (int)v; }\n"
+            "    int j() { var p = boxed; return (int)p; }\n"
+            "    int k() { int plain = 1; return (int)plain; }\n"
+            "}\n")
+        idx = PJ.build_source_type_index(tdp)
+        src = (tdp / "A.java").read_text(encoding="utf-8")
+        cross_out, cross_n = PJ.normalize_primitive_unboxing(
+            src, type_index=idx, current_class="A")
+        check("cross-class numeric unboxing resolved", cross_n == 5, str(cross_n))
+        check("this.field resolved", "(this.boxed == null ? 0" in cross_out, cross_out)
+        check("other.field resolved", "(holder.value == null ? 0" in cross_out, cross_out)
+        check("var new-expression resolved", "(v == null ? 0" in cross_out, cross_out)
+        check("var alias resolved", "(p == null ? 0" in cross_out, cross_out)
+        check("plain int still untouched", "(int)plain" in cross_out, cross_out)
+
+    # 2. Static hiding invariance check — matched by parameter types, not arity
     with tempfile.TemporaryDirectory(prefix="jdec_test_hiding_") as td:
         tdp = Path(td)
         super_cls = tdp / "SuperClass.java"
         sub_cls = tdp / "SubClass.java"
-        super_cls.write_text("public class SuperClass {\n    public static String get(Object[] args) { return null; }\n}\n")
-        sub_cls.write_text("public class SubClass extends SuperClass {\n    public static Object get(Object[] args) { return null; }\n}\n")
+        super_cls.write_text("public class SuperClass {\n    public static String get(int a) { return null; }\n}\n")
+        sub_cls.write_text(
+            "public class SubClass extends SuperClass {\n"
+            "    public static Object get(int a) { return null; }\n"
+            "    public static Object get(String a) { return null; }\n"
+            "}\n")
         h_edits = PJ.check_static_hiding_invariance(tdp)
-        check("check_static_hiding_invariance applied edit", h_edits == 1)
+        check("check_static_hiding_invariance applied edit", h_edits == 1, str(h_edits))
         sub_txt = sub_cls.read_text()
-        check("subclass static method return type narrowed to superclass", "public static String get(" in sub_txt)
+        check("matching signature narrowed to superclass return type",
+              "public static String get(int a)" in sub_txt, sub_txt)
+        check("same-arity overload with different parameter type is untouched",
+              "public static Object get(String a)" in sub_txt, sub_txt)
 
-    # 3. Safe fallback dispatcher and skeletons
+    # 3. Safe fallback dispatcher: explicit opt-in profile only
     d6_code = SB.generate_safe_fallback_dispatcher("dev.sakura.client.d6")
     check("dispatcher stub has package", "package dev.sakura.client;" in d6_code)
+    check("dispatcher stub is marked as synthesized", SB.STUB_MARKER in d6_code)
     check("dispatcher stub returns emptyList", "return Collections.emptyList();" in d6_code)
     check("dispatcher stub returns emptyMap", "return Collections.emptyMap();" in d6_code)
     check("dispatcher stub returns emptySet", "return Collections.emptySet();" in d6_code)
     check("dispatcher stub returns emptyIterator", "return Collections.emptyIterator();" in d6_code)
-    check("dispatcher stub returns false for aZ", "return false;" in d6_code)
     check("dispatcher stub returns no-op runnable", "return () -> {};" in d6_code)
+    check("empty profile produces a bodyless stub",
+          "aList" not in SB.generate_safe_fallback_dispatcher("x.Y", profile={}))
 
-    # Enrich fallback stubs in a project
+    # Enrich only machine-synthesised stubs, never a real class by filename
     with tempfile.TemporaryDirectory(prefix="jdec_test_enrich_") as td:
         tdp = Path(td)
         src_dir = tdp / "src" / "main" / "java" / "dev" / "sakura" / "client"
         src_dir.mkdir(parents=True)
-        stub_f = src_dir / "d6.java"
+        stub_f = src_dir / "Synth.java"
         stub_f.write_text(
+            "package dev.sakura.client;\n"
+            f"{SB.STUB_MARKER}\n"
+            "public class Synth {\n"
+            "    public static <T> List<T> aList(Object... args) { return null; }\n"
+            "}\n"
+        )
+        real_f = src_dir / "d6.java"
+        real_f.write_text(
             "package dev.sakura.client;\n"
             "public class d6 {\n"
             "    public static <T> List<T> aList(Object... args) { return null; }\n"
-            "    public static boolean aZ(Object... args) { return null; }\n"
             "}\n"
         )
         enr_count = PJ.enrich_safe_fallback_stubs(tdp)
-        check("enrich_safe_fallback_stubs applied", enr_count == 1)
-        enr_txt = stub_f.read_text()
-        check("stub upgraded to Collections.emptyList()", "Collections.emptyList()" in enr_txt)
-        check("stub upgraded aZ to false", "return false;" in enr_txt)
+        check("enrich_safe_fallback_stubs touches only the marked stub", enr_count == 1, str(enr_count))
+        check("marked stub upgraded to Collections.emptyList()",
+              "Collections.emptyList()" in stub_f.read_text())
+        check("unmarked class named d6 is untouched",
+              "return null;" in real_f.read_text(), real_f.read_text())
 
     # 4. Intermediary Grounding
     mc_fixture = MIXIN if MIXIN.is_file() else build_fixtures.ensure_mixin_jar()
@@ -3436,7 +3511,125 @@ def test_sakura_architecture_improvements() -> None:
     check("empty grounding is not available", not empty_grounding.is_available())
     check("empty grounding returns None for stub", empty_grounding.generate_grounded_stub("Foo") is None)
 
-    # 5. Event Pipeline Detector & Weaver
+    # 4b. Grounded stubs for enum / interface must compile
+    javac = shutil.which("javac")
+    if javac is None:
+        print("  (skipped: javac not on PATH)")
+    else:
+        with tempfile.TemporaryDirectory(prefix="jdec_test_ground_compile_") as td:
+            tdp = Path(td)
+            (tdp / "E.java").write_text(
+                "public enum E { A, B; public int f() { return 1; } }")
+            (tdp / "I.java").write_text(
+                "public interface I {\n"
+                "    int f();\n"
+                "    static int g() { return 1; }\n"
+                "    default int h() { return 2; }\n"
+                "}\n")
+            subprocess.run([javac, "-d", str(tdp), str(tdp / "E.java"), str(tdp / "I.java")],
+                           check=True, capture_output=True)
+            jar = tdp / "ground.jar"
+            with zipfile.ZipFile(jar, "w") as z:
+                z.write(tdp / "E.class", "E.class")
+                z.write(tdp / "I.class", "I.class")
+            g = MM.IntermediaryGrounding(jar)
+            gen_dir = tdp / "gen"
+            gen_dir.mkdir()
+            for cls in ("E", "I"):
+                code = g.generate_grounded_stub(cls)
+                check(f"grounded {cls} stub generated", code is not None, str(code))
+                (gen_dir / f"{cls}.java").write_text(code or "")
+            r = subprocess.run([javac, "-d", str(gen_dir),
+                                str(gen_dir / "E.java"), str(gen_dir / "I.java")],
+                               capture_output=True, text=True, errors="replace")
+            check("grounded enum/interface stubs compile", r.returncode == 0,
+                  (r.stderr or r.stdout)[:400])
+
+    # 4c. Generic Signature attributes survive stub generation
+    if javac is not None:
+        with tempfile.TemporaryDirectory(prefix="jdec_test_generic_") as td:
+            tdp = Path(td)
+            (tdp / "G.java").write_text(
+                "import java.util.*;\n"
+                "import java.util.function.Function;\n"
+                "public class G<T extends Number> {\n"
+                "    public List<String> names;\n"
+                "    public Map<String, T> table;\n"
+                "    public <R> List<R> map(List<R> in, Function<T, R> fn) { return null; }\n"
+                "    public T value() { return null; }\n"
+                "    public void run() throws java.io.IOException {}\n"
+                "}\n")
+            subprocess.run([javac, "-d", str(tdp), str(tdp / "G.java")],
+                           check=True, capture_output=True)
+            jar = tdp / "g.jar"
+            with zipfile.ZipFile(jar, "w") as z:
+                z.write(tdp / "G.class", "G.class")
+            code = MM.IntermediaryGrounding(jar).generate_grounded_stub("G") or ""
+            check("class type parameter preserved",
+                  "public class G<T extends java.lang.Number>" in code, code)
+            check("generic field preserved", "java.util.List<java.lang.String> names;" in code, code)
+            check("generic field with type var preserved",
+                  "java.util.Map<java.lang.String, T> table;" in code, code)
+            check("generic method type parameter preserved", "<R> java.util.List<R> map(" in code, code)
+            check("generic parameter type preserved",
+                  "java.util.function.Function<T, R>" in code, code)
+            check("throws clause preserved", "throws java.io.IOException" in code, code)
+            (tdp / "gen").mkdir()
+            (tdp / "gen" / "G.java").write_text(code)
+            r = subprocess.run([javac, "-d", str(tdp / "gen"), str(tdp / "gen" / "G.java")],
+                               capture_output=True, text=True, errors="replace")
+            check("grounded generic stub compiles", r.returncode == 0,
+                  (r.stderr or r.stdout)[:400])
+
+        # intersection bounds: T extends A & B
+        with tempfile.TemporaryDirectory(prefix="jdec_test_intersection_") as td:
+            tdp = Path(td)
+            (tdp / "B.java").write_text(
+                "public class B<T extends Number & Comparable<T>> {\n"
+                "    public T value() { return null; }\n"
+                "}\n")
+            subprocess.run([javac, "-d", str(tdp), str(tdp / "B.java")],
+                           check=True, capture_output=True)
+            jar = tdp / "b.jar"
+            with zipfile.ZipFile(jar, "w") as z:
+                z.write(tdp / "B.class", "B.class")
+            code = MM.IntermediaryGrounding(jar).generate_grounded_stub("B") or ""
+            check("intersection bound preserved",
+                  "T extends java.lang.Number & java.lang.Comparable<T>" in code, code)
+            (tdp / "gen").mkdir()
+            (tdp / "gen" / "B.java").write_text(code)
+            r = subprocess.run([javac, "-d", str(tdp / "gen"), str(tdp / "gen" / "B.java")],
+                               capture_output=True, text=True, errors="replace")
+            check("intersection-bound stub compiles", r.returncode == 0,
+                  (r.stderr or r.stdout)[:400])
+
+        # declaration / type annotations are intentionally dropped; that must
+        # not make the generated stub uncompilable
+        with tempfile.TemporaryDirectory(prefix="jdec_test_ann_") as td:
+            tdp = Path(td)
+            (tdp / "Ann.java").write_text(
+                "import java.util.*;\n"
+                "public class Ann {\n"
+                "    @Deprecated public List<String> names;\n"
+                "    @SuppressWarnings(\"unchecked\")\n"
+                "    public <T> T id(T x) { return x; }\n"
+                "}\n")
+            subprocess.run([javac, "-d", str(tdp), str(tdp / "Ann.java")],
+                           check=True, capture_output=True)
+            jar = tdp / "ann.jar"
+            with zipfile.ZipFile(jar, "w") as z:
+                z.write(tdp / "Ann.class", "Ann.class")
+            code = MM.IntermediaryGrounding(jar).generate_grounded_stub("Ann") or ""
+            check("annotations are dropped, generics kept",
+                  "@Deprecated" not in code and "java.util.List<java.lang.String>" in code, code)
+            (tdp / "gen").mkdir()
+            (tdp / "gen" / "Ann.java").write_text(code)
+            r = subprocess.run([javac, "-d", str(tdp / "gen"), str(tdp / "gen" / "Ann.java")],
+                               capture_output=True, text=True, errors="replace")
+            check("annotated generic stub compiles", r.returncode == 0,
+                  (r.stderr or r.stdout)[:400])
+
+    # 5. Event pipeline detection is read-only and target-configurable
     with tempfile.TemporaryDirectory(prefix="jdec_test_event_") as td:
         tdp = Path(td)
         kb_file = tdp / "MixinKeyboard.java"
@@ -3461,19 +3654,156 @@ def test_sakura_architecture_improvements() -> None:
             "    }\n"
             "}\n"
         )
+        before = kb_file.read_text()
         pipe_info = MM.detect_event_pipelines(tdp)
         check("event pipeline detected keyboard mixin", pipe_info.keyboard_mixin == "MixinKeyboard")
         check("event pipeline detected key event class", pipe_info.key_event_class == "YG")
         check("event pipeline detected network mixin", pipe_info.network_mixin == "MixinNetwork")
         check("event pipeline detected chat event class", pipe_info.chat_event_class == "Ym")
+        check("detection does not modify sources", kb_file.read_text() == before)
+        check("event weaver was removed", not hasattr(MM, "weave_event_dispatcher_hook"))
 
-        woven = MM.weave_event_dispatcher_hook(tdp, pipe_info, default_keys=[344, 96, 89, 260])
-        check("event dispatcher hook woven successfully", woven)
-        kb_after = kb_file.read_text()
-        check("keyboard mixin has event dispatcher hook", "[jdec: event dispatcher hook]" in kb_after and "344" in kb_after)
+        custom = MM.detect_event_pipelines(
+            tdp, keyboard_targets={"Keyboard"}, network_targets={"class_634"})
+        check("custom target sets are honoured",
+              custom.keyboard_mixin == "MixinKeyboard" and custom.network_mixin == "MixinNetwork")
 
-        woven_second = MM.weave_event_dispatcher_hook(tdp, pipe_info)
-        check("event dispatcher hook is idempotent", not woven_second)
+
+def test_grounding_real_mc_sample() -> None:
+    """Independent validation: real MC classes, not the Sakura fixture."""
+    print("grounding: real MC classes generate compilable stubs")
+    import re as _re
+    from jdec import classfile as CF
+    from jdec import mcmod as MM
+
+    javac = shutil.which("javac")
+    if javac is None:
+        print("  (skipped: javac not on PATH)")
+        return
+    with zipfile.ZipFile(MC_JAR) as z:
+        jar_classes = {n[:-6] for n in z.namelist()
+                       if n.endswith(".class") and not n.startswith("META-INF/")}
+    g = MM.IntermediaryGrounding(MC_JAR)
+
+    picked: dict[str, list[str]] = {"class": [], "interface": [], "enum": [], "record": []}
+    for cn in sorted(jar_classes):
+        if "$" in cn:
+            continue
+        k = g.get_class_kind(cn)
+        if len(picked.setdefault(k, [])) < 2:
+            picked[k].append(cn)
+        if all(len(v) >= 2 for v in picked.values()):
+            break
+    check("real jar exposes all four type kinds", all(picked.values()),
+          str({k: len(v) for k, v in picked.items()}))
+
+    with tempfile.TemporaryDirectory(prefix="jdec_test_mc_ground_") as td:
+        gen = Path(td) / "gen"
+        gen.mkdir()
+        files = []
+        for names in picked.values():
+            for cn in names:
+                cf = g.get_classfile(cn)
+                need = {cf.utf8(e[1][0]) for e in cf.cp if e and e[0] == CF.C_CLASS}
+                for m in list(cf.methods) + list(cf.fields):
+                    for t in _re.findall(r"L([^;]+);", cf.utf8(m.descriptor_index)):
+                        need.add(t)
+                external = [t for t in need if t not in jar_classes and not t.startswith(
+                    ("java/", "javax/", "jdk/", "sun/", "com/sun/"))]
+                if external:
+                    continue
+                code = g.generate_grounded_stub(cn)
+                if code is None:
+                    continue
+                p = gen / (cn.replace("/", ".") + ".java")
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(code)
+                files.append(p)
+        check("real MC stubs generated", len(files) >= 4, str(len(files)))
+        r = subprocess.run([javac, "-nowarn", "-cp", str(MC_JAR), "-d", str(gen)]
+                           + [str(p) for p in files],
+                           capture_output=True, text=True, errors="replace")
+        check("real MC stubs compile", r.returncode == 0, (r.stderr or r.stdout)[:400])
+
+    nested = next((cn for cn in jar_classes if "$" in cn), None)
+    if nested:
+        check("nested/anonymous classes are refused, not mis-declared",
+              g.generate_grounded_stub(nested) is None, nested)
+
+
+def test_real_zkm_clean_pipeline() -> None:
+    """Real ZKM sample: the cleaning pass must be safe and idempotent."""
+    print("real sample: ZKM jar survives the cleaning pipeline")
+    from jdec.score import _count_braces
+
+    sample_dir = os.environ.get("JDEC_SAMPLE_DIR")
+    roots = [Path(sample_dir)] if sample_dir else [ROOT.parent, Path("D:/MC/samples")]
+    jar = next((r / "Myau0729-obf.jar" for r in roots
+                if (r / "Myau0729-obf.jar").exists()), None)
+    if jar is None:
+        print("  (skipped: real sample not present; set JDEC_SAMPLE_DIR to enable)")
+        return
+
+    with tempfile.TemporaryDirectory(prefix="jdec_test_zkm_clean_") as td:
+        out = Path(td) / "out"
+        rep = decompile(jar, out, ROOT / "engines", jobs=2, timeout=600,
+                        verify_all=False, clean_work=True, limit=12)
+        src = out / "src"
+        files = list(src.rglob("*.java")) if src.is_dir() else []
+        check("real ZKM slice decompiled", len(files) > 0,
+              f"ok={rep.ok} partial={rep.partial} files={len(files)}")
+
+        idx = PJ.build_source_type_index(src)
+        unstable = introduced_imbalance = 0
+        for f in files:
+            code = f.read_text(encoding="utf-8", errors="replace")
+            cleaned, _ = PJ.clean_source_for_compilation(
+                code, type_index=idx, current_class=f.stem)
+            again, _ = PJ.clean_source_for_compilation(
+                cleaned, type_index=idx, current_class=f.stem)
+            if again != cleaned:
+                unstable += 1
+            raw_opens, raw_closes = _count_braces(code)
+            new_opens, new_closes = _count_braces(cleaned)
+            # a decompiler may already have emitted an unbalanced file; only
+            # imbalance introduced by cleaning counts as a regression
+            if raw_opens == raw_closes and new_opens != new_closes:
+                introduced_imbalance += 1
+        check("cleaning is idempotent on real obfuscated sources", unstable == 0, str(unstable))
+        check("cleaning does not introduce brace imbalance",
+              introduced_imbalance == 0, str(introduced_imbalance))
+
+
+def test_bridge_prune_and_clean_idempotence() -> None:
+    """A long bridge method must be commented in full, not truncated at 30 lines."""
+    print("project: bridge pruning stays balanced and cleaning is idempotent")
+    from jdec.score import _count_braces
+
+    filler = "\n".join(f"        int v{i} = {i};" for i in range(60))
+    src = (
+        "public class B {\n"
+        "    public String get() {\n"
+        "        return \"x\";\n"
+        "    }\n"
+        "    // $FF: bridge method\n"
+        "    public Object get() {\n"
+        f"{filler}\n"
+        "        return this.get();\n"
+        "    }\n"
+        "    public void tail() {\n"
+        "        int z = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    cleaned, changes = PJ.clean_source_for_compilation(src)
+    opens, closes = _count_braces(cleaned)
+    check("bridge pruning keeps braces balanced", opens == closes, f"{opens}/{closes}")
+    check("long bridge body fully commented",
+          "// [jdec: stripped duplicate bridge method]         int v59 = 59;" in cleaned,
+          "line 59 not commented")
+    check("real method kept", "public String get()" in cleaned)
+    again, _ = PJ.clean_source_for_compilation(cleaned)
+    check("cleaning is idempotent", again == cleaned)
 
 
 def main() -> int:
@@ -3539,6 +3869,7 @@ def main() -> int:
     test_cfg_and_dynamic_mocks()
     test_bvm_and_native_extensions()
     test_sakura_architecture_improvements()
+    test_bridge_prune_and_clean_idempotence()
     if build_fixtures.ensure_mixin_jar() is None:
         print("skipping mixin tests: tests/mixin.jar could not be built "
               "(run tests/build_fixtures.py)")
@@ -3562,6 +3893,8 @@ def main() -> int:
         test_remapped_class_is_valid_bytecode()
         test_mc_is_not_flow_obfuscated()
         test_real_zkm_sample()
+        test_grounding_real_mc_sample()
+        test_real_zkm_clean_pipeline()
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

@@ -795,3 +795,181 @@ project.py 重复声明自动注释超范围（AST 级）、indy 死类高估（
 ## 7. 回滚方式
 
 `git checkout HEAD~1` 或 `git restore --staged . && git restore .`
+
+---
+
+# 变更报告：Sakura 能力的去样本化与安全边界收敛
+
+> 生成时间：2026-10-18
+> 模式：Mode B 修 bug & 通用性收敛
+> 输入：对 11f691b 的复核（3 项已复现缺陷、1 项死代码、1 组样本专名硬编码）
+> 基线：618 passed → **628 passed, 0 failed**
+
+## 1. 任务目标
+
+把上一轮从单一样本沉淀的能力从“在 Sakura 上有效”收敛为“在明确边界内可复现”，并删除无法兑现的织入功能。
+
+## 2. 逐项处置
+
+| 问题 | 处置 | 证据 |
+| --- | --- | --- |
+| `normalize_primitive_unboxing` 改写注释 | 新增 `_mask_noncode()`，先在屏蔽注释/字符串/字符字面量的文本上匹配，再按偏移写回原串 | 修复前 `// boolean b = (boolean)x;` 被改写；修复后 `edits=0` |
+| 只处理 `boolean`，命名却覆盖全部原语 | 新增 `include_numeric`（默认关闭），支持 `int/long/float/double/char/byte/short`；仅接受无副作用的简单左值，`call()`/`arr[0]` 保持原样 | `(int)boxed` 改写 1 处，`(int)call()` 改写 0 处 |
+| 静态隐藏按参数个数匹配，误改重载 | `_param_types()` 提取参数类型，签名键改为 (方法名, 参数类型元组)；改写用参数模式精确定位 | `get(int)` 被收窄，`get(String)` 保持不变 |
+| 枚举存根生成非法 Java | enum 输出 `enum E { ; ... }`，跳过 ACC_ENUM 常量与 `values/valueOf`；record 退化为 final class | 生成结果经 javac 编译通过 |
+| 接口存根缺少 `default` / 字段未初始化 | 非 static 非 abstract 的接口方法补 `default`；接口字段输出 `public static final T x = <default>;` | 含 `f()/g()/h()` 的接口存根经 javac 编译通过 |
+| `d6`/`Dispatcher`/`dummyMethod` 按文件名触发改写 | 引入 `stubs.STUB_MARKER`；`enrich_safe_fallback_stubs` 只处理带标记的合成桩或显式传入的文件 | 未标记的 `d6.java` 保持 `return null;` |
+| `aList/aZ/aI` 写入通用桩模板 | 从 Repair 9 的通用桩删除；收进显式 `SAFE_FALLBACK_PROFILE`，`generate_safe_fallback_dispatcher` 默认不参与导出 | 通用桩只保留 `dummy*` 成员 |
+| 事件织入是空实现且未接线 | 删除 `weave_event_dispatcher_hook`；保留只读 `detect_event_pipelines`，目标集合可配置 | 测试断言 `not hasattr(MM, "weave_event_dispatcher_hook")`，并断言检测不修改源码 |
+
+## 3. 文件变更
+
+| 文件 | + | - |
+| --- | --- | --- |
+| `jdec/jdec/project.py` | 347 | 改动行 |
+| `jdec/jdec/mcmod.py` | 232 | 改动行 |
+| `jdec/jdec/stubs.py` | 71 | 改动行 |
+| `jdec/tests/run_tests.py` | 118 | 改动行 |
+| `study/SAKURA-RULES-PROVENANCE.md` | 新增 | 规则来源与可复现性说明 |
+
+## 4. 验证
+
+| 检查项 | 命令 | 结果 |
+| --- | --- | --- |
+| 全量回归 | `python jdec/tests/run_tests.py` | **628 passed, 0 failed** |
+| 注释/字面量不被改写 | 新增负向断言 | 通过 |
+| 数值解箱仅作用于简单左值 | 新增负向断言 | 通过 |
+| 同参数个数重载不误改 | 新增负向断言 | 通过 |
+| enum/interface 存根可编译 | 生成后调用 javac | 通过 |
+| 未标记的 `d6.java` 不被改写 | 新增负向断言 | 通过 |
+
+## 5. 遗留风险
+
+- 数值解箱默认关闭：源码文本无法判断操作数是否为引用类型，默认开启会破坏 `(int)someInt`。
+- 泛型 Signature 仍被擦除，存根只保证可编译，不保证泛型精确。
+- 规则仍只经 Sakura 单样本验证；通用性需要第二、第三个独立样本。
+
+## 6. 回滚
+
+`git checkout -- jdec/jdec/project.py jdec/jdec/mcmod.py jdec/jdec/stubs.py jdec/tests/run_tests.py`
+
+---
+
+# 变更报告：三项遗留收敛（数值解箱类型判定 / 泛型存根 / 真实样本验证）
+
+> 生成时间：2026-10-18
+> 模式：Mode B 补齐上一轮明确未解决的边界
+> 基线：628 → **637 passed（核心）/ 657 passed（--with-mc）**
+
+## 1. 数值解箱：从"默认关闭"改为"按声明类型判定"
+
+上一轮的结论是"源码文本无法判断 `(int)x` 中 x 是否为引用，所以默认关闭"。本轮补了一个轻量符号表：
+
+- `_declared_types()` 从屏蔽后的源码收集局部变量、字段、参数声明（`<type> <name>` 后跟 `= ; , ) :`）。
+- `_reference_kind()` 判定：原始类型 → False，`Object/String/包装类/大写类名` → True，找不到声明 → None。
+- 只有 True 才改写；False（`(int)someInt` 这类合法空转）与 None（未知）保持原样。
+
+因此 `include_numeric` 默认改为 **True**，但仍不会误伤 `int` 变量和未知符号。
+
+## 2. 泛型存根：解析 Signature / Exceptions
+
+- 新增 `_attr_text()` 读取成员/类的 `Signature` 属性，`_attr_exceptions()` 读取 `Exceptions` 属性。
+- 新增 `_SigParser`（JVMS §4.7.9.1）：支持类类型、类型实参、通配符 `* + -`、类型变量、数组、内部类 `Outer<T>.Inner`。
+- `_parse_class_signature` / `_parse_method_signature` 分别处理类级与方法级类型参数。
+- 存根现在保留 `class G<T extends Number>`、`List<String>`、`Map<String, T>`、`<R> List<R> map(...)`、`throws IOException`。
+- 新增 `_unresolved_type_vars()`：混淆器可能保留方法 Signature 却删掉类 Signature，此时 `T` 无声明；检测到未声明类型变量就回退到擦除描述符，避免产出不可编译源码。
+- 新增 `_source_types()`：把二进制嵌套类名 `vr$a` 转成源码形式 `vr.a`（仅当 `vr` 确实存在于 jar 时）。
+
+## 3. 真实样本验证（不再只有 Sakura）
+
+新增 `test_grounding_real_mc_sample()`（`--with-mc` 时运行），用 `tests/mc/client_1.20.4.jar`：
+
+- 抽取 class / interface / enum / record 各 2 个；
+- 过滤掉引用外部库（Brigadier 等不在 jar 内）的类；
+- 生成存根后带 `-cp client.jar` 编译，要求 rc=0；
+- 断言嵌套/匿名类（`Outer$1`）被拒绝而不是错误声明。
+
+实测 8 个存根全部编译通过。真实样本还暴露并修复了两个形态问题：
+
+| 形态 | 原行为 | 现行为 |
+| --- | --- | --- |
+| 枚举常量子类 `X$1`（ACC_ENUM 但父类不是 `java.lang.Enum`） | 生成 `enum X$1 extends X`，javac 拒绝 | 识别为匿名子类，`$` 类直接拒绝生成 |
+| 描述符引用嵌套类 `vr$a` | 生成 `vr$a`，源码无法解析 | 按 jar 内是否存在 `vr` 转为 `vr.a` |
+
+## 4. 验证
+
+| 检查项 | 结果 |
+| --- | --- |
+| 核心回归 | **637 passed, 0 failed** |
+| `--with-mc` 扩展 | **657 passed, 0 failed** |
+| 真实 MC 存根编译 | 8/8 通过（class/interface/enum/record） |
+| 泛型存根编译 | 通过（含类型参数、通配符、throws） |
+| 数值解箱 | `Integer/Object` 改写，`int/未知/call()` 不改写 |
+
+## 5. 仍需注意
+
+- 数值解箱的符号表是文本级启发式：跨类字段、`var`、复杂表达式仍判为未知并跳过。这是有意的保守取舍。
+- 泛型只覆盖 `Signature` 能表达的部分；注解类型、复杂交叉类型边界未特殊处理。
+- 真实样本验证用的是 MC 官方 jar，不等于"任意混淆器"验证；Sakura 之外的第二类真实保护样本仍需补。
+
+## 6. 回滚
+
+`git checkout -- jdec/jdec/project.py jdec/jdec/mcmod.py jdec/tests/run_tests.py`
+
+---
+
+# 变更报告：三项遗留的剩余边界（跨类类型解析 / 交叉边界 / 真实 ZKM 清理）
+
+> 生成时间：2026-10-18
+> 模式：Mode B 收尾
+> 基线：637 → **651 passed（核心）/ 674 passed（--with-mc）**
+
+## 1. 数值解箱：从"单文件声明"扩展到"项目类型索引"
+
+上一轮只解析当前文件的局部声明，`this.field`、`other.field`、`var` 仍判为未知。本轮新增：
+
+- `SourceTypeIndex` / `build_source_type_index()`：扫描工程内所有 `.java`，按大括号深度只收集类体第一层的字段，记录 `类 -> 字段 -> 类型` 与 `类 -> 父类`，支持沿继承链查找。
+- `_resolve_operand_type()`：解析 `x`、`this.x`、`obj.field`、`obj.a.b`。
+- `var` 推断：`new T(...)`、`(T) ...`、`var y = x`（x 已知）三种形态。
+- `clean_source_for_compilation()` 与 `normalize_primitive_unboxing()` 增加 `type_index` / `current_class`；导出阶段在 Pass 2 前建一次索引并逐文件传入。
+
+实测覆盖：`boxed`、`this.boxed`、`holder.value`、`var v = new Integer(1)`、`var p = boxed` 全部改写；`int plain` 仍不动。
+
+## 2. 泛型：交叉边界与注解
+
+- `_parse_type_parameters()` 现在保留全部边界：`T extends A & B & ...`，而不是只取第一个。
+- 声明注解 / 类型注解不进入 `Signature`，存根有意丢弃；新增用例验证丢弃后仍可编译（`@Deprecated` 字段 + `@SuppressWarnings` 泛型方法）。
+
+## 3. 真实 ZKM 样本：清理管线回归，并修出一个真 bug
+
+新增 `test_real_zkm_clean_pipeline()`（`--with-mc`），对 `Myau0729-obf.jar` 反编译 12 个类后跑清理管线，断言幂等且不引入括号失衡。**该用例第一次运行就失败**，定位到 `prune_duplicate_bridge_methods` 的三个缺陷：
+
+| 缺陷 | 后果 | 修复 |
+| --- | --- | --- |
+| 方法体扫描上限 30 行 | 长桥接方法只注释前 30 行，剩余 `}` 留下 → 括号失衡、源码不可编译 | 去掉上限，按 `{`/`}` 深度扫描到方法结束；定位不到结束就跳过 |
+| 每个签名只裁剪一个重复 | 3 个以上重复需多轮才收敛，非幂等 | 一次收集全部重复，保留一个、注释其余 |
+| 桥接标记在注释里，却被掩码后匹配 | `$FF: bridge method` 永远匹配不到 | 标记检测改用原始行，括号/委托检测仍用掩码行 |
+| 行拼接丢失尾部换行 | 第二次清理少一个 `\n`，非幂等 | `clean_source_for_compilation` 结尾统一补一个换行 |
+
+修复后：12 个真实类全部幂等、括号平衡。
+
+## 4. 验证
+
+| 检查项 | 结果 |
+| --- | --- |
+| 核心回归 | **651 passed, 0 failed** |
+| `--with-mc` 扩展 | **674 passed, 0 failed** |
+| 真实 ZKM 清理 | 12/12 幂等、无新增失衡 |
+| 真实 MC 存根 | 8/8 编译通过 |
+| 跨类/this/var 解箱 | 5 处命中，`int` 空转保持 |
+| 交叉边界 / 注解 | 生成后 javac 通过 |
+
+## 5. 仍然存在的边界（明确不做过度承诺）
+
+- 类型索引只看字段与简单局部，**不做方法返回值推断**：`(int)getBoxed()` 这类仍跳过（且调用表达式本来就不在改写范围）。
+- 泛型不做注解类型重建（有意丢弃）、不做复杂交叉类型的语义校验。
+- 真实保护器样本只有 ZKM（Myau）与 Sakura；**Allatori / Stringer 本机没有样本**，这两类仍需外部提供后才能回归。
+
+## 6. 回滚
+
+`git checkout -- jdec/jdec/project.py jdec/jdec/mcmod.py jdec/tests/run_tests.py`

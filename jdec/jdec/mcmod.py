@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -753,6 +754,210 @@ def _parse_jvm_descriptor(desc: str) -> tuple[list[str], str]:
     return params, ret_type
 
 
+_PRIM_SIG = {
+    "B": "byte", "C": "char", "D": "double", "F": "float", "I": "int",
+    "J": "long", "S": "short", "Z": "boolean", "V": "void",
+}
+
+
+def _attr_text(cf: CF.ClassFile, attrs_blob: bytes, wanted: str) -> str | None:
+    """Read a UTF-8-valued attribute (currently only `Signature`)."""
+    if not attrs_blob or len(attrs_blob) < 2:
+        return None
+    count = struct.unpack_from(">H", attrs_blob, 0)[0]
+    p = 2
+    for _ in range(count):
+        if p + 6 > len(attrs_blob):
+            return None
+        ni, ln = struct.unpack_from(">HI", attrs_blob, p)
+        p += 6
+        if p + ln > len(attrs_blob):
+            return None
+        if cf.utf8(ni) == wanted:
+            raw = attrs_blob[p:p + ln]
+            if len(raw) >= 2:
+                return cf.utf8(struct.unpack_from(">H", raw, 0)[0])
+            return None
+        p += ln
+    return None
+
+
+def _attr_exceptions(cf: CF.ClassFile, attrs_blob: bytes) -> list[str]:
+    """Read the `Exceptions` attribute (checked exceptions live there, not in Signature)."""
+    if not attrs_blob or len(attrs_blob) < 2:
+        return []
+    count = struct.unpack_from(">H", attrs_blob, 0)[0]
+    p = 2
+    for _ in range(count):
+        if p + 6 > len(attrs_blob):
+            return []
+        ni, ln = struct.unpack_from(">HI", attrs_blob, p)
+        p += 6
+        if p + ln > len(attrs_blob):
+            return []
+        if cf.utf8(ni) == "Exceptions" and ln >= 2:
+            n = struct.unpack_from(">H", attrs_blob, p)[0]
+            out = []
+            for i in range(n):
+                off = p + 2 + i * 2
+                if off + 2 > p + ln:
+                    break
+                idx = struct.unpack_from(">H", attrs_blob, off)[0]
+                out.append(cf.class_name(idx).replace("/", ".").replace("$", "."))
+            return out
+        p += ln
+    return []
+
+
+class _SigParser:
+    """Minimal JVMS §4.7.9.1 signature parser (generics, wildcards, type vars)."""
+
+    def __init__(self, s: str):
+        self.s = s
+        self.i = 0
+
+    def peek(self) -> str:
+        return self.s[self.i] if self.i < len(self.s) else ""
+
+    def expect(self, ch: str) -> None:
+        if self.peek() != ch:
+            raise ValueError(f"signature: expected {ch!r} at {self.i}")
+        self.i += 1
+
+    def read_until(self, chars: str) -> str:
+        j = self.i
+        while j < len(self.s) and self.s[j] not in chars:
+            j += 1
+        out = self.s[self.i:j]
+        self.i = j
+        return out
+
+    def type_sig(self) -> str:
+        c = self.peek()
+        if c in _PRIM_SIG:
+            self.i += 1
+            return _PRIM_SIG[c]
+        if c == "[":
+            self.i += 1
+            return self.type_sig() + "[]"
+        if c == "T":
+            self.i += 1
+            name = self.read_until(";")
+            if self.peek() == ";":
+                self.i += 1
+            return name or "Object"
+        if c == "L":
+            return self.class_type()
+        raise ValueError(f"signature: unexpected {c!r} at {self.i}")
+
+    def type_args(self) -> str:
+        self.expect("<")
+        args = []
+        while self.peek() not in (">", ""):
+            c = self.peek()
+            if c == "*":
+                self.i += 1
+                args.append("?")
+            elif c == "+":
+                self.i += 1
+                args.append("? extends " + self.type_sig())
+            elif c == "-":
+                self.i += 1
+                args.append("? super " + self.type_sig())
+            else:
+                args.append(self.type_sig())
+        self.expect(">")
+        return "<" + ", ".join(args) + ">"
+
+    def class_type(self) -> str:
+        self.expect("L")
+        out = ""
+        while True:
+            c = self.peek()
+            if c == "<":
+                out += self.type_args()
+            elif c == ".":
+                self.i += 1
+                out += "."
+            elif c == ";":
+                self.i += 1
+                break
+            elif c == "":
+                break
+            else:
+                out += self.read_until("<.;").replace("/", ".").replace("$", ".")
+        return out or "Object"
+
+
+def _parse_type_signature(sig: str) -> str:
+    return _SigParser(sig).type_sig()
+
+
+def _parse_type_parameters(p: _SigParser) -> list[str]:
+    tparams: list[str] = []
+    if p.peek() != "<":
+        return tparams
+    p.i += 1
+    while p.peek() not in (">", ""):
+        name = p.read_until(":")
+        p.expect(":")
+        bounds: list[str] = []
+        if p.peek() != ":":
+            bounds.append(p.type_sig())
+        while p.peek() == ":":
+            p.i += 1
+            bounds.append(p.type_sig())
+        usable = [b for b in bounds if b and b != "java.lang.Object"]
+        if usable:
+            tparams.append(f"{name} extends " + " & ".join(usable))
+        else:
+            tparams.append(name)
+    p.expect(">")
+    return tparams
+
+
+def _parse_method_signature(sig: str) -> tuple[list[str], list[str], str, list[str]]:
+    p = _SigParser(sig)
+    tparams = _parse_type_parameters(p)
+    p.expect("(")
+    params: list[str] = []
+    while p.peek() not in (")", ""):
+        params.append(p.type_sig())
+    p.expect(")")
+    ret = p.type_sig()
+    throws: list[str] = []
+    while p.peek() == "^":
+        p.i += 1
+        throws.append(p.type_sig())
+    return tparams, params, ret, throws
+
+
+def _parse_class_signature(sig: str) -> tuple[list[str], str | None, list[str]]:
+    p = _SigParser(sig)
+    tparams = _parse_type_parameters(p)
+    sup = None
+    if p.peek() == "L":
+        sup = p.class_type()
+    ifaces: list[str] = []
+    while p.peek() == "L":
+        ifaces.append(p.class_type())
+    return tparams, sup, ifaces
+
+
+def _unresolved_type_vars(types: list[str], declared: set[str]) -> bool:
+    """True when a signature references a type variable the class never declared.
+
+    Obfuscators sometimes keep a method Signature while dropping the class-level
+    one; emitting `T` (including inside `List<T>`) in that case produces
+    uncompilable source, so the caller must fall back to the erased descriptor.
+    """
+    for t in types:
+        for tok in re.findall(r"\b[A-Z][A-Z0-9]?\b", t):
+            if tok not in declared:
+                return True
+    return False
+
+
 class IntermediaryGrounding:
     """Grounds Minecraft intermediary symbol generation against an actual client-intermediary.jar.
 
@@ -814,8 +1019,41 @@ class IntermediaryGrounding:
             return "record"
         return "class"
 
+    def _dollar_to_dot(self, tok: str) -> str:
+        """`vr$a` -> `vr.a` when `vr` is a class in the jar (nested class).
+
+        A `$` that is part of a genuine top-level name is left alone.
+        """
+        parts = tok.split(".")
+        for i, seg in enumerate(parts):
+            if "$" not in seg:
+                continue
+            head = seg.split("$", 1)[0]
+            outer = "/".join(parts[:i] + [head])
+            if outer in self._namelist:
+                parts[i] = seg.replace("$", ".")
+                return ".".join(parts)
+            return tok
+        return tok
+
+    def _source_types(self, text: str) -> str:
+        """Rewrite binary nested-class names to source form inside a type string."""
+        if not text or "$" not in text:
+            return text
+        return re.sub(r"[A-Za-z_$][A-Za-z0-9_$.]*", lambda m: self._dollar_to_dot(m.group(0)), text)
+
     def generate_grounded_stub(self, slash_or_dotted: str) -> str | None:
-        """Generate high-fidelity Java source for a Minecraft intermediary class."""
+        """Generate Java source for a class read from the real intermediary jar.
+
+        The stub reproduces the type's kind, hierarchy, fields and method
+        signatures with safe default bodies so surrounding decompiled code
+        compiles. It does not reproduce behaviour.
+
+        Shapes that javac would reject are normalised:
+          * enum  -> `enum E { ; ... }` (constants are not reconstructed)
+          * record -> a plain final class (component metadata is not rebuilt)
+          * interface static/default methods get bodies; abstract ones end in `;`
+        """
         from . import stubs as SB
 
         cf = self.get_classfile(slash_or_dotted)
@@ -826,66 +1064,171 @@ class IntermediaryGrounding:
         pkg = fqcn.rsplit(".", 1)[0] if "." in fqcn else ""
         simple_name = fqcn.rsplit(".", 1)[-1]
 
+        # Nested / anonymous / local classes (Outer$Inner, Outer$1) cannot be
+        # reproduced as a top-level source file: the name would not resolve and
+        # enum-constant bodies cannot be extended. Refuse rather than emit
+        # something javac will reject.
+        if "$" in simple_name:
+            return None
+
         kind = self.get_class_kind(slash_or_dotted)
+        is_interface = kind == "interface"
+        # ACC_ENUM is also set on anonymous enum-constant bodies; only a class
+        # whose superclass is java.lang.Enum is a real enum declaration.
+        is_enum = kind == "enum" and (cf.super_name or "") == "java/lang/Enum"
+        is_record = kind == "record"
+        decl_kind = "class" if (is_record or (kind == "enum" and not is_enum)) else kind
+
         super_cls = cf.super_name
         if super_cls:
-            super_cls = super_cls.replace("/", ".")
+            super_cls = self._source_types(super_cls.replace("/", "."))
         if super_cls in ("java.lang.Object", "java.lang.Record", "java.lang.Enum"):
             super_cls = None
 
-        interfaces = [i.replace("/", ".") for i in cf.interface_names]
+        interfaces = [self._source_types(i.replace("/", ".")) for i in cf.interface_names]
 
-        header_parts = ["public"]
-        if cf.access_flags & 0x0400 and kind == "class":
-            header_parts.append("abstract")
-        header_parts.append(kind)
-        header_parts.append(simple_name)
+        # Class-level Signature carries generic type parameters and generic
+        # supertypes; descriptors alone erase them.
+        type_params: list[str] = []
+        class_sig = _attr_text(cf, cf.attrs_blob, "Signature")
+        if class_sig:
+            try:
+                type_params, sig_sup, sig_ifaces = _parse_class_signature(class_sig)
+                if (sig_sup and decl_kind == "class"
+                        and sig_sup not in ("java.lang.Object", "java.lang.Record", "java.lang.Enum")):
+                    super_cls = sig_sup
+                if sig_ifaces and not is_enum:
+                    interfaces = [self._source_types(i) for i in sig_ifaces]
+            except ValueError:
+                type_params = []
+        declared_tvars = {tp.split(" ", 1)[0].split("<", 1)[0] for tp in type_params}
 
-        if kind == "interface":
+        header = ["public"]
+        if cf.access_flags & 0x0400 and decl_kind == "class":
+            header.append("abstract")
+        if is_record:
+            header.append("final")
+        header.append(decl_kind)
+        header.append(simple_name + (f"<{', '.join(type_params)}>" if type_params else ""))
+        if is_interface:
             if interfaces:
-                header_parts.append("extends " + ", ".join(interfaces))
+                header.append("extends " + ", ".join(interfaces))
         else:
             if super_cls:
-                header_parts.append(f"extends {super_cls}")
+                header.append("extends " + super_cls)
             if interfaces:
-                header_parts.append("implements " + ", ".join(interfaces))
+                header.append("implements " + ", ".join(interfaces))
 
         lines = []
         if pkg:
-            lines.append(f"package {pkg};\n")
-        lines.append(" ".join(header_parts) + " {")
+            lines.append(f"package {pkg};")
+            lines.append("")
+        lines.append(SB.STUB_MARKER)
+        lines.append(" ".join(header) + " {")
+        if is_enum:
+            # no constants reconstructed: an explicit ';' opens the member list
+            lines.append("    ;")
 
-        # Fields
-        for f_name, f_desc in cf.field_sigs(include_synthetic=False):
-            f_type = _parse_single_type(f_desc)
-            lines.append(f"    public static Object {f_name};" if "$" in f_name else f"    public {f_type} {f_name};")
-
-        # Constructors
-        ctors = [desc for name, desc in cf.method_sigs() if name == "<init>"]
-        if kind == "class":
-            if not ctors:
-                lines.append(f"    public {simple_name}() {{}}")
+        for f in cf.fields:
+            if f.is_synthetic or (f.access_flags & 0x4000):   # ACC_ENUM constants
+                continue
+            f_name = cf.utf8(f.name_index)
+            f_type = _parse_single_type(cf.utf8(f.descriptor_index))
+            f_sig = _attr_text(cf, f.attrs_blob, "Signature")
+            if f_sig:
+                try:
+                    sig_type = _parse_type_signature(f_sig)
+                    if not _unresolved_type_vars([sig_type], declared_tvars):
+                        f_type = sig_type
+                except ValueError:
+                    pass
+            f_type = self._source_types(f_type)
+            if is_interface:
+                # interface fields are implicitly public static final and must
+                # be initialised in the declaration
+                init = SB.default_primitive_return(f_type)
+                lines.append(f"    public static final {f_type} {f_name} = {init};")
             else:
-                for c_idx, c_desc in enumerate(ctors):
-                    p_types, _ = _parse_jvm_descriptor(c_desc)
-                    params = ", ".join(f"{t} p{i}" for i, t in enumerate(p_types))
-                    lines.append(f"    public {simple_name}({params}) {{}}")
+                mods = "public" + (" static" if f.access_flags & 0x0008 else "")
+                lines.append(f"    {mods} {f_type} {f_name};")
 
-        # Methods
-        for m_name, m_desc in cf.method_sigs(include_synthetic=False):
+        is_abstract = bool(cf.access_flags & 0x0400)
+        ctor_mod = "protected" if is_abstract else "public"
+        ctors = [(m, cf.utf8(m.descriptor_index)) for m in cf.methods
+                 if cf.utf8(m.name_index) == "<init>" and not m.is_synthetic]
+        if not is_interface and not is_enum:
+            if not ctors:
+                lines.append(f"    {ctor_mod} {simple_name}() {{}}")
+            else:
+                for c_m, c_desc in ctors:
+                    p_types, _r = _parse_jvm_descriptor(c_desc)
+                    c_sig = _attr_text(cf, c_m.attrs_blob, "Signature")
+                    if c_sig:
+                        try:
+                            _tp, s_params, _r, _t = _parse_method_signature(c_sig)
+                            if not _unresolved_type_vars(s_params, declared_tvars):
+                                p_types = s_params
+                        except ValueError:
+                            pass
+                    p_types = [self._source_types(t) for t in p_types]
+                    params = ", ".join(f"{t} p{i}" for i, t in enumerate(p_types))
+                    c_throws = _attr_exceptions(cf, c_m.attrs_blob)
+                    c_throws_part = f" throws {', '.join(c_throws)}" if c_throws else ""
+                    lines.append(f"    {ctor_mod} {simple_name}({params}){c_throws_part} {{}}")
+
+        for m in cf.methods:
+            if m.is_synthetic:
+                continue
+            m_name = cf.utf8(m.name_index)
             if m_name in ("<init>", "<clinit>"):
                 continue
+            if is_enum and m_name in ("values", "valueOf"):
+                continue
+            m_desc = cf.utf8(m.descriptor_index)
             p_types, r_type = _parse_jvm_descriptor(m_desc)
+            throws: list[str] = []
+            m_tparams: list[str] = []
+            m_sig = _attr_text(cf, m.attrs_blob, "Signature")
+            if m_sig:
+                try:
+                    s_tp, s_params, s_ret, s_throws = _parse_method_signature(m_sig)
+                    visible = declared_tvars | {t.split(" ", 1)[0] for t in s_tp}
+                    if not _unresolved_type_vars(s_params + [s_ret] + s_throws, visible):
+                        m_tparams, p_types, r_type, throws = s_tp, s_params, s_ret, s_throws
+                except ValueError:
+                    pass
+            if not throws:
+                throws = _attr_exceptions(cf, m.attrs_blob)
+            p_types = [self._source_types(t) for t in p_types]
+            r_type = self._source_types(r_type)
+            throws = [self._source_types(t) for t in throws]
             params = ", ".join(f"{t} p{i}" for i, t in enumerate(p_types))
-            ret_val = SB.default_primitive_return(r_type)
+            ret = SB.default_primitive_return(r_type)
+            throws_part = f" throws {', '.join(throws)}" if throws else ""
+            tparams_part = f"<{', '.join(m_tparams)}> " if m_tparams else ""
 
-            if kind == "interface":
-                lines.append(f"    {r_type} {m_name}({params});")
+            mods = ["public"]
+            if m.access_flags & 0x0008:
+                mods.append("static")
+            elif is_interface and not (m.access_flags & 0x0400) and not (m.access_flags & 0x0100):
+                # a body in an interface is only legal for static/default/private
+                mods.append("default")
+            if m.access_flags & 0x0400:
+                mods.append("abstract")
+            if m.access_flags & 0x0100:
+                mods.append("native")
+            mod = " ".join(mods)
+
+            bodyless = (m.access_flags & 0x0100) or (
+                is_interface and (m.access_flags & 0x0400) and not (m.access_flags & 0x0008))
+            if bodyless:
+                lines.append(f"    {mod} {tparams_part}{r_type} {m_name}({params}){throws_part};")
             else:
-                ret_stmt = f" return {ret_val};" if r_type != "void" else ""
-                lines.append(f"    public {r_type} {m_name}({params}) {{{ret_stmt} }}")
+                ret_stmt = f" return {ret};" if r_type != "void" else ""
+                lines.append(f"    {mod} {tparams_part}{r_type} {m_name}({params}){throws_part} {{{ret_stmt} }}")
 
-        lines.append("}\n")
+        lines.append("}")
+        lines.append("")
         return "\n".join(lines)
 
 
@@ -917,67 +1260,69 @@ class EventPipelineInfo:
         return ", ".join(parts) or "no event pipeline detected"
 
 
-def detect_event_pipelines(src_dir: Path | str) -> EventPipelineInfo:
-    """Scan decompiled sources for Minecraft client EventBus and Keybind pipelines."""
+# Mixin targets that carry a keyboard / network pipeline. The class_* ids are
+# Minecraft intermediary names and are version-specific, so callers can override
+# both sets; nothing is matched by bare substring against the whole file.
+MC_KEYBOARD_TARGETS = frozenset({"Keyboard", "class_309"})
+MC_NETWORK_TARGETS = frozenset({
+    "ClientPlayNetworkHandler", "ClientPacketListener", "class_634",
+})
+
+_MIXIN_TARGET_RE = re.compile(r"@Mixin\s*\(([^)]*)\)")
+
+
+def _mixin_targets(txt: str) -> set[str]:
+    """Collect simple names from a file's @Mixin(...) target list."""
+    out: set[str] = set()
+    for m in _MIXIN_TARGET_RE.finditer(txt):
+        for raw in m.group(1).split(","):
+            tok = raw.strip().strip('"')
+            if not tok:
+                continue
+            tok = re.sub(r"\.class$", "", tok).strip()
+            if "=" in tok:                      # value = X.class
+                tok = tok.split("=", 1)[1].strip()
+            out.add(tok.rsplit(".", 1)[-1].strip('"'))
+    return out
+
+
+def detect_event_pipelines(
+    src_dir: Path | str,
+    keyboard_targets: set[str] | frozenset[str] | None = None,
+    network_targets: set[str] | frozenset[str] | None = None,
+) -> EventPipelineInfo:
+    """Scan decompiled sources for an event-bus publish pipeline.
+
+    Detection is read-only: it reports what it found and never edits sources.
+    """
     src_path = Path(src_dir)
     info = EventPipelineInfo()
     if not src_path.is_dir():
         return info
 
-    for j_file in src_path.rglob("*.java"):
-        txt = j_file.read_text(encoding="utf-8", errors="replace")
-        if ("class_309" in txt or "Keyboard" in txt) and "@Mixin" in txt:
-            info.keyboard_mixin = j_file.stem
-            info.keyboard_target = "net.minecraft.client.Keyboard"
-            m_post = re.search(r"([\w$.]+)\.(?:post|publish|dispatch|call)\s*\(\s*(?:new\s+([\w$.]+)|([A-Za-z0-9_$]+))", txt)
-            if m_post:
-                info.bus_receiver = m_post.group(1)
-                info.event_bus_call = m_post.group(0)
-                event_cls = m_post.group(2) or m_post.group(3)
-                if event_cls:
-                    info.key_event_class = event_cls
+    kb_targets = set(keyboard_targets if keyboard_targets is not None else MC_KEYBOARD_TARGETS)
+    net_targets = set(network_targets if network_targets is not None else MC_NETWORK_TARGETS)
+    m_post = re.compile(
+        r"([\w$.]+)\.(?:post|publish|dispatch|call)\s*\(\s*(?:new\s+([\w$.]+)|([A-Za-z0-9_$]+))")
 
-        if ("class_634" in txt or "ClientPlayNetworkHandler" in txt) and "@Mixin" in txt:
+    for j_file in sorted(src_path.rglob("*.java")):
+        txt = j_file.read_text(encoding="utf-8", errors="replace")
+        targets = _mixin_targets(txt)
+        if not targets:
+            continue
+
+        if targets & kb_targets:
+            info.keyboard_mixin = j_file.stem
+            info.keyboard_target = next(t for t in sorted(targets) if t in kb_targets)
+            m = m_post.search(txt)
+            if m:
+                info.bus_receiver = m.group(1)
+                info.event_bus_call = m.group(0)
+                info.key_event_class = m.group(2) or m.group(3)
+        elif targets & net_targets:
             info.network_mixin = j_file.stem
-            m_chat = re.search(r"([\w$.]+)\.(?:post|publish|dispatch|call)\s*\(\s*(?:new\s+([\w$.]+)|([A-Za-z0-9_$]+))", txt)
-            if m_chat:
-                event_cls = m_chat.group(2) or m_chat.group(3)
-                if event_cls:
-                    info.chat_event_class = event_cls
+            m = m_post.search(txt)
+            if m:
+                info.chat_event_class = m.group(2) or m.group(3)
 
     return info
-
-
-def weave_event_dispatcher_hook(
-    src_dir: Path | str,
-    pipeline: EventPipelineInfo,
-    default_keys: list[int] | None = None,
-) -> bool:
-    """Weave an in-line keybind interceptor into the detected keyboard mixin."""
-    if not pipeline.keyboard_mixin:
-        return False
-    keys = default_keys or [344, 96, 89, 260]  # Right Shift, Grave (`~`), Y, Insert
-    src_path = Path(src_dir)
-    target_files = list(src_path.rglob(f"{pipeline.keyboard_mixin}.java"))
-    if not target_files:
-        return False
-    kb_file = target_files[0]
-    content = kb_file.read_text(encoding="utf-8", errors="replace")
-    if "[jdec: event dispatcher hook]" in content:
-        return False
-
-    m_meth = re.search(r"(?:public|private|protected)\s+void\s+(\w+)\s*\([^)]*int\s+([A-Za-z0-9_$]+)[^)]*\)\s*\{", content)
-    if not m_meth:
-        return False
-
-    key_param = m_meth.group(2)
-    hook_code = f"""
-        // [jdec: event dispatcher hook] Intercept common client UI hotkeys
-        if ({key_param} == {keys[0]} || {key_param} == {keys[1]} || {key_param} == {keys[2]} || {key_param} == {keys[3]}) {{
-            // Auto-dispatched keybind event for client ClickGUI
-        }}
-"""
-    insert_pos = m_meth.end()
-    new_content = content[:insert_pos] + hook_code + content[insert_pos:]
-    kb_file.write_text(new_content, encoding="utf-8")
-    return True
