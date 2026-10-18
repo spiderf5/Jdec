@@ -187,6 +187,50 @@ ENGINES: dict[str, Engine] = {
 }
 
 
+def ensure_procyon_bridge(engines_dir: Path, quiet: bool = False) -> bool:
+    """Compile ProcyonBridge.java when the .class is missing.
+
+    The .java ships with the repo but the .class is gitignored, so without this
+    step the Procyon engine never becomes available() on a fresh checkout - it
+    silently drops out of the engine order.
+    """
+    import subprocess
+
+    src = engines_dir / "ProcyonBridge.java"
+    cls = engines_dir / "ProcyonBridge.class"
+    if not src.is_file():
+        return cls.is_file()
+    if cls.is_file():
+        return True
+
+    javac = find_javac()
+    if not javac:
+        if not quiet:
+            print("  ! javac not found: cannot build ProcyonBridge")
+        return False
+    out_dir = engines_dir / "bridge"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    jars = [j for j in (
+        "procyon-core-0.6.0.jar", "procyon-compilertools-0.6.0.jar")
+        if (engines_dir / j).is_file()]
+    cp = cp_sep().join(str(engines_dir / j) for j in jars)
+    try:
+        r = subprocess.run([javac, "-nowarn", "-cp", cp, "-d", str(out_dir), str(src)],
+                           capture_output=True, text=True, errors="replace", timeout=300)
+    except Exception as exc:  # noqa: BLE001
+        if not quiet:
+            print(f"  ! ProcyonBridge build failed: {exc}")
+        return False
+    if r.returncode != 0 or not (out_dir / "ProcyonBridge.class").is_file():
+        if not quiet:
+            print("  ! ProcyonBridge build failed:\n"
+                  + (r.stderr or r.stdout or "")[-800:])
+        return False
+    if not quiet:
+        print("  built bridge/ProcyonBridge.class")
+    return True
+
+
 def ensure_engines(engines_dir: Path, want: list[str] | None = None, quiet: bool = False) -> list[str]:
     """Download missing engine jars. Returns the list of unavailable engines."""
     import urllib.request
@@ -227,6 +271,7 @@ def ensure_engines(engines_dir: Path, want: list[str] | None = None, quiet: bool
                     print(f"  ! failed: {exc}")
                 missing.append(key)
                 break
+    ensure_procyon_bridge(engines_dir, quiet=quiet)
     return sorted(set(missing))
 
 

@@ -49,6 +49,7 @@ from jdec import project as PJ        # noqa: E402
 from jdec import recover as RC        # noqa: E402
 from jdec import score as SCORE       # noqa: E402
 from jdec import strings as ST        # noqa: E402
+from jdec import engines as EN  # noqa: E402
 from jdec.decompile import _iso_buckets, decompile, write_report  # noqa: E402
 from jdec.probe import JarProfile, profile_jar    # noqa: E402
 from jdec.score import evaluate       # noqa: E402
@@ -58,6 +59,39 @@ MIXIN = ROOT / "tests" / "mixin.jar"
 FLOW = ROOT / "tests" / "flow.jar"
 MC_JAR = ROOT / "tests" / "mc" / "client_1.20.4.jar"
 MC_MAP = ROOT / "tests" / "mc" / "mojang_1.20.4.txt"
+
+
+ENGINES_DIR = ROOT / "engines"
+ENGINES_READY = False
+
+
+def _prepare_engines(quiet: bool = False) -> bool:
+    """Make sure the decompiler jars are present before any test needs them.
+
+    The jars are gitignored, so a fresh checkout has none. A test that needs an
+    engine must be skipped with a reason rather than killing the whole run -
+    decompile() raises SystemExit when no engine is available.
+    """
+    global ENGINES_READY
+    try:
+        EN.ensure_engines(ENGINES_DIR, quiet=quiet)
+    except Exception as exc:  # noqa: BLE001
+        if not quiet:
+            print(f"engine setup failed: {exc}")
+    ENGINES_READY = any(EN.ENGINES[k].available(ENGINES_DIR) for k in EN.ENGINES)
+    if not ENGINES_READY and not quiet:
+        print("NOTE       : no decompiler engine available (offline?); "
+              "engine-dependent tests will be SKIPPED")
+    return ENGINES_READY
+
+
+def _no_engines() -> bool:
+    if ENGINES_READY:
+        return False
+    print("  (skipped: decompiler engines unavailable; run `python jdec.py engines`)")
+    return True
+
+
 
 _passed = 0
 _failed = 0
@@ -123,6 +157,9 @@ def test_synthetic_members_ignored() -> None:
 
 
 def test_end_to_end_sample() -> None:
+    if _no_engines():
+        return
+
     print("pipeline: end to end on the sample jar")
     out = Path(tempfile.mkdtemp()) / "out"
     rep = decompile(SAMPLE, out, ROOT / "engines", jobs=2, verify_all=True)
@@ -207,6 +244,9 @@ def test_case_colliding_class_names() -> None:
     output directory loses one of them -- and because the pipeline keys its
     bookkeeping on the output path, the victim was still reported as recovered.
     """
+    if _no_engines():
+        return
+
     print("pipeline: class names that differ only by case are not conflated")
     collide = ensure_collide_jar()
     if collide is None:
@@ -280,6 +320,9 @@ def test_iso_buckets() -> None:
 
 def test_weak_engine_is_rescued() -> None:
     """Lead engine fails on modern syntax; a later engine must recover it."""
+    if _no_engines():
+        return
+
     print("pipeline: a failing lead engine gets backed up by the others")
     out = Path(tempfile.mkdtemp()) / "out"
     rep = decompile(SAMPLE, out, ROOT / "engines", jobs=2, verify_all=True,
@@ -518,6 +561,9 @@ def test_flow_fingerprints() -> None:
 
 def test_native_reporting() -> None:
     """A native body is not a recovery failure - it is an absent body."""
+    if _no_engines():
+        return
+
     print("analyze: native bodies are called out instead of silently failing")
     a = AZ.analyze(MIXIN)
     nat = a.native
@@ -1337,6 +1383,39 @@ def test_platform_classpath_separator() -> None:
         os.name = real
 
 
+def test_procyon_bridge_is_built() -> None:
+    """A fresh checkout has ProcyonBridge.java but not the compiled .class.
+
+    Without building it the Procyon engine silently disappears from the engine
+    order, which is exactly what happened in CI.
+    """
+    print("engines: ProcyonBridge is compiled when only the source is present")
+    import shutil as _shutil
+    src = ROOT / "engines"
+    jars = [j for j in sorted(src.glob("*.jar")) if j.name.startswith("procyon-")]
+    if len(jars) < 2 or not (src / "ProcyonBridge.java").is_file():
+        print("  (skipped: procyon artifacts not present; run `python jdec.py engines`)")
+        return
+    if _shutil.which("javac") is None:
+        print("  (skipped: javac not on PATH)")
+        return
+    with tempfile.TemporaryDirectory(prefix="jdec_test_bridge_") as td:
+        tmp = Path(td) / "engines"
+        tmp.mkdir()
+        for j in jars:
+            _shutil.copy(j, tmp / j.name)
+        _shutil.copy(src / "ProcyonBridge.java", tmp / "ProcyonBridge.java")
+        check("procyon is unavailable without the bridge class",
+              not EN.ENGINES["procyon"].available(tmp))
+        EN.ensure_engines(tmp, quiet=True)
+        check("ProcyonBridge.class is built from the shipped source",
+              (tmp / "bridge" / "ProcyonBridge.class").is_file())
+        check("procyon becomes available after the build",
+              EN.ENGINES["procyon"].available(tmp))
+        check("cfr and vineflower stay available",
+              all(EN.ENGINES[k].available(tmp) for k in ("cfr", "vineflower")))
+
+
 def test_ops_pool() -> None:
     print("opspool: PhantomShield string-pool static decrypt (DES via bundled _des)")
     gen = Path(__file__).resolve().parent / "gen_ops_fixture.py"
@@ -1793,6 +1872,9 @@ def test_advanced_roadmap_features() -> None:
 
 
 def test_pipeline_automation() -> None:
+    if _no_engines():
+        return
+
     print("pipeline: automated end-to-end deobfuscation and triage")
     from jdec import pipeline as PL
     with tempfile.TemporaryDirectory() as td:
@@ -2370,6 +2452,9 @@ def test_project_export_and_recompilability() -> None:
 
 def test_remap_rewrites_call_sites() -> None:
     """Renaming only declarations would leave dangling member references."""
+    if _no_engines():
+        return
+
     print("mappings: remap rewrites declarations *and* every call site")
     m = MP.load_mapping(MC_MAP)
     with zipfile.ZipFile(MC_JAR) as z:
@@ -3010,6 +3095,9 @@ def test_max_stack_dataflow() -> None:
 
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
+    if _no_engines():
+        return
+
     print("recover/pool: dynamic replay is opt-in (safety gate)")
     with tempfile.TemporaryDirectory() as td:
         rec_dir = Path(td) / "rec"
@@ -3733,6 +3821,9 @@ def test_grounding_real_mc_sample() -> None:
 
 def test_real_zkm_clean_pipeline() -> None:
     """Real ZKM sample: the cleaning pass must be safe and idempotent."""
+    if _no_engines():
+        return
+
     print("real sample: ZKM jar survives the cleaning pipeline")
     from jdec.score import _count_braces
 
@@ -3812,6 +3903,11 @@ def main() -> int:
         print("missing tests/sample.jar and could not build it "
               "(check that javac is on PATH, or run tests/build_fixtures.py)")
         return 2
+    _prepare_engines()
+    # every fixture must exist before the first test that touches one: several
+    # tests only guard with `if MIXIN.exists()`, so a late build silently drops
+    # their assertions on a fresh checkout
+    build_fixtures.ensure_mixin_jar(quiet=True)
     test_roundtrip_sample()
     test_synthetic_members_ignored()
     test_scoring_sees_obfuscated_names()
@@ -3841,6 +3937,7 @@ def main() -> int:
     test_pool_overload_dispatch()
     test_probe_fingerprints_json()
     test_platform_classpath_separator()
+    test_procyon_bridge_is_built()
     test_remap_failure_accounting()
     test_devirt_opcode_disambiguation()
     test_code_pool_json_integrity()

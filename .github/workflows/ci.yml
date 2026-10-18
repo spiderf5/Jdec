@@ -35,6 +35,10 @@ jobs:
           pip install --upgrade pip
           pip install -e .
 
+      - name: Prepare decompiler engines
+        run: |
+          python jdec.py engines
+
       - name: Test CLI entrypoint
         run: |
           jdec --help

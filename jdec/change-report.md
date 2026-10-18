@@ -973,3 +973,51 @@ project.py 重复声明自动注释超范围（AST 级）、indy 死类高估（
 ## 6. 回滚
 
 `git checkout -- jdec/jdec/project.py jdec/jdec/mcmod.py jdec/tests/run_tests.py`
+
+---
+
+# 变更报告：修复 CI 在干净检出上必然失败的三个原因
+
+> 生成时间：2026-10-18
+> 触发：推送到 GitHub 后 Actions 全矩阵红叉
+> 基线：本地 651（碰巧通过）→ 修复后**本地 655 / 干净克隆 655，0 failed**
+
+## 1. 根因（按 CI 执行顺序）
+
+三个问题叠加，任何一个都足以让 3 OS × 4 Python version 的 12 个 job 全挂：
+
+| # | 根因 | 证据 |
+| --- | --- | --- |
+| 1 | **没人先装引擎**。`decompile()` 只检查引擎是否可用（`decompile.py:271`），从不下载；而套件里第一个调用它的 `test_end_to_end_sample` 之前没有任何安装步骤 → `raise SystemExit` → 整个套件 exit 1，连统计行都打不出来 | 干净克隆复现：`EXIT=1`，输出停在 "no decompiler engine available" |
+| 2 | **`ProcyonBridge.class` 从未被编译**。仓库只有 `jdec/engines/ProcyonBridge.java`，编译产物被 gitignore，而 `engines.py` 只检查 `.class` 是否存在（`engines.py:145`），没有任何代码编译它 → 干净检出上 Procyon 永远不可用 → `test_weak_engine_is_rescued` 断言 `improved >= 1` 失败（lead 引擎变成 CFR，无需救援） | 干净克隆 `ls jdec/engines/` 只有 `.java`；本地有 `.class` 所以碰巧通过 |
+| 3 | **fixture 建得太晚**。`ensure_mixin_jar()` 在 `main()` 第 3966 行，而 `test_callgraph_and_reachability()` 在 3957 行；该测试的 mixin 段只靠 `if MIXIN.exists()` 守卫 → 干净检出上 13 条断言被静默跳过（本地因 jar 已存在而跑到） | 断言集合对比：本地多出 13 条，全部来自该测试的 mixin / DOT / JSON / trigger path 段 |
+
+## 2. 修复
+
+| 文件 | 改动 |
+| --- | --- |
+| `jdec/jdec/engines.py` | 新增 `ensure_procyon_bridge()`：缺 `.class` 时用 `find_javac()` 编译 `ProcyonBridge.java` 到 `engines/bridge/`，classpath 带上两个 procyon jar；`ensure_engines()` 末尾调用 |
+| `jdec/tests/run_tests.py` | `main()` 启动即 `_prepare_engines()`（下载 + 建 bridge）；加 `ENGINES_READY` / `_no_engines()`，8 个依赖引擎的用例在无引擎时**明确跳过并打印原因**，不再 SystemExit 杀死整套；`_prepare_engines()` 后立即 `ensure_mixin_jar()`，fixture 先于所有测试 |
+| `.github/workflows/ci.yml` | 测试前增加 `python jdec.py engines` 步骤，让引擎下载/构建失败独立可见 |
+
+## 3. 新增回归
+
+`test_procyon_bridge_is_built()`：在临时目录只放 procyon jars + `ProcyonBridge.java`，断言
+- 无 `.class` 时 `available()` 为 False；
+- `ensure_engines()` 后 `bridge/ProcyonBridge.class` 生成且 `available()` 为 True；
+- CFR / Vineflower 仍可用。
+
+## 4. 验证（CI 等价环境）
+
+在**从远端干净克隆**的副本中删除所有未入库产物（`jdec/engines/*.jar`、`engines/bridge/`、`jdec/tests/*.jar`）后完整跑套件：
+
+```
+CLONE_EXIT=0
+655 passed, 0 failed
+```
+
+与本地完全一致（此前为 642 passed，少的 13 条正是 fixture 晚建导致被静默跳过）。
+
+## 5. 回滚
+
+`git checkout -- .github/workflows/ci.yml jdec/jdec/engines.py jdec/tests/run_tests.py`
