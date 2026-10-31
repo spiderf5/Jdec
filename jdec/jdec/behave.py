@@ -682,7 +682,7 @@ _DRIVER_CACHE: Path | None = None
 
 def compare(original: Path, rewritten: Path, cases: list[Case],
             *, java: str | None = None, timeout: int = 300,
-            classpath=()) -> BehaveReport:
+            classpath=(), sandbox: bool = False) -> BehaveReport:
     """Run every case against both jars and compare. Executes target code.
 
     `classpath` is for the libraries the target references but does not
@@ -704,8 +704,15 @@ def compare(original: Path, rewritten: Path, cases: list[Case],
     with tempfile.TemporaryDirectory(prefix="jdec_behave_") as td:
         spec = Path(td) / "cases.txt"
         spec.write_text("\n".join(c.line() for c in cases), encoding="utf-8")
-        cp = TC.path_sep().join(str(x) for x in (drv,))
-        cmd = [exe, "-cp", cp, DRIVER_CLASS, str(spec),
+        jvm_opts: list[str] = []
+        cp_entries = [drv]
+        if sandbox:
+            from . import sandbox as SBX
+            jvm_opts = SBX.jvm_args(Path(td) / "sandbox", java=exe,
+                                    drivers=(DRIVER_CLASS,))
+            cp_entries.append(SBX.classpath_entry(java=exe))
+        cp = TC.path_sep().join(str(x) for x in cp_entries)
+        cmd = [exe, *jvm_opts, "-cp", cp, DRIVER_CLASS, str(spec),
                str(Path(original).resolve()), str(Path(rewritten).resolve())]
         cmd += [str(Path(c).resolve()) for c in classpath]
         import subprocess

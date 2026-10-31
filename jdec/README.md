@@ -204,6 +204,12 @@ demo/legacy/OldStyle|pick|java.lang.String|
 - 每条用例跑在自己的线程里，3 秒没结果记该用例不可用，不会拖死整批
 - 会**执行目标代码**（`Class.forName(..., true)` 会跑 `<clinit>`，字符串解密器就在
   这一步），所以必须显式 `--execute`，否则退出码 3
+- 重放 JVM 默认套 Java 沙箱（`jdec/sandbox.py`）：写入只允许在本次运行目录内，
+  网络、进程执行、native 库加载和 `System.exit` 被拒；`--no-sandbox` 显式关闭。
+  JDK 24+ 已移除 SecurityManager，需要 JDK 9–23。native 代码不受 Java 沙箱约束，
+  `loadLibrary` 默认拒绝，所以它进不了这层边界。`recover` / `pool harvest` 同样
+  默认开启同一沙箱。沙箱下 mock agent 不注入（JPLIS 无法在 SecurityManager 下
+  attach），stub 类仍在 classpath；需要该 agent 的目标用 `--no-sandbox`。
 
 退出码：0 全部一致 / 1 有差异 / 2 参数错 / 3 未授权执行 / **4 没有结论**
 （`PARTIAL`：部分用例调不起来；`NO VERDICT`：一条都没判定）/ **5 覆盖率门槛未达**。

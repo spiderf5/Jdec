@@ -622,10 +622,12 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             limit: int = 0, stop_on_error: bool = False,
             cp_file: Path | None = None, timeout: int = 1800,
             with_stubs: bool = True, from_frida: Path | None = None,
-            allow_exec: bool = False) -> int:
+            allow_exec: bool = False, sandbox: bool = True) -> int:
     """自洽重放解密。allow_exec=False（默认）只做静态分析：生成 spec 即停，
-    不启动任何 JVM。重放会**真实执行目标 jar 里的代码**——MockAgent 桩化、
-    超时、-Xverify:none 都只是加载兜底，不是副作用隔离——所以必须显式开启。
+    不启动任何 JVM。重放会**真实执行目标 jar 里的代码**，所以在 allow_exec
+    之外默认再套一层 Java 沙箱（sandbox=True）：写入限制在 out_dir，网络、
+    进程执行、native 库和 System.exit 被拒。沙箱约束不了 native 代码本身
+    （loadLibrary 默认拒绝，进不去）；OS 级隔离仍需要容器或专用用户。
 
     返回码：0=有产出；1=跑过但无明文；3=被安全闸门拦下（仅静态部分完成）。
     """
@@ -640,8 +642,14 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             stub_jar = stubs.ensure_stubs_jar()
             cp = str(stub_jar) + (sep if cp else "") + cp
             agent_jar = stubs.ensure_mock_agent_jar()
-            if agent_jar.is_file():
+            # JPLIS cannot attach once the sandbox is installed; the stub
+            # jar still goes on the classpath, the instrumentation agent does
+            # not. A target that needs the agent needs --no-sandbox.
+            if agent_jar.is_file() and not sandbox:
                 agent_jvm_arg = f"-javaagent:{norm_classpath(str(agent_jar))}\n"
+            elif agent_jar.is_file():
+                prep_warnings.append(
+                    "agent: mock agent not attached under the sandbox")
         except Exception as exc:  # noqa: BLE001
             # silently continuing here used to turn "stubs never loaded" into
             # "the target needs a real game instance" in the failure report
@@ -670,8 +678,9 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         print(f"            ! {n_unreadable} class(es) unreadable and skipped")
 
     if not allow_exec:
-        print("NOTICE    : dynamic replay EXECUTES code from the target jar "
-              "(clinit/decryptors run with this process's permissions).")
+        print("NOTICE    : dynamic replay EXECUTES code from the target jar; "
+              "a Java sandbox (write root, no network/exec/native/exit) is "
+              "installed by default unless sandbox=False.")
         print("            Default is static analysis only: spec written, no "
               "JVM started. Pass --execute (CLI) or allow_exec=True to run it.")
         return 3
@@ -696,15 +705,36 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             print(str(exc))
             return 1
 
-    classpath = sep.join([str(out_dir), cp, str(jar)]) if cp else \
-        sep.join([str(out_dir), str(jar)])
+    sandbox_args = ""
+    sandbox_entry = None
+    if sandbox:
+        from . import sandbox as SBX
+        try:
+            sandbox_root = out_dir
+            sandbox_args = SBX.argfile_lines(
+                sandbox_root, java=java, drivers=("RecoverDriver",),
+                tmp=out_dir / "_sandbox")
+            sandbox_entry = SBX.classpath_entry(java=java)
+        except SBX.SandboxError as exc:
+            print(f"sandbox : {exc}")
+            return 1
+        print(f"sandbox : java-level isolation under {sandbox_root} "
+              f"(writes confined; network/exec/native/exit denied)")
+
+    entries = [str(out_dir)]
+    if sandbox_entry is not None:
+        entries.append(str(sandbox_entry))
+    if cp:
+        entries.append(cp)
+    entries.append(str(jar))
+    classpath = sep.join(entries)
     classpath = norm_classpath(classpath)
     # Windows 命令行 ~32K 上限装不下几百个库的 classpath，用 @argfile
     argsfile = out_dir / "java_args.txt"
     cp_line = classpath.replace('"', '\\"')
     head = "-XX:+ShowMessageBoxOnError\n" if stop_on_error else ""
     argsfile.write_text(
-        head + agent_jvm_arg + native_jvm_arg + f'-Xverify:none\n-cp "{cp_line}"\nRecoverDriver\n"{spec_path.as_posix()}"\n',
+        sandbox_args + head + agent_jvm_arg + native_jvm_arg + f'-Xverify:none\n-cp "{cp_line}"\nRecoverDriver\n"{spec_path.as_posix()}"\n',
         encoding="utf-8")
     # 每站点真解密的代价可能远超默认 30 分钟（6516 站点实测 ~35min）。
     # 超时不扔掉已产出：kill（含整个进程树）后把部分输出照常收割，

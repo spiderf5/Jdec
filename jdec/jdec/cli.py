@@ -270,6 +270,7 @@ def cmd_behave(args: argparse.Namespace) -> int:
               "Pass --execute to allow it.")
         return 3
     engine = getattr(args, "engine", "jvm") or "jvm"
+    sandbox = not getattr(args, "no_sandbox", False)
     cases: list = []
     if args.spec:
         try:
@@ -297,7 +298,12 @@ def cmd_behave(args: argparse.Namespace) -> int:
             print(f"  - {ex}")
         cases = cases + der.cases
         if args.stable and cases:
-            kept, why = CS.stabilise(cases, orig, classpath=args.cp or ())
+            try:
+                kept, why = CS.stabilise(cases, orig, classpath=args.cp or (),
+                                         sandbox=sandbox)
+            except Exception as exc:  # noqa: BLE001 - reported, not retried
+                print(str(exc))
+                return 2
             print(f"stable    : {why['kept']} kept "
                   f"({why['kept'] - why['throws']} returned a value, "
                   f"{why['throws']} threw the same exception both runs), "
@@ -314,7 +320,8 @@ def cmd_behave(args: argparse.Namespace) -> int:
     rep = None
     if engine in ("jvm", "both"):
         try:
-            rep = BH.compare(orig, rewritten, cases, classpath=args.cp or ())
+            rep = BH.compare(orig, rewritten, cases, classpath=args.cp or (),
+                     sandbox=sandbox)
         except Exception as exc:  # noqa: BLE001 - reported, not retried
             print(str(exc))
             return 2
@@ -781,7 +788,8 @@ def cmd_recover(args: argparse.Namespace) -> int:
                     cp_file=args.cp_file, timeout=args.timeout,
                     with_stubs=getattr(args, "with_stubs", True),
                     from_frida=from_frida,
-                    allow_exec=getattr(args, "execute", False))
+                    allow_exec=getattr(args, "execute", False),
+                    sandbox=not getattr(args, "no_sandbox", False))
     tsv = out_dir / "recovered.tsv"
     if args.rewrite_src:
         if not Path(args.rewrite_src).is_dir():
@@ -834,11 +842,16 @@ def cmd_pool(args: argparse.Namespace) -> int:
             return 3
         out_tsv = Path(args.output) if args.output else \
             spec.parent / "pool_harvest.tsv"
-        st = PL.harvest(spec, out_tsv, spec.parent, cp=args.cp,
-                        cp_file=args.cp_file, java=args.java,
-                        timeout=args.timeout,
-                        with_stubs=getattr(args, "with_stubs", True),
-                        allow_exec=True)
+        try:
+            st = PL.harvest(spec, out_tsv, spec.parent, cp=args.cp,
+                            cp_file=args.cp_file, java=args.java,
+                            timeout=args.timeout,
+                            with_stubs=getattr(args, "with_stubs", True),
+                            allow_exec=True,
+                            sandbox=not getattr(args, "no_sandbox", False))
+        except Exception as exc:  # noqa: BLE001 - reported, not retried
+            print(str(exc))
+            return 1
         if st["timed_out"]:
             print(f"WARNING   : driver killed at {args.timeout}s timeout "
                   f"(partial output kept; rerun with --timeout N)")
@@ -1404,6 +1417,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "original are compared to drop non-deterministic cases)")
     sb.add_argument("--execute", action="store_true",
                     help="required: this runs methods from the target jars")
+    sb.add_argument("--no-sandbox", dest="no_sandbox",
+                    action="store_true",
+                    help="run the replay JVM without the Java sandbox: "
+                         "writes outside the work dir, network, exec, "
+                         "native libraries and System.exit then become "
+                         "allowed (unsafe on untrusted jars)")
     sb.add_argument("--cp", action="append", default=None, metavar="PATH",
                     help="extra classpath entry the target needs to load "
                          "(repeatable). Without it every case in a class whose "
@@ -1552,9 +1571,16 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--execute", action="store_true",
                     help="run the replay JVM. WARNING: the replay EXECUTES "
                          "code from the target jar (initializers, decryptors) "
-                         "with your process's permissions - stubs, timeouts "
-                         "and -Xverify:none are NOT a sandbox. Without this "
-                         "flag only the static spec is generated.")
+                         "with your process's permissions; a Java sandbox is "
+                         "installed by default, but stubs and timeouts are "
+                         "not a substitute for it. Without this flag only "
+                         "the static spec is generated.")
+    sr.add_argument("--no-sandbox", dest="no_sandbox",
+                    action="store_true",
+                    help="run the replay JVM without the Java sandbox: "
+                         "writes outside the work dir, network, exec, "
+                         "native libraries and System.exit then become "
+                         "allowed (unsafe on untrusted jars)")
     sr.add_argument("-o", "--output", default=None, help="output dir")
     sr.add_argument("--cp", default="", help="extra classpath entries for the "
                    "replay JVM, ';'-separated on Windows (MC jars, libs, stubs)")
@@ -1610,8 +1636,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--execute", action="store_true",
                     help="harvest: run the replay JVM. WARNING: the replay "
                          "EXECUTES code from the target jar with your "
-                         "process's permissions - stubs and timeouts are NOT "
-                         "a sandbox. Required for the harvest step.")
+                         "process's permissions; a Java sandbox is "
+                         "installed by default. Required for the harvest "
+                         "step.")
+    sp.add_argument("--no-sandbox", dest="no_sandbox",
+                    action="store_true",
+                    help="run the replay JVM without the Java sandbox: "
+                         "writes outside the work dir, network, exec, "
+                         "native libraries and System.exit then become "
+                         "allowed (unsafe on untrusted jars)")
     sp.add_argument("--no-stubs", dest="with_stubs", action="store_false", default=True,
                     help="do not inject synthetic Minecraft runtime stubs into classpath")
     sp.set_defaults(func=cmd_pool)

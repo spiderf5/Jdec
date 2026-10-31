@@ -384,7 +384,8 @@ def derive(jar: Path, rewritten=None, *, per_param: int = 4) -> Derivation:
 
 
 def stabilise(cases: list[Case], jar: Path, *, java: str | None = None,
-              timeout: int = 300, classpath=()) -> tuple[list[Case], dict]:
+              timeout: int = 300, classpath=(),
+              sandbox: bool = False) -> tuple[list[Case], dict]:
     """Keep the cases that are worth running against the rewrite.
 
     Two filters, both measured on `original × original`:
@@ -403,8 +404,10 @@ def stabilise(cases: list[Case], jar: Path, *, java: str | None = None,
     counts = {"unstable": 0, "throws": 0, "kept": 0}
     if not cases:
         return [], counts
-    first = compare(jar, jar, cases, java=java, timeout=timeout, classpath=classpath)
-    second = compare(jar, jar, cases, java=java, timeout=timeout, classpath=classpath)
+    first = compare(jar, jar, cases, java=java, timeout=timeout,
+                    classpath=classpath, sandbox=sandbox)
+    second = compare(jar, jar, cases, java=java, timeout=timeout,
+                     classpath=classpath, sandbox=sandbox)
     keep: list[Case] = []
     for i, case in enumerate(cases):
         a = first.outcomes[i] if i < len(first.outcomes) else None

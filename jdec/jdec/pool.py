@@ -262,12 +262,13 @@ def scan_spec(src_dir: Path, spec_path: Path) -> dict:
 def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
             cp_file: Path | None = None, java: str = "java",
             timeout: int = 3600, with_stubs: bool = True,
-            allow_exec: bool = False) -> dict:
+            allow_exec: bool = False, sandbox: bool = True) -> dict:
     """生成/编译 PoolDriver，真类加载逐站点求明文 → out_tsv（R/E 行）。
 
     安全闸门：harvest 的全部工作都是 JVM replay——**会真实执行目标 jar
-    里的代码**（clinit / 解密器以本进程权限运行）。默认 allow_exec=False
-    直接拒绝；CLI 需 --execute，pipeline 需 allow_replay=True。
+    里的代码**，默认在 Java 沙箱里运行（sandbox=True：写入限制在 work_dir，
+    无网络/进程执行/native/exit）。allow_exec=False 直接拒绝；CLI 需
+    --execute，pipeline 需 allow_replay=True。
     """
     if not allow_exec:
         raise ReplayNotAllowed(
@@ -286,6 +287,20 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
     if java == "java":
         java = TC.require_java("running the pool driver")
 
+    sandbox_args = ""
+    sandbox_entry = None
+    if sandbox:
+        from . import sandbox as SBX
+        try:
+            sandbox_args = SBX.argfile_lines(
+                work_dir, java=java, drivers=("PoolDriver",),
+                tmp=work_dir / "_sandbox")
+            sandbox_entry = SBX.classpath_entry(java=java)
+        except SBX.SandboxError as exc:
+            raise RuntimeError(f"sandbox: {exc}") from None
+        print(f"sandbox : java-level isolation under {work_dir} "
+              f"(writes confined; network/exec/native/exit denied)")
+
     sep = TC.path_sep()
     agent_jvm_arg = ""
     native_jvm_arg = ""
@@ -296,14 +311,24 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
             stub_jar = stubs.ensure_stubs_jar()
             cp = str(stub_jar) + (sep if cp else "") + cp
             agent_jar = stubs.ensure_mock_agent_jar()
-            if agent_jar.is_file():
+            # JPLIS cannot attach once the sandbox is installed; the stub
+            # jar still goes on the classpath, the agent does not.
+            if agent_jar.is_file() and not sandbox:
                 agent_jvm_arg = "-javaagent:" + norm_classpath(str(agent_jar)) + _LF
+            elif agent_jar.is_file():
+                prep_warnings.append(
+                    "agent: mock agent not attached under the sandbox")
         except Exception as exc:  # noqa: BLE001
             prep_warnings.append(f"stubs: {type(exc).__name__}: {exc}")
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
         cp = cp + (sep if cp and not cp.endswith(sep) else "") + extra.strip()
-    classpath = sep.join([str(work_dir), cp]) if cp else str(work_dir)
+    entries = [str(work_dir)]
+    if sandbox_entry is not None:
+        entries.append(str(sandbox_entry))
+    if cp:
+        entries.append(cp)
+    classpath = sep.join(entries)
     classpath = norm_classpath(classpath)
 
     # 提取目标 Native 动态库并挂载 -Djava.library.path
@@ -324,7 +349,8 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
 
     argsfile = work_dir / "java_args.txt"
     argsfile.write_text(
-        agent_jvm_arg
+        sandbox_args
+        + agent_jvm_arg
         + native_jvm_arg
         + "-Xverify:none" + _LF
         + '-cp "' + classpath.replace('"', _BS + '"') + '"' + _LF

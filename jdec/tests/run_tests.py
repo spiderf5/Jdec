@@ -2535,6 +2535,62 @@ def _jar_from(classes: Path, out: Path, extra: dict[str, bytes] | None = None) -
     return out
 
 
+def test_sandbox_isolation() -> None:
+    """Replay must not be able to write outside the run root."""
+    print("sandbox: the replay JVM cannot escape its write root")
+    from jdec import behave as BH
+    from jdec import sandbox as SBX
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: needs a JDK)")
+        return
+    try:
+        SBX.check_available()
+    except SBX.SandboxError as exc:
+        print(f"  (skipped: {exc})")
+        return
+
+    args = SBX.jvm_args(Path(tempfile.gettempdir()) / "jdec_sbx_args")
+    check("the manager is installed at JVM start",
+          any(a.startswith("-Djava.security.manager=") for a in args), str(args))
+    check("writes are rooted at the run directory",
+          any(a.startswith("-Djdec.sandbox.root=") for a in args), str(args))
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cls = _compile_java(root / "src", {
+            "demo/sbx/Evil.java": """
+                package demo.sbx;
+                public class Evil {
+                    public static int write(String path) {
+                        try {
+                            java.nio.file.Files.writeString(
+                                java.nio.file.Path.of(path), "escaped");
+                            return 1;
+                        } catch (Exception e) {
+                            return 0;
+                        }
+                    }
+                }
+            """,
+        })
+        jar = _jar_from(cls, root / "evil.jar")
+        outside = root / "outside.txt"
+        case = BH.Case("demo/sbx/Evil", "write", ("java.lang.String",),
+                       (str(outside),))
+
+        rep = BH.compare(jar, jar, [case], sandbox=True)
+        check("the case ran under the sandbox", rep.compared == 1, rep.summary())
+        check("the sandbox denied the write", not outside.exists(), str(outside))
+        check("both sides were denied identically",
+              all(o.status == "same" for o in rep.outcomes), str(rep.outcomes))
+
+        # negative control: the same call writes when the sandbox is off
+        rep2 = BH.compare(jar, jar, [case], sandbox=False)
+        check("without the sandbox the write happens", outside.exists(),
+              rep2.summary())
+
+
 def test_receiver_and_argument_synthesis() -> None:
     """A method must be invocable when its class has no no-arg constructor.
 
@@ -7016,6 +7072,7 @@ def main() -> int:
     test_verify_gate()
     test_deflat_output_loads()
     test_behaviour_is_preserved()
+    test_sandbox_isolation()
     test_frame_generation()
     test_ir_transforms()
     test_pipeline_gate()
