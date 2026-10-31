@@ -32,6 +32,10 @@ from . import callgraph as CG
 _CG_CACHE: dict[str, tuple[CG.CallGraph, CG.ReachabilityReport]] = {}
 _CG_FAIL: set[str] = set()
 
+# Notes payloads are a few KB; anything near a megabyte is either a bug or an
+# attempt to make the workbench allocate on demand.
+_MAX_POST_BYTES = 1_000_000
+
 _WEB_ASSETS = Path(__file__).with_name("web_assets")
 HTML_TEMPLATE = (
     (_WEB_ASSETS / "index.html").read_text(encoding="utf-8")
@@ -316,12 +320,50 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
             self._cg_error = f"callgraph build failed: {type(exc).__name__}: {exc}"
             return None
 
+    def _cross_site_request(self) -> bool:
+        """True when a browser made this request from another origin.
+
+        The workbench has mutating endpoints (notes, project export) and listens
+        on 127.0.0.1. "Localhost" is not a security boundary against whatever
+        page the user happens to have open: a drive-by <img src> or a plain
+        form post can reach this server. Browsers always attach `Origin` to a
+        cross-origin POST and `Sec-Fetch-Site: cross-site` to a cross-site
+        subresource GET, so either header is enough to refuse. Non-browser
+        clients (tests, curl, the CLI) send neither and keep working.
+        """
+        origin = self.headers.get("Origin")
+        if origin:
+            host = self.headers.get("Host", "")
+            return urllib.parse.urlsplit(origin).netloc != host
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        return site in ("cross-site", "same-site")
+
+    def _reject_cross_site(self) -> bool:
+        """Send 403 and return True when the request must not run."""
+        if not self._cross_site_request():
+            return False
+        self.send_error(403, "cross-site request rejected")
+        return True
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
+        if self._reject_cross_site():
+            return
+
         if path == "/api/annotations":
-            content_len = int(self.headers.get("Content-Length", 0))
+            # A malformed or hostile Content-Length used to raise ValueError
+            # inside the handler and drop the connection with a traceback; a
+            # local server still has to answer with a status, not a stack dump.
+            try:
+                content_len = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                self.send_error(400, "invalid Content-Length")
+                return
+            if content_len < 0 or content_len > _MAX_POST_BYTES:
+                self.send_error(413, "request body too large")
+                return
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
                 payload = json.loads(body.decode("utf-8"))
@@ -378,6 +420,14 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
+            return
+
+        # Every /api/ route is refused when a browser says another origin made
+        # the request. Read-only routes are included on purpose: /api/bytecode
+        # spawns javap and /api/callgraph builds a graph, so a drive-by page
+        # could otherwise use the workbench as a local CPU/process amplifier.
+        # The UI and direct navigation (Sec-Fetch-Site: none) are unaffected.
+        if path.startswith("/api/") and self._reject_cross_site():
             return
 
         if path == "/api/tree":
