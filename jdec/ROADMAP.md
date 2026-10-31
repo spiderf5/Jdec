@@ -25,7 +25,7 @@
 
 - 评分口径如实化：coverage 更名为 **member name-hit rate**，注释/字符串/调用点
   不再骗过匹配，重载逐个计数。
-- 阶段状态贯通：九阶段逐一记录 `ok / partial / skipped / failed` + 原因，
+- 阶段状态贯通：各阶段逐一记录 `ok / partial / skipped / failed` + 原因，
   退出码 0/1/2（`--strict` 升级），总报告带 Stage Status 表——**失败不再被标为成功**。
 - 安全边界：动态重放默认拒绝、显式开启、进程树终止。
 - 裁剪保守化、自愈证据分级（src-original + repair-log）。

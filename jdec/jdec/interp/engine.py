@@ -19,7 +19,7 @@ from ..jint import i32, i64
 from .values import (VOID, Arr, Frame, Heap, Inconclusive, JavaThrow, Obj,
                      Opaque, Outcome,
                      Unsupported, _append_text, as_int, default_value,
-                     is_opaque, jstr, make_model)
+                     is_opaque)
 
 OP_GOTO = 0xA7
 OP_GOTO_W = 0xC8

@@ -194,9 +194,12 @@ def ensure_procyon_bridge(engines_dir: Path, quiet: bool = False) -> bool:
     step the Procyon engine never becomes available() on a fresh checkout - it
     silently drops out of the engine order.
     """
-    import subprocess
 
-    src = engines_dir / "ProcyonBridge.java"
+    candidates = [
+        Path(__file__).resolve().parent / "engines_src" / "ProcyonBridge.java",
+        engines_dir / "ProcyonBridge.java",
+    ]
+    src = next((p for p in candidates if p.is_file()), candidates[0])
     cls = engines_dir / "ProcyonBridge.class"
     if not src.is_file():
         return cls.is_file()

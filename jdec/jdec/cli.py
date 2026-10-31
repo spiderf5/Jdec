@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 import tempfile
@@ -19,13 +20,15 @@ from . import native_scan as NS
 from . import pool as PL
 from . import scorecard as SC
 from . import strings as ST
+from . import toolchain as TC
+from ._version import __version__
 from .decompile import EngineUnavailable, decompile, decompile_exit_code, write_report
 from .probe import profile_jar
 from .recover import recover as do_recover
 from .recover import rewrite_sources as do_rewrite_sources
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ENGINES_DIR = HERE.parent / "engines"
+DEFAULT_ENGINES_DIR = TC.default_engines_dir()
 
 
 def _dir_to_jar(src: Path, dest: Path) -> Path:
@@ -537,7 +540,6 @@ def cmd_decompile(args: argparse.Namespace) -> int:
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_decompiled")
 
     jar_for_work = input_path
-    tmp2: Path | None = None
     try:
         prof = profile_jar(input_path)
 
@@ -574,7 +576,6 @@ def cmd_decompile(args: argparse.Namespace) -> int:
                                               strict=args.strict_remap)
                 print(f"      remapped {changed}/{total} classes -> {remapped.name}")
                 jar_for_work = remapped
-                tmp2 = remapped.parent
 
         rep = decompile(
             jar_for_work, out_dir, engines_dir,
@@ -1345,7 +1346,7 @@ def _do_project_export(args: argparse.Namespace, raw: Path, out_dir: Path,
     print(f"  java sources   : {stats['java_files']} file(s) ({stats['files_repaired']} repaired for recompilation)")
     print(f"  resources      : {stats['resources_copied']} file(s) extracted")
     print(f"  stubs bundled  : {stats['stubs_bundled']} mock library(ies)")
-    print(f"  scaffold       : build.gradle, settings.gradle, gradle.properties, README.md")
+    print("  scaffold       : build.gradle, settings.gradle, gradle.properties, README.md")
 
     if getattr(args, "compile", False):
         print("\nrunning javac verification loop ...")
@@ -1367,6 +1368,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="jdec",
         description="multi-engine Java decompiler with bytecode-verified output selection",
     )
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {__version__}")
     p.add_argument("--engines-dir", default=str(DEFAULT_ENGINES_DIR),
                    help="where decompiler jars live")
     sub = p.add_subparsers(dest="cmd", required=True)

@@ -24,13 +24,8 @@ interpreter for a verifier.
 
 from __future__ import annotations
 
-import struct
-import time
 from dataclasses import dataclass, field
 
-from .. import bytecode as BC
-from .. import classfile as CF
-from ..jint import i32, i64
 
 OP_GOTO = 0xA7
 OP_TABLESWITCH = 0xAA

@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 JAVAC_TIMEOUT = 300
@@ -28,6 +29,29 @@ JAVAC_TIMEOUT = 300
 _MISSING_JAVAC = ("javac not found: set JAVA_HOME to a JDK or put javac on PATH "
                   "(this step needs a full JDK, not just a JRE)")
 _MISSING_JAVA = "java not found: set JAVA_HOME to a JDK or put java on PATH"
+
+
+def default_engines_dir() -> Path:
+    """Where downloaded engine jars and generated agents live.
+
+    A source checkout keeps the historical ``jdec/engines`` directory so
+    existing downloads and tests stay put. An installed wheel must never
+    write to ``site-packages/engines`` (shared, read-only and unversioned),
+    so it uses the per-user cache instead.
+    """
+    pkg = Path(__file__).resolve().parent
+    repo_root = pkg.parent.parent
+    if (repo_root / "jdec.py").is_file() or (repo_root / ".git").is_dir():
+        return pkg.parent / "engines"
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA")
+                    or (Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME")
+                    or (Path.home() / ".cache"))
+    return base / "jdec" / "engines"
 
 
 class ToolchainError(RuntimeError):

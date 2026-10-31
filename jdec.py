@@ -21,8 +21,11 @@ if __name__ == "__main__":
     from jdec.cli import main
     sys.exit(main())
 else:
-    # When imported as `import jdec` while in repo root,
-    # cleanly load the package jdec/jdec/__init__.py
+    # NOTE: `jdec/` is both the project directory and the package parent,
+    # so `import jdec` from the repo root resolves to a namespace package
+    # instead of jdec/jdec/__init__.py. This loader forces the real package.
+    # The duplicate forwarder jdec/jdec.py exists for the same reason.
+    # Do not delete either until the tree moves to a standard src/ layout.
     import importlib.util
     pkg_init = Path(__file__).resolve().parent / "jdec" / "jdec" / "__init__.py"
     spec = importlib.util.spec_from_file_location(

@@ -328,7 +328,7 @@ def _check_predicate(kind, group, start, end, sh, eh, cf, bad, gi):
 
 def _check_goto(kind, group, start, end, sh, eh, cf, bad, gi):
     snap = group[0].before[0]
-    start_by_pc = _by_pc(start)
+    _by_pc(start)
     idx = next((i for i, s in enumerate(start) if s.pc == snap.pc), None)
     if idx is None or idx + 1 >= len(start):
         bad(kind, "redundant goto has no following instruction", gi)

@@ -7,6 +7,23 @@ on:
     branches: [ master, main ]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install ruff
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ruff
+      - name: Lint undefined names, unused imports/vars and f-strings
+        run: |
+          ruff check jdec/jdec jdec/tests --select F821,F811,F401,F841,F541
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -42,6 +59,7 @@ jobs:
       - name: Test CLI entrypoint
         run: |
           jdec --help
+          jdec --version
 
       - name: Skill self-test
         run: |
@@ -50,3 +68,39 @@ jobs:
       - name: Run test suite
         run: |
           python jdec/tests/run_tests.py
+
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip wheel . -w dist --no-deps
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv /tmp/jdec-wheel-venv
+          /tmp/jdec-wheel-venv/bin/pip install dist/jdec-*.whl
+      - name: Version and engines from the wheel install
+        run: |
+          /tmp/jdec-wheel-venv/bin/jdec --version
+          /tmp/jdec-wheel-venv/bin/jdec engines | tee engines.txt
+          grep -q 'CFR 0.152.*available' engines.txt
+          grep -q 'Vineflower 1.11.1.*available' engines.txt
+          grep -q 'Procyon 0.6.0.*available' engines.txt
+      - name: Engine cache must not live under site-packages
+        run: |
+          test ! -d /tmp/jdec-wheel-venv/lib/python3.11/site-packages/engines
+      - name: Probe a fixture with the wheel install
+        run: |
+          /tmp/jdec-wheel-venv/bin/jdec probe jdec/tests/sample.jar

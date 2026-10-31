@@ -171,7 +171,7 @@ def _element_value(cf, r: _Reader):
     if tag in _EV_PRIM:
         return _const_value(cf, r.u2())
     if tag == _EV_ENUM:
-        ti = r.u2()
+        r.u2()
         ni = r.u2()
         try:
             return cf.utf8(ni)

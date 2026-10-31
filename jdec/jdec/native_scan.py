@@ -103,7 +103,7 @@ def parse_pe_exports(data: bytes) -> list[str]:
         sections = []
         for i in range(nsec):
             s = sec_tab + i * 40
-            vsz, va, rsz, raw = struct.unpack_from("<I", data, s + 8)[0], \
+            vsz, va, _rsz, raw = struct.unpack_from("<I", data, s + 8)[0], \
                 struct.unpack_from("<I", data, s + 12)[0], \
                 struct.unpack_from("<I", data, s + 16)[0], \
                 struct.unpack_from("<I", data, s + 20)[0]

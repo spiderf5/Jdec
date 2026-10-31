@@ -570,7 +570,7 @@ def compute_frames(cf, member, code: bytes, handlers,
     if not insns:
         raise FrameError("empty code array")
     by_pc = {i.pc: i for i in insns}
-    boundaries = sorted(by_pc)
+    sorted(by_pc)
 
     states: dict = {0: initial_frame(cf, member, max_locals)}
     queue = [0]

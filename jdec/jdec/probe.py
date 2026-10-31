@@ -115,7 +115,7 @@ class JarProfile:
         lines = [
             f"file           : {self.path.name}",
             f"entries        : {self.entries}  (classes {self.classes}, resources {self.resources})",
-            f"bytecode       : " + ", ".join(
+            "bytecode       : " + ", ".join(
                 f"Java {k} x{v}" for k, v in sorted(self.java_versions.items(),
                                                     key=lambda kv: -kv[1])[:4]),
             f"obfuscation    : {self.obfuscation:.0f}/100"
@@ -123,7 +123,7 @@ class JarProfile:
         ]
         if self.is_minecraft:
             lines.append(
-                f"minecraft      : yes"
+                "minecraft      : yes"
                 + (f" {self.mc_version}" if self.mc_version else " version unknown")
                 + (f" / {self.mc_flavor}" if self.mc_flavor else ""))
         if self.top_packages:

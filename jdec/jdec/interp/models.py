@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from .values import (Arr, JavaThrow, Obj, Opaque, Unsupported, _append_text,
+from .values import (Arr, JavaThrow, Obj, Unsupported, _append_text,
                      _to_text, as_int, jstr,
                      make_model)
 
@@ -74,7 +74,6 @@ class Models:
                 and name in _SAM_METHODS:
             return True, self._sam(engine, receiver, args)
 
-        key = (cls, name)
 
         # unboxing accessors on boxed values: `Integer.intValue()` and friends
         # are everywhere and the value is already in the model

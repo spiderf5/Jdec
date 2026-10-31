@@ -1,14 +1,16 @@
 """Automated end-to-end deobfuscation and analysis pipeline for jdec.
 
 Orchestrates all analysis and deobfuscation capabilities into a single flow:
-Phase 1: Probe & Profiling (structure, MC version, obfuscator fingerprints)
-Phase 2: Bytecode Pre-cleaning (CFG de-flattening & constant folding)
-Phase 3: Symbol Remapping (Mojang / Yarn / MCP / TSRG2 / Official-SRG)
-Phase 4: Multi-Engine Decompilation & Verification Scoring
-Phase 5: Dynamic Replay Decryption (BSM indy & string-pool with mc_stubs)
-Phase 6: Native Triage & Reverse JNI Call Graph
-Phase 7: Behavioral Analysis (Mixin hooks, refmap, threat signals, strings)
-Phase 8: Master Executive Report & Web Workbench Launch
+Stage 1: Probe & Profiling (structure, MC version, obfuscator fingerprints)
+Stage 2: Bytecode Pre-cleaning (CFG de-flattening & constant folding)
+Stage 3: Symbol Remapping (Mojang / Yarn / MCP / TSRG2 / Official-SRG)
+Stage 4: Multi-Engine Decompilation & Verification Scoring
+Stage 5: Dynamic Replay Decryption (BSM indy & string-pool with mc_stubs)
+Stage 6: Native Triage & Reverse JNI Call Graph
+Stage 7: Behavioral Analysis (Mixin hooks, refmap, threat signals, strings)
+Stage 8 (optional): Gradle project export (--export-project)
+The summary is written after stage 7; the step denominator is 8 only when
+export is requested, so a run never jumps from [7/7] to [8/8].
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from . import bsm as BM
 from . import decompile as DC
 from . import deflat as DF
 from . import engines as EN
+from . import toolchain as TC
 from . import mappings as MP
 from . import native_scan as NS
 from . import pool as PL
@@ -335,6 +338,10 @@ def run_pipeline(
     work_dir = out_dir / "_pipeline"
     work_dir.mkdir(parents=True, exist_ok=True)
     stages: list[StageStatus] = []
+    total_steps = 8 if export_project else 7
+
+    def step(i: int, msg: str) -> None:
+        print(f"[{i}/{total_steps}] {msg}")
 
     def record(name: str, status: str, detail: str = "") -> StageStatus:
         st = StageStatus(name=name, status=status, detail=detail)
@@ -342,16 +349,16 @@ def run_pipeline(
         return st
 
     if engines_dir is None:
-        engines_dir = Path(__file__).resolve().parent.parent / "engines"
+        engines_dir = TC.default_engines_dir()
     EN.ensure_engines(engines_dir, quiet=True)
 
-    print(f"=== jdec Automated Pipeline ===")
+    print("=== jdec Automated Pipeline ===")
     print(f"target  : {target}")
     print(f"output  : {out_dir}")
     print()
 
     # Phase 1: Probe
-    print("[1/7] Probing & profiling target ...")
+    step(1, "Probing & profiling target ...")
     prof = PB.profile_jar(target)
     record("probe", STAGE_OK,
            f"{prof.classes} classes, obf={prof.obfuscation}/100 "
@@ -367,7 +374,7 @@ def run_pipeline(
 
     # Phase 2: Bytecode Pre-cleaning (CFG De-flattening)
     if not no_deflat:
-        print("[2/7] Bytecode pre-cleaning (CFG de-flattening & constant folding) ...")
+        step(2, "Bytecode pre-cleaning (CFG de-flattening & constant folding) ...")
         preclean_jar = work_dir / "precleaned.jar"
         try:
             # The rewrite produces the artifact every later stage reads, so it
@@ -412,7 +419,7 @@ def run_pipeline(
     if want_deobf:
         version = mc_version or prof.mc_version
         if mappings_file:
-            print(f"[3/7] Loading custom mappings from {mappings_file.name} ...")
+            step(3, f"Loading custom mappings from {mappings_file.name} ...")
             try:
                 mapping_obj = MP.load_mapping(mappings_file)
                 mapping_desc = mappings_file.name
@@ -422,7 +429,7 @@ def run_pipeline(
         elif version:
             try:
                 resolved_set = _mapping_set_for(mapping_set, prof)
-                print(f"[3/7] Auto-fetching {resolved_set} mappings for {version} ...")
+                step(3, f"Auto-fetching {resolved_set} mappings for {version} ...")
                 cache = out_dir.parent / ".jdec_mappings"
                 mapping_obj = MP.auto_fetch(version, resolved_set, cache)
                 mapping_desc = mapping_obj.describe() if mapping_obj else None
@@ -431,7 +438,7 @@ def run_pipeline(
                 record("remap", STAGE_FAILED, f"mapping fetch failed: {exc}")
                 mapping_obj = None
         else:
-            print("[3/7] ! Minecraft version unknown; skipping symbol remapping")
+            step(3, "! Minecraft version unknown; skipping symbol remapping")
             record("remap", STAGE_SKIPPED, "minecraft version unknown")
 
         if mapping_obj is not None:
@@ -446,11 +453,11 @@ def run_pipeline(
                 print(f"      ! remapping failed: {exc}")
                 record("remap", STAGE_FAILED, f"remap failed: {exc}")
     else:
-        print("[3/7] Symbol remapping: skipped (not needed or disabled)")
+        step(3, "Symbol remapping: skipped (not needed or disabled)")
         record("remap", STAGE_SKIPPED, "not needed or disabled")
 
     # Phase 4: Multi-Engine Decompilation & Verification
-    print("[4/7] Multi-engine decompilation with bytecode verification ...")
+    step(4, "Multi-engine decompilation with bytecode verification ...")
     src_dir = out_dir / "src"
     rep = None
     decompile_error = ""
@@ -524,13 +531,13 @@ def run_pipeline(
     indy_st: tuple[str, str] | None = None
     pool_st: tuple[str, str] | None = None
     if not no_recover and not allow_replay:
-        print("[5/7] Dynamic replay string decryption: SKIPPED (safety gate)")
+        step(5, "Dynamic replay string decryption: SKIPPED (safety gate)")
         print("      Dynamic replay EXECUTES code from the target jar; it is "
               "opt-in via --allow-replay / allow_replay=True.")
         record("replay", STAGE_SKIPPED,
                "safety gate: replay executes target code; opt in via --allow-replay")
     elif not no_recover:
-        print("[5/7] Dynamic JVM replay string decryption "
+        step(5, "Dynamic JVM replay string decryption "
               "(--allow-replay given: target code WILL be executed) ...")
         # 1. BSM Indy
         try:
@@ -616,7 +623,7 @@ def run_pipeline(
         else:
             record("replay", STAGE_OK, detail)
     else:
-        print("[5/7] Dynamic replay string decryption: disabled (--no-recover)")
+        step(5, "Dynamic replay string decryption: disabled (--no-recover)")
         record("replay", STAGE_SKIPPED, "disabled (--no-recover)")
 
     # Phase 6: Native Triage & Behavioral Analysis
@@ -626,7 +633,7 @@ def run_pipeline(
     dyn_jni_count = 0
 
     if not no_natives:
-        print("[6/7] Native library & behavioral triage ...")
+        step(6, "Native library & behavioral triage ...")
         try:
             nat_dir = out_dir / "natives"
             tri = NS.triage(current_jar, nat_dir, collect_decl=True)
@@ -649,7 +656,7 @@ def run_pipeline(
             print(f"      ! native triage failed: {exc}")
             record("natives", STAGE_FAILED, f"native triage error: {exc}")
     else:
-        print("[6/7] Native library triage: disabled")
+        step(6, "Native library triage: disabled")
         record("natives", STAGE_SKIPPED, "disabled (--no-natives)")
 
     # Behavioral analysis (Mixin hooks & threat signals)
@@ -696,7 +703,7 @@ def run_pipeline(
         record("analysis", STAGE_SKIPPED, "disabled (--no-analyze)")
 
     # Phase 7: Master Executive Summary Report
-    print("[7/7] Generating pipeline summary ...")
+    step(7, "Generating pipeline summary ...")
     elapsed = time.time() - t0
     record("summary", STAGE_OK, "pipeline_summary.md / pipeline_summary.json")
     res = PipelineResult(
@@ -731,7 +738,8 @@ def run_pipeline(
 
     # Phase 8: Automated IDE Project Export
     if export_project:
-        print("\n[8/8] Exporting complete IDE Gradle project ...")
+        print()
+        step(8, "Exporting complete IDE Gradle project ...")
         from . import project as PJ
         proj_dir = out_dir / "project"
         try:

@@ -957,7 +957,6 @@ def test_ir_roundtrip() -> None:
 def test_toolchain_single_entry() -> None:
     """javac is spawned from exactly one place, with the same guardrails."""
     print("toolchain: one entry point for the JDK")
-    import io
     from unittest import mock
     from jdec import engines as EN
     from jdec import toolchain as TC
@@ -1055,7 +1054,7 @@ def test_verify_gate() -> None:
                     target = m
                     break
             check("fixture has a constructor to corrupt", target is not None)
-            ci = BC.method_code(cf, target)
+            BC.method_code(cf, target)
             blob = bytearray(target.attrs_blob)
             cnt = struct.unpack_from(">H", blob, 0)[0]
             o = 2
@@ -2022,12 +2021,12 @@ def test_devirt_realistic_vm() -> None:
         for name, argv, expect in cases:
             desc = {"calc": "(III)I", "prod": "(I)I",
                     "sum": "([I)I"}[name]
-            h = Heap()
+            Heap()
             o = it.invoke("com/example/Host", name, desc, None, argv)
             check(f"{name}{argv} computes {expect}",
                   o.kind == "return" and o.value == expect,
                   f"{o.kind}:{o.value} {o.reason[:60]}")
-        h = Heap()
+        Heap()
         o = it.invoke("com/example/Host", "mul2", "(D)D", None, [2.5])
         check("mul2(2.5) computes 3.5",
               o.kind == "return" and abs(o.value - 3.5) < 1e-9,
@@ -2117,7 +2116,6 @@ def test_interp_engine_semantics() -> None:
     Opaque hiding inside a model collection.
     """
     print("interp engine: category-2 args, acmp, and taint in containers")
-    from pathlib import Path as _P
     from jdec.interp import diff as ID
     from jdec.interp.values import Heap, Obj, Opaque
     from jdec.interp.engine import Interp, Universe
@@ -2170,7 +2168,7 @@ def test_interp_engine_semantics() -> None:
         # as same; a clinit-era one is a structural placeholder by design
         left = Universe(jar)
         h1, h2 = Heap(), Heap()
-        it = Interp(left, h1, __import__("jdec.interp.models",
+        Interp(left, h1, __import__("jdec.interp.models",
                                         fromlist=["Models"]).Models())
         hidden = Opaque("call:java/lang/System.currentTimeMillis()J", 1, 1)
         h1.statics[("demo/eng/Mix", "bag")] = \
@@ -2216,7 +2214,6 @@ def test_interp_lambda_and_streams() -> None:
     and writes the filesystem is decisive without touching the real disk.
     """
     print("interp: lambda bodies, Stream pipelines, and the VFS")
-    from pathlib import Path as _P
     from jdec.interp import diff as ID
 
     if JAVAC is None:
@@ -2294,7 +2291,7 @@ def test_reason_replay_and_rollback() -> None:
     """Every accepted edit must replay from the original bytes."""
     print("reasons: the journal replays, and tampering is caught")
     import zipfile
-    from jdec import classfile as CF, bytecode as BC
+    from jdec import classfile as CF
     from jdec.ir import reasons as RS
 
     with zipfile.ZipFile(SAMPLE) as z:
@@ -2320,7 +2317,7 @@ def test_reason_replay_and_rollback() -> None:
           "replay accepted bytes without a journal")
 
     cf2 = CF.parse(data)
-    member2 = [m for m in cf2.methods
+    [m for m in cf2.methods
                if cf2.utf8(m.name_index) == "pick"][0]
     from jdec import deflat as DF
     check("deflat refuses nothing here", DF.deflat_jar is not None)
@@ -2329,7 +2326,6 @@ def test_reason_replay_and_rollback() -> None:
 def test_unflatten_strict_rejection() -> None:
     """The two known false-positive paths must be refused by the checker."""
     print("reasons: unflatten without a state slot, or with an extra branch")
-    import struct
     from jdec import bytecode as BC
     from jdec.ir import assemble as ASM, reasons as RS
     from jdec.ir import transforms as TR
@@ -2367,6 +2363,8 @@ def test_unflatten_strict_rejection() -> None:
         code = BC.encode(insns)
         return code, sw_pc, st_pc, jump_pc
 
+    from jdec.ir.types import FrameError
+
     for with_iload, extra in ((False, False), (True, True)):
         code, sw_pc, st_pc, jump_pc = build(with_iload, extra)
         prog = ASM.Program.parse(code, [])
@@ -2379,7 +2377,6 @@ def test_unflatten_strict_rejection() -> None:
         try:
             out_code, out_handlers = prog.assemble()
         except FrameError as exc:
-            from jdec.ir.types import FrameError
             check("an unrepeatable edit is refused", True, str(exc))
             continue
         bad = RS.replay(prog.original_code, prog.original_handlers,
@@ -2392,7 +2389,6 @@ def test_unflatten_strict_rejection() -> None:
 def test_interp_same_negative_and_models() -> None:
     """Same model both sides: agreement, difference, and model behaviour."""
     print("interp: original==original, a broken rewrite differs, models run")
-    from pathlib import Path as _P
     from jdec.interp import diff as ID
 
     if JAVAC is None:
@@ -3382,7 +3378,7 @@ def test_verify_matrix() -> None:
     # revert everything and the exit code meaningless.
     oldest = min(exes, key=lambda e: VF.jvm_major(str(e)) or 99)
     ceiling = VF.jvm_major(str(oldest))
-    newest = max(majors.values())
+    max(majors.values())
     sample_major = max(VF.class_majors(SAMPLE).values())
     if ceiling and ceiling < sample_major:
         rep = VF.verify(SAMPLE, java=str(oldest))
@@ -5789,8 +5785,39 @@ def test_cfg_and_dynamic_mocks() -> None:
             mf = z.read("META-INF/MANIFEST.MF").decode("utf-8")
             check("mock agent manifest has Premain-Class", "Premain-Class: jdec.mock.MockAgent" in mf)
             check("mock agent jar contains MockAgent.class", "jdec/mock/MockAgent.class" in z.namelist())
+            agent_cf = CF.parse(z.read("jdec/mock/MockAgent.class"))
+        agent_sigs = set(agent_cf.method_sigs())
+        agent_desc = "(Ljava/lang/String;Ljava/lang/instrument/Instrumentation;)V"
+        check("mock agent exposes premain", ("premain", agent_desc) in agent_sigs,
+              str(sorted(agent_sigs)))
+        check("mock agent exposes agentmain", ("agentmain", agent_desc) in agent_sigs,
+              str(sorted(agent_sigs)))
     finally:
         shutil.rmtree(tmp_agent_dir, ignore_errors=True)
+
+    # a cached stub with a matching old fingerprint must be rebuilt, not trusted
+    bad_dir = Path(tempfile.mkdtemp(prefix="jdec_test_bad_agent_"))
+    try:
+        bad_jar = bad_dir / "mock_agent.jar"
+        with zipfile.ZipFile(bad_jar, "w") as z:
+            z.writestr("jdec/mock/MockAgent.class",
+                       SB.build_stub_class_bytes("jdec/mock/MockAgent"))
+        old_fp = SB._sources_fingerprint(
+            {"__mock_agent__": SB.MOCK_AGENT_JAVA,
+             "__builder__": str(SB._BUILD_VERSION)})
+        bad_jar.with_name(bad_jar.name + ".sha256").write_text(
+            old_fp, encoding="utf-8")
+        rebuilt = SB.ensure_mock_agent_jar(bad_dir)
+        with zipfile.ZipFile(rebuilt) as z:
+            rebuilt_cf = CF.parse(z.read("jdec/mock/MockAgent.class"))
+        rebuilt_sigs = set(rebuilt_cf.method_sigs())
+        want_desc = "(Ljava/lang/String;Ljava/lang/instrument/Instrumentation;)V"
+        check("cache validation rebuilds a stub masquerading as an agent",
+              ("premain", want_desc) in rebuilt_sigs
+              and ("agentmain", want_desc) in rebuilt_sigs,
+              str(sorted(rebuilt_sigs)))
+    finally:
+        shutil.rmtree(bad_dir, ignore_errors=True)
 
     # 3. DynamicMockClassLoader live test (if javac & java available)
     jc = SB._find_javac("javac")
@@ -6059,6 +6086,11 @@ def test_bvm_and_native_extensions() -> None:
         mf = zf.read("META-INF/MANIFEST.MF").decode("utf-8")
         check("mock agent manifest contains Premain-Class", "Premain-Class: jdec.mock.MockAgent" in mf)
         check("mock agent contains MockAgent.class", "jdec/mock/MockAgent.class" in zf.namelist())
+        agent_cf2 = CF.parse(zf.read("jdec/mock/MockAgent.class"))
+    agent_sigs2 = set(agent_cf2.method_sigs())
+    agent_desc2 = "(Ljava/lang/String;Ljava/lang/instrument/Instrumentation;)V"
+    check("cached mock agent exposes premain", ("premain", agent_desc2) in agent_sigs2)
+    check("cached mock agent exposes agentmain", ("agentmain", agent_desc2) in agent_sigs2)
 
     # 10. INVOKEINTERFACE with arguments and receiver count
     vm_meth_itf = BVM.BVMMethod(
@@ -6511,6 +6543,34 @@ def test_bvm_extract_code_id_descriptor_gate() -> None:
     cf.methods.append(m_ok)
     got_ok = BVM.BVMDevirtualizer.extract_code_id(cf, m_ok)
     check("(I...) execute still yields codeId", got_ok == 88, f"got={got_ok}")
+
+
+def test_cli_json_and_version() -> None:
+    """The two P0 regressions: reach --json writes, --version exists."""
+    print("cli: reach --json and --version are real entry points")
+    from jdec import toolchain as TC
+    check("source checkout keeps the repo engines dir",
+          TC.default_engines_dir().name == "engines",
+          str(TC.default_engines_dir()))
+    ver = subprocess.run([sys.executable, str(ROOT / "jdec.py"), "--version"],
+                         cwd=ROOT, capture_output=True, text=True, timeout=60)
+    check("--version exits 0", ver.returncode == 0, ver.stderr[-200:])
+    check("--version prints the package version", "0.2.0" in ver.stdout,
+          ver.stdout)
+    out = Path(tempfile.mkdtemp(prefix="jdec_reach_json_")) / "reach.json"
+    try:
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "jdec.py"), "reach", str(SAMPLE),
+             "--json", str(out)],
+            cwd=ROOT, capture_output=True, text=True, timeout=180)
+        check("reach --json exits 0", r.returncode == 0, r.stderr[-300:])
+        check("reach --json writes a file", out.is_file())
+        if out.is_file():
+            data = json.loads(out.read_text(encoding="utf-8"))
+            check("reach --json contains a summary",
+                  isinstance(data.get("summary"), dict), str(data)[:200])
+    finally:
+        shutil.rmtree(out.parent, ignore_errors=True)
 
 
 def test_web_class_tags() -> None:
@@ -7383,6 +7443,7 @@ def main() -> int:
     test_web_source_path_containment()
     test_web_bytecode_endpoint()
     test_web_class_tags()
+    test_cli_json_and_version()
     test_callgraph_and_reachability()
     test_conservative_prune()
     test_decompiler_trap_pruning()

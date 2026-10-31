@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jdec"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Multi-engine Java decompiler driver with bytecode-verified output selection"
 readme = "jdec/README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "jdec contributors"}
@@ -23,11 +23,10 @@ keywords = [
     "procyon"
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Disassemblers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -42,6 +41,9 @@ jdec = "jdec.cli:main"
 [tool.setuptools]
 package-dir = {"" = "jdec"}
 
+[tool.setuptools.dynamic]
+version = {attr = "jdec._version.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["jdec"]
 include = ["jdec*"]
@@ -51,5 +53,6 @@ jdec = [
     "fingerprints.json",
     "*.java",
     "*.js",
-    "web_assets/*"
+    "web_assets/*",
+    "engines_src/*.java"
 ]

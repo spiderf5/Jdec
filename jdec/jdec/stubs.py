@@ -17,6 +17,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from . import toolchain as TC
+
+_BUILD_VERSION = 2  # bump when the agent build path changes
+
 # Java source code for runtime mocks
 STUB_SOURCES = {
     "net/minecraft/client/Minecraft.java": """package net.minecraft.client;
@@ -149,7 +153,7 @@ def _write_fingerprint(jar: Path, fingerprint: str) -> None:
 def ensure_stubs_jar(cache_dir: Path | None = None) -> Path:
     """Get or build the cached mc_stubs.jar."""
     if cache_dir is None:
-        cache_dir = Path(__file__).resolve().parent.parent / "engines"
+        cache_dir = TC.default_engines_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     stub_jar = cache_dir / "mc_stubs.jar"
     # filename-only caching kept a stale jar forever after STUB_SOURCES changed
@@ -382,8 +386,26 @@ public class MockAgent {
 """
 
 
+def _agent_jar_contract(jar: Path) -> bool:
+    """True when the jar really exposes both instrumentation entry points."""
+    try:
+        from . import classfile as CF
+        with zipfile.ZipFile(jar) as z:
+            cf = CF.parse(z.read("jdec/mock/MockAgent.class"))
+        sigs = set(cf.method_sigs())
+        want = "(Ljava/lang/String;Ljava/lang/instrument/Instrumentation;)V"
+        return (("premain", want) in sigs) and (("agentmain", want) in sigs)
+    except Exception:
+        return False
+
+
 def build_mock_agent_jar(dest: Path, javac_bin: str = "javac") -> Path:
-    """Build a Java Instrumentation Agent jar with Premain-Class to intercept native link errors."""
+    """Build a Java Instrumentation Agent jar with Premain-Class to intercept native link errors.
+
+    A generic stub class is not an agent: the JVM rejects it with
+    NoSuchMethodException: premain. If javac cannot produce both entry
+    points, fail loudly instead of caching an unusable jar.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     manifest = (
         "Manifest-Version: 1.0\r\n"
@@ -400,35 +422,37 @@ def build_mock_agent_jar(dest: Path, javac_bin: str = "javac") -> Path:
         agent_src.write_text(MOCK_AGENT_JAVA, encoding="utf-8")
         r = TC.run_javac([str(agent_src)], exe=javac_bin,
                          purpose="building the mock agent")
-        if r.returncode == 0:
-            with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
-                z.writestr("META-INF/MANIFEST.MF", manifest)
-                for cls_file in tmp_dir.rglob("*.class"):
-                    arcname = cls_file.relative_to(tmp_dir).as_posix()
-                    z.write(cls_file, arcname)
-            return dest
-    except Exception:
-        pass
+        if r.returncode != 0:
+            raise RuntimeError("javac failed: "
+                               + (r.stderr or r.stdout or "").strip()[-800:])
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("META-INF/MANIFEST.MF", manifest)
+            for cls_file in tmp_dir.rglob("*.class"):
+                arcname = cls_file.relative_to(tmp_dir).as_posix()
+                z.write(cls_file, arcname)
+        if not _agent_jar_contract(dest):
+            dest.unlink(missing_ok=True)
+            raise RuntimeError("built agent has no premain/agentmain")
+        return dest
+    except Exception as exc:
+        print(f"  ! mock agent build failed ({exc}); refusing to cache a non-agent jar")
+        raise
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    # Fallback to bytecode builder if javac is unavailable
-    agent_bytes = build_stub_class_bytes("jdec/mock/MockAgent")
-    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("META-INF/MANIFEST.MF", manifest)
-        z.writestr("jdec/mock/MockAgent.class", agent_bytes)
-    return dest
-
 
 def ensure_mock_agent_jar(cache_dir: Path | None = None) -> Path:
-    """Get or build the cached mock_agent.jar."""
+    """Get or build the cached mock_agent.jar, validating the contract."""
     if cache_dir is None:
-        cache_dir = Path(__file__).resolve().parent.parent / "engines"
+        cache_dir = TC.default_engines_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     agent_jar = cache_dir / "mock_agent.jar"
-    fingerprint = _sources_fingerprint({"__mock_agent__": MOCK_AGENT_JAVA})
-    if not _cache_matches(agent_jar, fingerprint):
+    fingerprint = _sources_fingerprint({"__mock_agent__": MOCK_AGENT_JAVA,
+                                        "__builder__": str(_BUILD_VERSION)})
+    if not (_cache_matches(agent_jar, fingerprint) and _agent_jar_contract(agent_jar)):
         build_mock_agent_jar(agent_jar)
+        if not _agent_jar_contract(agent_jar):
+            raise RuntimeError("mock_agent.jar failed its premain/agentmain contract")
         _write_fingerprint(agent_jar, fingerprint)
     return agent_jar
 

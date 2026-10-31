@@ -59,7 +59,7 @@ def score_jar(jar: Path, do_analyze: bool = False, do_decompile: bool = False,
         row["notes"] = len(a.notes)
     if do_decompile:
         out_dir = jar.parent / (jar.stem + "_scorecard_dec")
-        missing = EN.ensure_engines(engines_dir, quiet=True)
+        EN.ensure_engines(engines_dir, quiet=True)
         usable = [k for k in EN.ENGINES if EN.ENGINES[k].available(engines_dir)]
         if not usable:
             row["dec_error"] = "no engines"

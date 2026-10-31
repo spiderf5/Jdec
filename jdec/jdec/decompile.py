@@ -308,7 +308,7 @@ def decompile(
     lead = order[0]
     print(f"  engine order: {', '.join(order)}")
 
-    print(f"[2/5] scanning classes ...")
+    print("[2/5] scanning classes ...")
     if work.exists() and not resume:
         try:
             shutil.rmtree(work, ignore_errors=True)
@@ -725,7 +725,7 @@ def write_report(rep: Report, out_dir: Path) -> None:
         f"- elapsed: {rep.elapsed:.1f}s",
         "",
         "## result", "",
-        f"| status | count |", "|---|---|",
+        "| status | count |", "|---|---|",
         f"| fully recovered | {rep.ok} |",
         f"| partial (some members missing) | {rep.partial} |",
         f"| failed | {rep.failed + rep.missing} |",

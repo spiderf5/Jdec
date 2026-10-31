@@ -949,7 +949,7 @@ class VMTranslator:
                 cpi = cp_helper.add_fieldref(owner, name, desc)
                 buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF])
             elif fmt == "method":
-                o_idx, n_idx, d_idx, itf = operands[0], operands[1], operands[2], operands[3]
+                o_idx, n_idx, d_idx, _itf = operands[0], operands[1], operands[2], operands[3]
                 owner = _norm_internal(vm_method.constants[o_idx])
                 name = str(vm_method.constants[n_idx])
                 desc = str(vm_method.constants[d_idx])
@@ -976,12 +976,12 @@ class VMTranslator:
                 buf.extend([op, 0x00, 0x00])
             elif fmt == "table_switch":
                 # tableswitch placeholder (pad + min + max + dflt + targets)
-                t_min, t_max, dflt, count = operands[0], operands[1], operands[2], operands[3]
+                t_min, t_max, _dflt, count = operands[0], operands[1], operands[2], operands[3]
                 buf.append(op)
                 # We align later during PC resolution; reserve max 3 pad bytes
                 buf.extend([0x00] * (3 + 4 + 4 + 4 + count * 4))
             elif fmt == "lookup_switch":
-                dflt, npairs = operands[0], operands[1]
+                _dflt, npairs = operands[0], operands[1]
                 buf.append(op)
                 buf.extend([0x00] * (3 + 4 + 4 + npairs * 8))
 

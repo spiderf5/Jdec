@@ -17,6 +17,7 @@ from __future__ import annotations
 import collections
 import struct
 from dataclasses import dataclass, field
+from typing import Any
 
 from . import bytecode as BC
 from . import classfile as CF
@@ -284,7 +285,7 @@ def assemble_cfg(cfg: CFG, allow_widening: bool = True) -> tuple[bytes, list[Han
 
                 if st["op"] in (OP_TABLESWITCH, OP_LOOKUPSWITCH):
                     pad = (4 - ((cur_pc + 1) % 4)) % 4
-                    base = insn.pc + 1 + (4 - ((insn.pc + 1) % 4)) % 4
+                    insn.pc + 1 + (4 - ((insn.pc + 1) % 4)) % 4
                     table_payload_len = insn.length - (1 + (4 - ((insn.pc + 1) % 4)) % 4)
                     new_len = 1 + pad + table_payload_len
                     if st["length"] != new_len:

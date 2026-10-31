@@ -7,6 +7,7 @@ tools/
 __pycache__/
 *.py[cod]
 *.egg-info/
+build/
 dist/
 
 # jdec: downloaded engines and build artifacts, restorable via

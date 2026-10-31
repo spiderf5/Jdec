@@ -10,7 +10,7 @@ from .engine import Interp, Universe
 from .values import (VOID, Arr, Heap, JavaThrow, Obj, Opaque, Outcome,
                      Unsupported,
                      default_value,
-                     is_opaque, is_run_opaque)
+                     is_run_opaque)
 
 
 @dataclass

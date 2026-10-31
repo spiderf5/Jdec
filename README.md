@@ -27,7 +27,7 @@ python jdec.py verify client.jar        # JVM 门禁：每个类都要过 -Xveri
 
 完整能力、实测数据与设计取舍见 **[jdec/README.md](jdec/README.md)**；
 未达成的边界见 [jdec/ROADMAP.md](jdec/ROADMAP.md) 与 README 的“边界”一节。
-当前状态：alpha，核心回归 1000+ 项全绿（`python jdec/tests/run_tests.py`）；03 专项试用版（Java 级隔离重放、两类机制、独立样本）见 [jdec/README.md](jdec/README.md)。
+当前状态：alpha，核心回归 1000+ 条断言（127 个用例）全绿（`python jdec/tests/run_tests.py`）；03 专项试用版（Java 级隔离重放、两类机制、独立样本）见 [jdec/README.md](jdec/README.md)。
 
 ---
 

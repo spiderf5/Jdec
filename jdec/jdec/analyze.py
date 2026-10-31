@@ -560,7 +560,7 @@ def render_markdown(a: Analysis) -> str:
             for name, size in sorted(nat.libraries, key=lambda x: -x[1]):
                 L.append(f"  - `{name}` ({size / 1024:.0f} KB)")
         if nat.markers:
-            L.append(f"- virtualisation interpreter classes: "
+            L.append("- virtualisation interpreter classes: "
                      + ", ".join(f"`{m}`" for m in nat.markers[:6]))
         if nat.per_class:
             L.append("")
