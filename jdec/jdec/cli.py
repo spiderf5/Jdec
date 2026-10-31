@@ -674,6 +674,23 @@ def cmd_rename(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_verify(v) -> None:
+    """One line for a `verify` report; nothing at all when there is none."""
+    if not v:
+        return
+    if v.get("skipped"):
+        print(f"verify    : skipped ({v['skipped']})")
+        return
+    line = f"verify    : {v.get('verified', 0)} class(es) pass -Xverify:all"
+    if v.get("reverted"):
+        line += f", {len(v['reverted'])} reverted (their rewrite did not load)"
+    if v.get("still_invalid"):
+        line += f", {len(v['still_invalid'])} were already invalid in the input"
+    if v.get("unresolved"):
+        line += f", {v['unresolved']} not judged (missing deps)"
+    print(line)
+
+
 def cmd_deflat(args: argparse.Namespace) -> int:
     from . import deflat
     p = Path(args.input)
@@ -681,35 +698,43 @@ def cmd_deflat(args: argparse.Namespace) -> int:
         print(f"no such file: {p}")
         return 2
     out = Path(args.output) if args.output else p.with_name(p.stem + "_deflat" + p.suffix)
+    # The instruction-level path is the default: it deletes what the byte
+    # passes could only NOP, and it computes the StackMapTable instead of
+    # inheriting one. `--byte-patch` keeps the old behaviour for comparison;
+    # `--strip-frames` is a decompiler input, where neither applies.
+    ir = not (args.byte_patch or args.strip_frames)
     stats = deflat.deflat_jar(p, out, verify_output=not args.no_verify,
-                              strip_frames=args.strip_frames)
-    v = stats.get("verify")
+                              strip_frames=args.strip_frames,
+                              recompute_frames=args.recompute_frames,
+                              ir_rewrite=ir)
+    if stats.get("frames_rebuilt"):
+        print(f"frames    : {stats['frames_rebuilt']} rewritten method(s) got a "
+              f"recomputed StackMapTable")
     print(f"deflat    : {stats['methods_unflattened']} method(s) rewritten across "
           f"{stats['classes']} class(es)"
-          + (f" ({stats['methods_reverted']} kept original: body still has "
-             f"branch targets)" if stats.get("methods_reverted") else ""))
+          + (f" ({stats['methods_reverted']} kept original)"
+             if stats.get("methods_reverted") else ""))
     print(f"output    : {out}")
-    if v:
-        if v.get("skipped"):
-            print(f"verify    : skipped ({v['skipped']})")
-        else:
-            line = f"verify    : {v['verified']} class(es) pass -Xverify:all"
-            if v.get("reverted"):
-                line += f", {len(v['reverted'])} reverted (their rewrite did not load)"
-            if v.get("still_invalid"):
-                line += f", {len(v['still_invalid'])} were already invalid in the input"
-            if v.get("unresolved"):
-                line += f", {v['unresolved']} not judged (missing deps)"
-            print(line)
+    v = stats.get("verify")
+    _print_verify(v)
     if stats["methods_unflattened"]:
-        if args.strip_frames:
+        if ir:
+            print("note      : instruction-level rewrite: folded expressions and "
+                  "dead blocks are deleted, not NOP-filled, so the code array "
+                  "gets shorter. Methods whose frames could not be recomputed "
+                  "kept their original body.")
+        elif args.strip_frames:
             print("note      : frames stripped on purpose (decompiler input). A "
                   "rewritten method that still has branches is reverted, because "
                   "the split verifier needs a frame at every branch target.")
+        elif args.recompute_frames:
+            print("note      : StackMapTables were recomputed (full_frame) and "
+                  "keep every offset javac required. This path still reverts more "
+                  "classes than the default; see jdec/change-report.md.")
         else:
-            print("note      : StackMapTables kept. These rewrites are "
-                  "length-preserving, so the original frames stay at the right "
-                  "offsets; the verifier above confirms it.")
+            print("note      : StackMapTables kept as they were. These rewrites "
+                  "are length-preserving, so the frames still describe the right "
+                  "offsets; the verifier above loaded every class.")
     if v and v.get("reverted"):
         return 1
     return 0
@@ -723,6 +748,7 @@ def cmd_devirt(args: argparse.Namespace) -> int:
         return 2
 
     out = Path(args.output) if args.output else p.with_name(p.stem + "_devirt" + p.suffix)
+    frame_notes: list[str] = []
     code_pool: dict[int, DV.VMMethod] = {}
     if getattr(args, "pool", None):
         pool_p = Path(args.pool)
@@ -733,23 +759,30 @@ def cmd_devirt(args: argparse.Namespace) -> int:
             return 2
 
     if p.suffix.lower() == ".jar":
-        res = DV.Devirtualizer.devirtualize_jar(p, out, code_pool)
-        print(f"devirt     : {res['devirtualized_methods']} method(s) in {res['devirtualized_classes']} class(es) devirtualized")
+        res = DV.Devirtualizer.devirtualize_jar(
+            p, out, code_pool, verify_output=not getattr(args, "no_verify", False))
+        print(f"devirt     : {res['devirtualized_methods']} method(s) in "
+              f"{res['devirtualized_classes']} class(es) devirtualized")
         print(f"output     : {out}")
-        if res["devirtualized_methods"]:
-            print("note       : rebuilt methods carry no StackMapTable; such "
-                  "classes may fail JVM verification on Java 7+. Decompilers "
-                  "(CFR/Vineflower) recompute the frames, so jdec output is "
-                  "unaffected.")
-        return 0
+        _print_verify(res.get("verify"))
+        if res.get("frame_notes"):
+            print(f"frames     : {len(res['frame_notes'])} rebuilt method(s) could "
+                  f"not be given a StackMapTable; the classes were kept only "
+                  f"because the verifier accepts them, and the gate reverted the "
+                  f"rest")
+        return 1 if (res.get("verify") or {}).get("reverted") else 0
     elif p.suffix.lower() == ".class":
         cf = CF.parse(p.read_bytes())
-        cf, count = DV.Devirtualizer.devirtualize_class_file(cf, code_pool)
+        cf, count = DV.Devirtualizer.devirtualize_class_file(
+            cf, code_pool, notes=frame_notes)
         out.write_bytes(cf.serialize())
         print(f"devirt     : {count} method(s) devirtualized -> {out}")
         if count:
-            print("note       : rebuilt methods carry no StackMapTable; such "
-                  "classes may fail JVM verification on Java 7+.")
+            # a single class file has no "other version" to fall back to, so the
+            # only honest thing left is to say what state it is in
+            print(f"frames     : {len(frame_notes)} method(s) without a "
+                  f"StackMapTable" if frame_notes
+                  else "frames     : every rebuilt method got a StackMapTable")
         return 0
     else:
         print(f"unsupported format: {p.suffix}")
@@ -1254,14 +1287,23 @@ def build_parser() -> argparse.ArgumentParser:
     sdef.add_argument("--no-verify", action="store_true",
                       help="skip the -Xverify:all gate (the output is then not "
                            "guaranteed to load)")
+    sdef.add_argument("--byte-patch", action="store_true",
+                      help="use the old byte-patching passes (NOP fill, original "
+                           "StackMapTable kept) instead of the instruction-level "
+                           "rewrite")
+    sdef.add_argument("--recompute-frames", action="store_true",
+                      help="with --byte-patch: also regenerate the "
+                           "StackMapTables (the instruction-level path always does)")
     sdef.add_argument("--strip-frames", action="store_true",
-                      help="strip the (stale-looking) StackMapTables instead of "
-                           "keeping them; better for feeding a decompiler, worse "
-                           "for running the jar")
+                      help="byte-patch, then strip the StackMapTables: for feeding "
+                           "a decompiler, not for running the jar")
     sdef.set_defaults(func=cmd_deflat)
 
     def _add_devirt_args(parser):
         parser.add_argument("input", help="target jar or class file to devirtualize")
+        parser.add_argument("--no-verify", action="store_true",
+                            help="skip the -Xverify:all gate on the output jar "
+                                 "(it is then not guaranteed to load)")
         parser.add_argument("-o", "--output", default=None,
                             help="output path (default: <input>_devirt.<ext>)")
         parser.add_argument("--pool", default=None,

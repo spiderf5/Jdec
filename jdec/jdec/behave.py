@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import time
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 

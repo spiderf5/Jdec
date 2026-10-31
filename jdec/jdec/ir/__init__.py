@@ -21,15 +21,30 @@ Current state (measured 2026-10-29, see jdec/change-report.md):
                  tableswitch / lookupswitch / wide / multianewarray /
                  invokeinterface / invokedynamic
 
-What belongs here next, in order, and only after `ircheck` stays green:
+What is here now:
 
-    types.py     Type / StackFrame / Label, JVMS 4.10.1.2 merge rules
-    assume.py    branch-target frame propagation (the verifier's worklist)
-    frames.py    StackMapTable emission from computed frames
+    types.py      Type tokens and the JVMS 4.10.1.2 merge rules
+    hierarchy.py  common supertypes (jar index + platform classes via the JVM)
+    assume.py     the verifier's worklist: instructions -> frames
+    frames.py     frames -> StackMapTable payload (always full_frame)
+    attrs.py      read/write the sub-attributes nested inside Code
+    roundtrip.py  the byte-exactness gate (ircheck)
+
+Measured 2026-10-30 on HMCL (3693 classes / 29,208 methods): frames recomputed
+for every method, 0 untypable, 0 classes rejected by `-Xverify:all`. That is the
+proof this layer works.
+
+What it is not yet used for: deflat's rewritten methods. There the JVM still asks
+for frames at offsets the analysis never reaches (dead padding at the end of a
+protected range), so `deflat --recompute-frames` is opt-in and the default keeps
+the original table. See the 2026-10-30 change-report entry.
+
+What belongs here next:
+
     assemble.py  insert/delete/replace instructions + re-layout
 
-`bytecode.encode` already does the re-layout half of that last item; it takes
-an explicit `pc_map` for exactly this reason.
+`bytecode.encode` already does the re-layout half of that; it takes an explicit
+`pc_map` for exactly this reason.
 """
 
 from .roundtrip import (  # noqa: F401

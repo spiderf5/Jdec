@@ -480,8 +480,23 @@ def prune_dead_code(code: bytes, handlers: list[BC.Handler] | None = None) -> tu
 
     buf = bytearray(code)
     pruned_count = 0
+    handler_pcs = {h.handler_pc for h in (handlers or [])}
     for insn in insns:
         if insn.pc not in reachable:
+            # NOPing the instruction *before* a handler entry turns "jump away"
+            # into "fall into the catch block with an empty stack". That is not
+            # a stale-frame problem, it is a behaviour change — measured on
+            # HMCL: 45 classes failed verification because a dead `goto` was
+            # NOPed and control fell into the handler's `astore`.
+            nxt = insn.pc + insn.length
+            ends_flow = (insn.is_terminator or insn.is_goto
+                         or insn.op in (OP_TABLESWITCH, OP_LOOKUPSWITCH))
+            if ends_flow and (nxt not in pc_to_insn or nxt in handler_pcs):
+                # NOPing the last terminator makes control fall off the end of
+                # the code array; NOPing the one before a handler entry makes it
+                # fall into the catch block with an empty stack. Both are
+                # behaviour changes, not stale frames (measured: 13 + 3 classes).
+                continue
             if insn.op != 0:
                 pruned_count += 1
             for p in range(insn.pc, insn.pc + insn.length):
@@ -844,6 +859,73 @@ def _revert_branchy_methods(cf: CF.ClassFile, before: list[bytes]) -> int:
     return reverted
 
 
+def _rebuild_frames(cf, indices, before, hier) -> tuple[int, list[int]]:
+    """Recompute StackMapTables for the methods deflat changed.
+
+    Returns (rebuilt, reverted). A method whose frames cannot be computed is put
+    back exactly as it was: shipping a class with a guessed frame is worse than
+    shipping the original method.
+    """
+    from . import bytecode as _BC
+    from .ir import assume as _assume
+    from .ir import attrs as _attrs
+    from .ir import frames as _frames
+    from .ir import types as _types
+
+    rebuilt, reverted = 0, []
+    for i in indices:
+        m = cf.methods[i]
+        try:
+            ci = _BC.method_code(cf, m, decode_insns=False)
+            if ci is None:
+                raise _types.FrameError("no Code attribute")
+            insns = _BC.decode(ci.code)
+            states = _assume.compute_frames(cf, m, ci.code, ci.handlers,
+                                            ci.max_stack, ci.max_locals, hier)
+            needed = set(_frames.needed_pcs(insns, ci.handlers))
+            # javac decided some offsets need frames that our worklist never
+            # reaches (a rewrite can leave dead padding at the end of a
+            # protected range). Keep those offsets and reuse the original
+            # frame: dropping it is what made HMCL classes fail with
+            # "Expecting a stackmap frame at branch target" after a rewrite.
+            original = {}
+            try:
+                shim = _Blob(before[i])
+                for name, payload in _attrs.code_subattrs(cf, shim):
+                    if name == "StackMapTable":
+                        original = _frames.decode(cf, payload, m, ci.max_locals)
+                        break
+            except Exception:
+                original = {}
+            needed |= set(original)
+            merged = {}
+            for pc in needed:
+                if pc in states:
+                    merged[pc] = states[pc]
+                elif pc in original:
+                    merged[pc] = original[pc]
+            missing = needed - set(merged)
+            if missing:
+                raise _types.FrameError(
+                    f"no frame for offset(s) {sorted(missing)[:4]}")
+            _attrs.set_code_subattr(cf, m, "StackMapTable",
+                                    _frames.encode(cf, merged, needed))
+            rebuilt += 1
+        except Exception:  # noqa: BLE001 - FrameError and decode errors alike
+            m.attrs_blob = before[i]
+            reverted.append(i)
+    return rebuilt, reverted
+
+
+class _Blob:
+    """Just enough of a Member for `attrs.code_subattrs` on saved bytes."""
+
+    __slots__ = ("attrs_blob",)
+
+    def __init__(self, blob: bytes):
+        self.attrs_blob = blob
+
+
 def _revert_shifted_methods(cf: CF.ClassFile, before: list[bytes],
                             before_len: list[int]) -> int:
     """Put back any rewritten method whose code moved.
@@ -864,16 +946,46 @@ def _revert_shifted_methods(cf: CF.ClassFile, before: list[bytes],
     return reverted
 
 
+def _rewrite_class_ir(cf: CF.ClassFile, hier) -> tuple[int, int]:
+    """Run the instruction-level passes over one class.
+
+    Returns (methods rewritten, methods rolled back). A rollback restores the
+    original `attrs_blob`, so the output is never worse than the input — the
+    same invariant the byte passes are held to.
+    """
+    from .ir import transforms as _transforms
+    edits = reverted = 0
+    for m in cf.methods:
+        before = m.attrs_blob
+        try:
+            if _transforms.rewrite_method(cf, m, hier):
+                edits += 1
+        except Exception:  # noqa: BLE001 - FrameError, decode error, anything
+            if m.attrs_blob != before:
+                m.attrs_blob = before
+                reverted += 1
+    return edits, reverted
+
+
 def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
-               strip_frames: bool = False) -> dict:
+               strip_frames: bool = False,
+               recompute_frames: bool = False,
+               ir_rewrite: bool = True) -> dict:
     """Rewrite flattened control flow and prune bytecode traps across an entire jar.
 
-    Two safety nets, in increasing cost:
+    The default path works on the instruction list (`ir/transforms.py`): a
+    folded expression is deleted, a dead block is removed, frames are recomputed
+    and the result is loaded under `-Xverify:all`. `ir_rewrite=False` selects
+    the original byte-patching passes, which fill their holes with `nop` and
+    leave the original StackMapTable in place; `strip_frames` is for
+    decompiler input only, where loadability is not the goal.
 
-    1. per method — with `strip_frames` a rewrite that still contains branches
-       would need a StackMapTable we cannot generate yet, so that method keeps
-       its original Code attribute; without it, a rewrite that moved any offset
-       is reverted (frames are only valid at the layout they were computed for);
+    Safety nets, in increasing cost:
+
+    1. per method — on the instruction path a method whose frames cannot be
+       recomputed keeps its original Code attribute; on the byte path a rewrite
+       that still contains branches (with `strip_frames`) or that moved an
+       offset (without it) is reverted;
     2. per class — `verify_or_keep` loads the result under `-Xverify:all` and
        replaces any class the verifier rejects with the original bytes.
 
@@ -881,8 +993,19 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
     made CFR/Vineflower drop ~46 classes in an earlier sample. For an artifact
     that has to run, keep the frames (default).
     """
+    if ir_rewrite and strip_frames:
+        raise ValueError("ir_rewrite and strip_frames are mutually exclusive: "
+                         "the instruction-level path computes the frames that "
+                         "strip_frames removes on purpose")
     stats: dict = {"classes": 0, "methods_unflattened": 0, "traps_pruned": 0,
-                   "methods_reverted": 0}
+                   "methods_reverted": 0, "frames_rebuilt": 0}
+    hier = None
+    if recompute_frames or ir_rewrite:
+        try:
+            from .ir import hierarchy as _hierarchy
+            hier = _hierarchy.Hierarchy.from_jar(jar_in)
+        except Exception:  # noqa: BLE001 - Object fallback still works
+            hier = None
     jar_out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(jar_in) as zin, zipfile.ZipFile(jar_out, "w", zipfile.ZIP_DEFLATED) as zout:
         for name in zin.namelist():
@@ -891,6 +1014,16 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                 stats["classes"] += 1
                 try:
                     cf = CF.parse(data)
+                    if ir_rewrite:
+                        edits, reverted = _rewrite_class_ir(cf, hier)
+                        stats["methods_unflattened"] += edits
+                        stats["traps_pruned"] += edits
+                        stats["frames_rebuilt"] += edits
+                        stats["methods_reverted"] += reverted
+                        if edits:
+                            data = cf.serialize()
+                        zout.writestr(name, data)
+                        continue
                     before = [m.attrs_blob for m in cf.methods]
                     before_len = []
                     for m in cf.methods:
@@ -904,15 +1037,32 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                             kept_back = _revert_shifted_methods(cf, before, before_len)
                         stats["methods_reverted"] += kept_back
                         edits -= kept_back
-                    if edits > 0:
+                    if edits > 0 and strip_frames:
                         stats["methods_unflattened"] += edits
                         stats["traps_pruned"] += edits
-                        if strip_frames:
-                            changed = {i for i, (m, old) in
-                                       enumerate(zip(cf.methods, before))
-                                       if m.attrs_blob != old}
-                            # 只剥被改写方法的帧：没动过的方法帧本来是对的
-                            _strip_stackmaps(cf, only=changed)
+                        changed = {i for i, (m, old) in
+                                   enumerate(zip(cf.methods, before))
+                                   if m.attrs_blob != old}
+                        # 只剥被改写方法的帧：没动过的方法帧本来是对的
+                        _strip_stackmaps(cf, only=changed)
+                        data = cf.serialize()
+                    elif edits > 0 and recompute_frames:
+                        changed = {i for i, (m, old) in
+                                   enumerate(zip(cf.methods, before))
+                                   if m.attrs_blob != old}
+                        rebuilt, reverted = _rebuild_frames(cf, changed, before, hier)
+                        stats["frames_rebuilt"] += rebuilt
+                        stats["methods_reverted"] += len(reverted)
+                        stats["methods_unflattened"] += edits - len(reverted)
+                        stats["traps_pruned"] += edits - len(reverted)
+                        data = cf.serialize()
+                    elif edits > 0:
+                        # default: keep the original table. These rewrites are
+                        # length-preserving, so the frames still sit at the same
+                        # offsets; `--recompute-frames` regenerates them, which
+                        # is experimental (see change-report).
+                        stats["methods_unflattened"] += edits
+                        stats["traps_pruned"] += edits
                         data = cf.serialize()
                 except Exception:
                     pass

@@ -169,6 +169,34 @@ def _mapping_set_for(declared: str, prof: PB.JarProfile) -> str:
     return "mojang"
 
 
+def deflat_stage_status(stats: dict) -> tuple[str, str]:
+    """(status, detail) for the pre-cleaning stage, from deflat's own report.
+
+    Two things must survive into the summary: how much of the rewrite took, and
+    whether the bytecode we hand to every later stage was actually loaded by a
+    JVM. A rewrite the verifier had to put back, or one nobody checked, is
+    `partial` — the artifact is usable, the rewrite is not complete, and saying
+    "ok" would erase the difference.
+    """
+    n = stats.get("methods_unflattened", 0)
+    classes = stats.get("classes", 0)
+    v = stats.get("verify") or {}
+    head = f"unflattened {n} method(s) in {classes} class(es)"
+    if v.get("skipped"):
+        return STAGE_PARTIAL, f"{head}; verify skipped: {v['skipped']}"
+    if not v:
+        return STAGE_PARTIAL, f"{head}; output not verified"
+    bits = [f"{v.get('verified', 0)} pass -Xverify:all"]
+    if v.get("reverted"):
+        bits.append(f"{len(v['reverted'])} reverted")
+    if v.get("still_invalid"):
+        bits.append(f"{len(v['still_invalid'])} invalid in the input")
+    if v.get("unresolved"):
+        bits.append(f"{v['unresolved']} not judged (missing deps)")
+    status = STAGE_PARTIAL if v.get("reverted") else STAGE_OK
+    return status, f"{head}; " + ", ".join(bits)
+
+
 def write_pipeline_summary(res: PipelineResult, out_dir: Path) -> tuple[Path, Path]:
     """Generate Markdown and JSON executive summary reports."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -316,25 +344,22 @@ def run_pipeline(
         print("[2/7] Bytecode pre-cleaning (CFG de-flattening & constant folding) ...")
         preclean_jar = work_dir / "precleaned.jar"
         try:
-            stats = DF.deflat_jar(current_jar, preclean_jar,
-                                  strip_frames=True, verify_output=False)
+            # The rewrite produces the artifact every later stage reads, so it
+            # is gated here rather than at the end: frames are recomputed, the
+            # result is loaded under -Xverify:all, and any class the verifier
+            # rejects is put back byte for byte. Frames used to be stripped on
+            # purpose (stale ones made CFR drop classes); they are no longer
+            # stale, so stripping would only make the file unloadable for
+            # nothing.
+            stats = DF.deflat_jar(current_jar, preclean_jar)
             unflattened_count = stats.get("methods_unflattened", 0)
-            v = stats.get("verify") or {}
-            v_note = ""
-            if v.get("skipped"):
-                v_note = f"; verify skipped: {v['skipped']}"
-            elif v:
-                v_note = (f"; {v.get('verified', 0)} pass -Xverify:all"
-                          + (f", {len(v['reverted'])} reverted"
-                             if v.get("reverted") else ""))
+            status, detail = deflat_stage_status(stats)
+            v_note = detail.split("; ", 1)[1] if "; " in detail else ""
             if unflattened_count > 0:
-                print(f"      unflattened {unflattened_count} method(s) across {stats.get('classes', 0)} class(es){v_note}")
+                print(f"      unflattened {unflattened_count} method(s) across {stats.get('classes', 0)} class(es); {v_note}")
                 # 有类被验证器拒绝并回退 -> 阶段是 partial，不是 ok：
                 # 产物可用，但改写没有全量生效，这个区别必须留在报告里
-                status = STAGE_PARTIAL if v.get("reverted") else STAGE_OK
-                record("deflat", status,
-                       f"unflattened {unflattened_count} method(s) in "
-                       f"{stats.get('classes', 0)} class(es){v_note}")
+                record("deflat", status, detail)
                 # 不直接切 current_jar:反平坦化对某些目标(如 CFR 本就能
                 # 结构化的 ZKM goto 洪水)是净伤害。原 jar 先正常反编译,
                 # Phase 4 末尾按 clean 数对比决定是否采用 deflatted 版。

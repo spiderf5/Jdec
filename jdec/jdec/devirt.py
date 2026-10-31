@@ -698,6 +698,14 @@ def _value_slots(desc: str) -> int:
     return 2 if desc[:1] in ("J", "D") else 1
 
 
+def _name_of(cf: CF.ClassFile, member: CF.Member) -> str:
+    """`name` + descriptor, for messages; never raises on a broken member."""
+    try:
+        return (cf.utf8(member.name_index) + cf.utf8(member.descriptor_index))
+    except Exception:
+        return "<unknown>"
+
+
 def _norm_internal(name: object) -> str:
     """Normalise a class reference from the virtual pool to an internal name.
 
@@ -1158,14 +1166,23 @@ class Devirtualizer:
         max_stack: int,
         max_locals: int,
         code_bytes: bytes,
-        handlers: list[Handler]
+        handlers: list[Handler],
+        member: CF.Member | None = None,
+        hier=None,
+        notes: list[str] | None = None,
     ) -> bytes:
-        """Construct a valid JVM Code attribute blob.
+        """Construct a JVM Code attribute blob for a translated VM method.
 
-        Note: the rebuilt Code carries no sub-attributes — in particular no
-        StackMapTable.  Java 7+ JVM verification may reject such classes
-        (VerifyError); decompilers recompute the frames themselves, so jdec
-        output is unaffected.  The CLI prints this boundary on every run.
+        Without `member` the rebuilt Code carries no sub-attributes — in
+        particular no StackMapTable — and Java 7+ verification rejects any
+        method that still has a branch (that is the historical behaviour, still
+        reachable for callers that only feed a decompiler).
+
+        With `member`, frames are computed from the translated bytecode and
+        written as a StackMapTable, so the class can actually be loaded. When
+        the analysis cannot type the method (unsupported opcode, a merge that
+        does not resolve) the frames are omitted and `notes` gets the reason —
+        the jar-level gate then decides whether to keep the class at all.
         """
         code_attr_idx = cf.intern_utf8("Code")
 
@@ -1174,14 +1191,48 @@ class Devirtualizer:
         for h in handlers:
             ex_buf += struct.pack(">HHHH", h.start_pc, h.end_pc, h.handler_pc, h.catch_type)
 
+        sub: list[tuple[int, bytes]] = []
+        if member is not None:
+            payload = cls._stack_map_table(cf, member, code_bytes, handlers,
+                                           max_stack, max_locals, hier, notes)
+            if payload is not None:
+                sub.append((cf.intern_utf8("StackMapTable"), payload))
+
         body = bytearray()
         body += struct.pack(">HHI", max_stack, max_locals, len(code_bytes))
         body += code_bytes
         body += ex_buf
-        body += struct.pack(">H", 0)  # sub-attributes count (0)
+        body += struct.pack(">H", len(sub))
+        for name_idx, payload in sub:
+            body += struct.pack(">HI", name_idx, len(payload)) + payload
 
         attr_len = len(body)
         return struct.pack(">HI", code_attr_idx, attr_len) + body
+
+    @classmethod
+    def _stack_map_table(cls, cf, member, code_bytes: bytes, handlers,
+                         max_stack: int, max_locals: int, hier,
+                         notes: list[str] | None) -> bytes | None:
+        """Frames for a translated method, or None (with a reason in `notes`)."""
+        try:
+            from .ir import assume as _assume
+            from .ir import frames as _frames
+        except Exception as exc:  # pragma: no cover - import cycle guard
+            if notes is not None:
+                notes.append(f"frames unavailable: {exc}")
+            return None
+        try:
+            states = _assume.compute_frames(cf, member, code_bytes, handlers,
+                                            max_stack, max_locals, hier)
+            need = _frames.needed_pcs(BC.decode(code_bytes), handlers)
+            missing = {p for p in need if p not in states}
+            if missing:
+                raise ValueError(f"no frame for target(s) {sorted(missing)[:4]}")
+            return _frames.encode(cf, states, need, member, max_locals)
+        except Exception as exc:  # noqa: BLE001 - FrameError and decode errors
+            if notes is not None:
+                notes.append(f"{cf.name}.{_name_of(cf, member)}: no frames ({exc})")
+            return None
 
     @classmethod
     def set_code_attribute(cls, cf: CF.ClassFile, method: CF.Member, code_attr: bytes) -> None:
@@ -1228,8 +1279,16 @@ class Devirtualizer:
         cf: CF.ClassFile,
         code_pool: dict[int, VMMethod],
         errors: list[str] | None = None,
+        hier=None,
+        notes: list[str] | None = None,
     ) -> tuple[CF.ClassFile, int]:
-        """Devirtualize methods in a ClassFile matching codeId from code_pool."""
+        """Devirtualize methods in a ClassFile matching codeId from code_pool.
+
+        `hier` is the class hierarchy used to compute StackMapTables (see
+        `ir/hierarchy.py`); without it, types from the jar are assumed to meet
+        at Object, which is correct but occasionally refuses a merge it cannot
+        justify. `notes` collects per-method reasons a table could not be built.
+        """
         devirtualized_count = 0
 
         for method in cf.methods:
@@ -1248,7 +1307,10 @@ class Devirtualizer:
                 result.max_stack,
                 result.max_locals,
                 result.bytecode,
-                result.handlers
+                result.handlers,
+                member=method,
+                hier=hier,
+                notes=notes,
             )
 
             # Preserve all non-Code attributes (annotations, signatures, exceptions)
@@ -1374,10 +1436,23 @@ class Devirtualizer:
         cls,
         input_jar: Path,
         output_jar: Path,
-        code_pool: dict[int, VMMethod]
+        code_pool: dict[int, VMMethod],
+        verify_output: bool = True,
     ) -> dict[str, Any]:
-        """Devirtualize an entire JAR archive using provided code_pool."""
+        """Devirtualize an entire JAR archive using provided code_pool.
+
+        With `verify_output` (default) the result is loaded under
+        `-Xverify:all` and every class the verifier rejects *because of the
+        devirtualization* is replaced with its original bytes — a translated
+        method that cannot be shown to load must not ship.
+        """
         output_jar.parent.mkdir(parents=True, exist_ok=True)
+        hier = None
+        try:
+            from .ir import hierarchy as _hierarchy
+            hier = _hierarchy.Hierarchy.from_jar(input_jar)
+        except Exception:  # noqa: BLE001 - Object fallback still works
+            hier = None
         working_pool = dict(code_pool)
         scan_stats = None
         if not working_pool:
@@ -1397,6 +1472,7 @@ class Devirtualizer:
         total_methods = 0
         failed: list[str] = []
         code_id_errors: list[str] = []
+        frame_notes: list[str] = []
 
         with zipfile.ZipFile(input_jar, "r") as zin, zipfile.ZipFile(output_jar, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
@@ -1406,7 +1482,8 @@ class Devirtualizer:
                     try:
                         cf = CF.parse(data)
                         cf, count = cls.devirtualize_class_file(
-                            cf, working_pool, errors=code_id_errors)
+                            cf, working_pool, errors=code_id_errors,
+                            hier=hier, notes=frame_notes)
                         if count > 0:
                             devirtualized_classes += 1
                             total_methods += count
@@ -1427,15 +1504,40 @@ class Devirtualizer:
             if len(failed) > limit:
                 print(f"  ! ... and {len(failed) - limit} more")
 
-        return {
+        if frame_notes:
+            print(f"devirt: {len(frame_notes)} method(s) could not be given a "
+                  f"StackMapTable: {frame_notes[0]}")
+
+        stats = {
             "total_classes": total_classes,
             "devirtualized_classes": devirtualized_classes,
             "devirtualized_methods": total_methods,
             "failed_classes": failed,
             "code_id_errors": code_id_errors,
+            "frame_notes": frame_notes,
             "scan": scan_stats,
             "output": output_jar
         }
+        # nothing was rebuilt -> the output is byte-identical to the input, so a
+        # gate could only restate what the input already is
+        if verify_output and total_methods:
+            stats["verify"] = cls._verify_rewrite(input_jar, output_jar)
+        return stats
+
+    @staticmethod
+    def _verify_rewrite(jar_in: Path, jar_out: Path) -> dict:
+        """JVM gate on the devirtualized jar; rolls back what it rejects."""
+        try:
+            from . import toolchain as TC
+            from . import verify as VF
+        except Exception as exc:  # pragma: no cover - import cycle guard
+            return {"skipped": f"{type(exc).__name__}: {exc}"}
+        if not TC.find_java():
+            return {"skipped": "java not found: set JAVA_HOME or put java on PATH"}
+        try:
+            return VF.verify_or_keep(jar_in, jar_out).to_dict()
+        except Exception as exc:  # noqa: BLE001 - the rewrite itself already succeeded
+            return {"skipped": f"{type(exc).__name__}: {exc}"}
 
     @classmethod
     def _normalize_opcode_map(cls, raw: Any, where: str) -> list[int] | dict[int, int] | None:

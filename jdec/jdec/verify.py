@@ -111,11 +111,16 @@ public final class JdecVerifyDriver {
         out.flush();
     }
 
-    /** A VerifyError hidden behind NoClassDefFoundError is still our problem. */
+    /** Classify by what was thrown for THIS class, not by its root cause.
+     *
+     * Walking the cause chain made the gate nondeterministic: a class whose
+     * supertype failed verification throws NoClassDefFoundError with a
+     * VerifyError cause, so it was reported INVALID in some load orders and
+     * UNRESOLVED in others (measured: 3 vs 0 on the same jar). A class that is
+     * itself broken throws VerifyError directly, so nothing is lost.
+     */
     private static String kind(Throwable t) {
-        Throwable root = t;
-        for (int i = 0; i < 8 && root.getCause() != null; i++) root = root.getCause();
-        String n = root.getClass().getName();
+        String n = t.getClass().getName();
         if (n.equals("java.lang.VerifyError") || n.equals("java.lang.ClassFormatError")
                 || n.equals("java.lang.UnsupportedClassVersionError")) {
             return "INVALID";
@@ -356,14 +361,18 @@ class KeepResult:
         return ", ".join(parts)
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "verified": self.verified,
             "reverted": list(self.reverted),
             "unresolved": self.unresolved,
             "input_invalid": self.input_invalid,
             "still_invalid": list(self.still_invalid),
-            "skipped": self.skipped,
         }
+        # a `"skipped": None` key reads as "verify was skipped" to anyone doing
+        # `"skipped" in report`, and that is a different statement from "it ran"
+        if self.skipped:
+            out["skipped"] = self.skipped
+        return out
 
 
 def verify_or_keep(original: Path, rewritten: Path, *,

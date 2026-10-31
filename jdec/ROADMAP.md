@@ -29,7 +29,7 @@
   退出码 0/1/2（`--strict` 升级），总报告带 Stage Status 表——**失败不再被标为成功**。
 - 安全边界：动态重放默认拒绝、显式开启、进程树终止。
 - 裁剪保守化、自愈证据分级（src-original + repair-log）。
-- 基线：**828 项核心回归全绿**（2026-10-29 实测，`python jdec/tests/run_tests.py`）；
+- 基线：**877 项核心回归全绿**（2026-10-29 实测，`python jdec/tests/run_tests.py`）；
   真实样本套件（`--with-mc`，需自备 `tests/mc/` 与 ZKM 样本）本轮未验证。
 
 ### 02 建设改写底座 —— 衔接点备忘
@@ -49,16 +49,45 @@ HMCL 10.5 MB 上 1435 处方法改写导致 **343 个类**被 split verifier 拒
 报 `VerifyError: Expecting a stackmap frame at branch target N`——原帧被剥掉、
 新帧没生成，只要改写后的方法还含分支就不合法。
 
-当前用两级回滚把产物兜住。默认模式下改写是等长的、原帧仍在正确偏移上，
-所以 **1435 处改写全部生效**，只有 17/3740 个类因验证失败换回原始字节；
-`--strip-frames`（喂反编译器的模式）则按方法回滚仍有分支的改写（412 处），
-0 个类回滚。两种模式的产物校验结果都与输入逐项一致。
+**2026-10-30 进展：M1（帧生成）与 M2（对拍）完成。**
+
+- `ir/types.py` + `hierarchy.py` + `assume.py` + `frames.py` + `attrs.py`：完整的方法级
+  帧生成。对 HMCL 全部 29,208 个方法重算帧（不改写），0 个算不出、0 个类被拒。
+- 与 javac 对拍（1000 个方法）：偏移集合 999/1000 一致，**没有一帧比 javac 更宽**。
+- 追那 41 个失败时发现真正的原因是 deflat 的**死代码消除改写了控制流**（把终止指令
+  NOP 掉，控制流落进异常处理器或掉出代码数组），修好后默认模式回滚从 17 降到 **1**。
+
+**M3（2026-10-30）：改写在指令级，`deflat` 默认走这条路。**
+
+- `bytecode.layout` + `ir/assemble.py`（`delete/replace/insert_after/remove/assemble`，
+  异常表一起重映射，`end_pc` 按上取整）+ `attrs.replace_code` / `remap_debug`。
+- `ir/transforms.py`：折叠、不透明谓词、跳转线程、反平坦化、死代码删除，全部作用在
+  指令列表上并真正删除指令；帧同批重算。算不出帧的方法整方法保留原样。
+- 实测 HMCL 3693 类：**411 个方法改写、0 回滚、0 拒绝**（旧字节路径 412 个、12.8s；
+  新路径 7.9s）。OptiFine：19 个方法、0 回滚、0 拒绝。
+
+**M4（2026-10-30）：门禁进了流水线。** pipeline 的预处理阶段不再 `strip_frames` +
+不校验，而是用指令级路径、重算帧、整体过 `-Xverify:all`；有类回滚或没校验 → 阶段记
+`partial` 而不是 `ok`（`pipeline.deflat_stage_status`，有单测）。
+
+**02 收口（2026-10-30）：**
+
+- **devirt 也接了门禁**：重建的方法现在会算 StackMapTable（`build_code_attribute`
+  接受 `member`/`hier`），jar 级产物整体过 `-Xverify:all`，被拒绝的类回滚成原始字节
+  （`--no-verify` 可关）。测试里带负控：同一个类不带帧构建必须被拒。
+- **那 1 个陈旧帧类不再是问题**：它只在 `--byte-patch`（保留原表）下出现；默认的
+  指令级路径会重算帧，HMCL 上 0 个类回滚。
+- `--strip-frames` 保留"改写后仍有分支目标就回滚"的老策略，是设计约束（该模式只为
+  反编译器产出中间产物），不是欠账。
 
 **所以 02 的主体没变，而且现在有了精确的目标：**
 
-- 帧生成：为改写后的方法产出正确的 StackMapTable——这 412 处才能保住；
-  `cfg.rebuild_stack_map_table` 目前只是结构生成器，过不了校验；
-- 类型 IR：`Type` / `StackFrame` / `Label`，JVMS 4.10.1.2 的 merge 规则；
+- 帧生成：**已交付**（`ir/assume.py` + `ir/frames.py`，含解码器与紧凑编码）；
+  改写后的方法现在真的能生成正确的 StackMapTable；
+- 类型 IR：`ir/types.py` 有类型令牌与 JVMS 4.10.1.2 的 merge，`ir/assume.py` 是
+  真正的抽象解释（约 200 个 opcode、handler 入口帧、uninitialized 替换）。**没有**的是
+  一套供变换书写的 IR API（`Label`、可重写的方法体对象）；现在 transformers 直接操作
+  指令列表，够用但不适合承载 devirt 那种要重排整段代码的变换；
 - 行为对拍：`jdec behave` 已能按声明用例对比两个 jar 的返回值（含负控），
   但它只是回归工具——用例没覆盖到的等价性仍然没有证明。
 

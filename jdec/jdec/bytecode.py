@@ -287,6 +287,34 @@ def _insn_size(insn: Insn, pc: int) -> int:
     return n
 
 
+def layout(insns: list[Insn]) -> tuple[list[int], list[int]]:
+    """Assign every instruction a position, from scratch.
+
+    Returns (positions, sizes). `encode` uses it, and so does anything that
+    inserts or deletes instructions: the same table decides both where a branch
+    lands and how long the method became.
+    """
+    positions: list[int] = []
+    sizes: list[int] = []
+    cursor = 0
+    for ins in insns:
+        if ins.op in (OP_TABLESWITCH, OP_LOOKUPSWITCH):
+            if not ins.targets:
+                raise BytecodeError(f"switch at {ins.pc} has no targets")
+            if ins.op == OP_TABLESWITCH and ins.switch_low is None:
+                raise BytecodeError(f"tableswitch at {ins.pc} lost its low key")
+            if (ins.op == OP_LOOKUPSWITCH
+                    and len(ins.switch_keys) != len(ins.targets) - 1):
+                raise BytecodeError(
+                    f"lookupswitch at {ins.pc}: {len(ins.switch_keys)} key(s) "
+                    f"for {len(ins.targets) - 1} case(s)")
+        size = _insn_size(ins, cursor)
+        positions.append(cursor)
+        sizes.append(size)
+        cursor += size
+    return positions, sizes
+
+
 def encode(insns: list[Insn], pc_map: dict[int, int] | None = None) -> bytes:
     """Re-assemble instructions, recomputing every branch offset.
 
@@ -301,21 +329,7 @@ def encode(insns: list[Insn], pc_map: dict[int, int] | None = None) -> bytes:
     """
     if not insns:
         return b""
-    positions: list[int] = []
-    cursor = 0
-    for ins in insns:
-        if ins.op in (OP_TABLESWITCH, OP_LOOKUPSWITCH):
-            if not ins.targets:
-                raise BytecodeError(f"switch at {ins.pc} has no targets")
-            if ins.op == OP_TABLESWITCH and ins.switch_low is None:
-                raise BytecodeError(f"tableswitch at {ins.pc} lost its low key")
-            if (ins.op == OP_LOOKUPSWITCH
-                    and len(ins.switch_keys) != len(ins.targets) - 1):
-                raise BytecodeError(
-                    f"lookupswitch at {ins.pc}: {len(ins.switch_keys)} key(s) "
-                    f"for {len(ins.targets) - 1} case(s)")
-        positions.append(cursor)
-        cursor += _insn_size(ins, cursor)
+    positions, _sizes = layout(insns)
 
     if pc_map is None:
         pc_map = {}

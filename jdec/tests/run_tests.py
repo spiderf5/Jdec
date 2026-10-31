@@ -1137,9 +1137,11 @@ def test_deflat_output_loads() -> None:
     with tempfile.TemporaryDirectory() as td:
         keep = Path(td) / "keep.jar"
         strip = Path(td) / "strip.jar"
-        stats_keep = DF.deflat_jar(SAMPLE, keep)
+        # this case is about the length-preserving path, where the original
+        # frames are already at the right offsets — pin it explicitly
+        stats_keep = DF.deflat_jar(SAMPLE, keep, ir_rewrite=False)
         stats_strip = DF.deflat_jar(SAMPLE, strip, strip_frames=True,
-                                    verify_output=False)
+                                    verify_output=False, ir_rewrite=False)
         check("deflat reports its per-method rollbacks",
               "methods_reverted" in stats_keep, str(stats_keep))
         check("at least one method was rewritten",
@@ -1257,6 +1259,502 @@ def test_behaviour_is_preserved() -> None:
     check("behave refuses to run without --execute", rc == 3, str(rc))
     check("the refusal explains why", "executes their code" in buf.getvalue(),
           buf.getvalue()[-200:])
+
+
+def test_frame_generation() -> None:
+    """Recomputed StackMapTables must be accepted by a real JVM."""
+    print("ir: types + abstract interpretation + frame encoding")
+    from jdec.ir import assume as AS
+    from jdec.ir import attrs as AT
+    from jdec.ir import frames as FR
+    from jdec.ir import types as TT
+
+    # lattice rules that are easy to get wrong
+    check("merge of different primitives is top",
+          TT.merge(TT.INT, TT.LONG) == TT.TOP)
+    check("merge of null and a reference keeps the reference",
+          TT.merge(TT.NULL, TT.obj("java/lang/String")) == TT.obj("java/lang/String"))
+    check("merge of unrelated classes widens to Object",
+          TT.merge(TT.obj("a/A"), TT.obj("b/B")) == TT.OBJECT)
+    fa = TT.Frame([TT.INT], [TT.INT])
+    fb = TT.Frame([TT.INT], [])
+    try:
+        TT.merge_frames(fa, fb, 1)
+        stack_mismatch = False
+    except TT.FrameError:
+        stack_mismatch = True
+    check("a stack-height mismatch at a join is an error", stack_mismatch)
+
+    # long/double occupy two slots but one StackMapTable entry
+    check("wide locals collapse to one frame entry",
+          FR._locals_entries([TT.LONG, TT.TOP, TT.INT]) == [TT.LONG, TT.INT])
+    check("frame type names are rejected when malformed",
+          not FR._valid_class_name("[L[I;") and FR._valid_class_name("[[I"))
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the frame round-trip needs a JDK)")
+        return
+
+    # Every fixture method: compute -> encode -> write back -> JVM verdict.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "framed"
+        methods = 0
+        errors: list[str] = []
+        for jar in (SAMPLE, MIXIN, FLOW):
+            with zipfile.ZipFile(jar) as z:
+                for info in z.infolist():
+                    if not info.filename.endswith(".class"):
+                        continue
+                    try:
+                        cf = CF.parse(z.read(info.filename))
+                    except Exception:
+                        continue
+                    for m in cf.methods:
+                        ci = BC.method_code(cf, m, decode_insns=False)
+                        if ci is None:
+                            continue
+                        methods += 1
+                        try:
+                            insns = BC.decode(ci.code)
+                            states = AS.compute_frames(cf, m, ci.code, ci.handlers,
+                                                       ci.max_stack, ci.max_locals)
+                            needed = FR.needed_pcs(insns, ci.handlers)
+                            AT.set_code_subattr(cf, m, "StackMapTable",
+                                                FR.encode(cf, states, needed))
+                        except TT.FrameError as exc:
+                            errors.append(f"{cf.name}.{cf.utf8(m.name_index)}: {exc}")
+                    dest = root / info.filename
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(cf.serialize())
+        check("frames were computed for every fixture method", methods > 20, str(methods))
+        check("no fixture method is untypable", not errors, "; ".join(errors[:3]))
+        from jdec import verify as VF
+        rep = VF.verify(root)
+        check("every rebuilt class loads under -Xverify:all", not rep.invalid,
+              rep.summary())
+
+
+def test_dead_code_keeps_control_flow() -> None:
+    """Pruning dead code must not create a new path into a handler."""
+    print("deflat: dead-code pruning never rewrites control flow")
+    from jdec import deflat as DF
+
+    # 0 iconst_0 / 1 ireturn / 2 goto +3 -> 5 / 5 astore_0 (handler) / 6 return
+    # The goto at 2 is dead, but NOPing it lets control fall from 4 into 5 with
+    # an empty stack — measured on HMCL, that broke 13 classes.
+    code = bytes([0x03, 0xAC, 0xA7, 0x00, 0x03, 0x4B, 0xB1])
+    out, pruned = DF.prune_dead_code(code, [BC.Handler(0, 2, 5, 0)])
+    check("the dead goto before a handler survives",
+          out[2:5] == bytes([0xA7, 0x00, 0x03]), out.hex())
+
+    # A dead terminator at the very end must also survive: NOPing it lets
+    # control fall off the code array ("Control flow falls through code end").
+    tail = bytes([0xB1, 0xBF])
+    out2, _ = DF.prune_dead_code(tail, [])
+    check("the trailing terminator survives", out2[1] == 0xBF, out2.hex())
+
+    # Ordinary dead code is still pruned.
+    dead = bytes([0xB1, 0x10, 0x63, 0xB1])   # return; bipush 99; return(dead)
+    out3, pruned3 = DF.prune_dead_code(dead, [])
+    check("ordinary dead code is still NOPed",
+          out3[1:3] == bytes([0, 0]) and pruned3 >= 1, out3.hex())
+
+
+def test_frames_match_javac() -> None:
+    """M2 acceptance: our frames must agree with javac's, and never be wider."""
+    print("ir: computed frames vs the ones javac wrote")
+    from jdec.ir import assume as AS
+    from jdec.ir import attrs as AT
+    from jdec.ir import frames as FR
+    from jdec.ir import hierarchy as HI
+    from jdec.ir import types as TT
+
+    checked = same_offsets = wider = 0
+    offset_examples: list[str] = []
+    wider_examples: list[str] = []
+    for jar in (SAMPLE, MIXIN, FLOW):
+        hier = HI.Hierarchy.from_jar(jar)
+        with zipfile.ZipFile(jar) as z:
+            for info in z.infolist():
+                if not info.filename.endswith(".class"):
+                    continue
+                try:
+                    cf = CF.parse(z.read(info.filename))
+                except Exception:
+                    continue
+                for m in cf.methods:
+                    ci = BC.method_code(cf, m, decode_insns=False)
+                    if ci is None:
+                        continue
+                    payload = next((p for n, p in AT.code_subattrs(cf, m)
+                                    if n == "StackMapTable"), None)
+                    if payload is None:
+                        continue
+                    try:
+                        orig = FR.decode(cf, payload, m, ci.max_locals)
+                        states = AS.compute_frames(cf, m, ci.code, ci.handlers,
+                                                   ci.max_stack, ci.max_locals, hier)
+                        need = FR.needed_pcs(BC.decode(ci.code), ci.handlers)
+                    except Exception:
+                        continue
+                    checked += 1
+                    ours = {pc: states[pc] for pc in need if pc in states}
+                    if set(ours) != set(orig):
+                        if len(offset_examples) < 3:
+                            offset_examples.append(
+                                f"{cf.name}.{cf.utf8(m.name_index)}: "
+                                f"{sorted(set(ours) ^ set(orig))[:4]}")
+                        continue
+                    same_offsets += 1
+                    for pc, f in ours.items():
+                        g = orig[pc]
+                        if len(f.stack) != len(g.stack):
+                            wider += 1
+                            if len(wider_examples) < 3:
+                                wider_examples.append(f"{cf.name}@{pc}: stack height")
+                            break
+                        bad = False
+                        for a, b in zip(f.stack, g.stack):
+                            if a == b or b == TT.TOP:
+                                continue
+                            if TT.is_ref(a) and TT.is_ref(b) and hier.lca(a[1], b[1]) == b[1]:
+                                continue        # ours is narrower: allowed
+                            bad = True
+                            if len(wider_examples) < 3:
+                                wider_examples.append(f"{cf.name}@{pc}: {a} vs {b}")
+                        if bad:
+                            wider += 1
+                            break
+
+    check("there are methods to compare", checked >= 20, str(checked))
+    check("frame offsets agree with javac in ~all cases",
+          same_offsets >= checked - 1,
+          f"{same_offsets}/{checked}: " + "; ".join(offset_examples))
+    if EN.find_java() is None:
+        # "narrower" is a subtype query, and the JDK side of the hierarchy is
+        # asked of a live JVM (a hand-written seed table kept guessing wrong on
+        # exception types). Without one, every JDK-typed pair looks unrelated
+        # and the comparison would report false positives — say so instead.
+        print("  (skipped the width comparison: no JVM, so subtyping is unknown)")
+    else:
+        check("no frame is wider than the one javac wrote", wider == 0,
+              "; ".join(wider_examples))
+
+
+def test_ir_assembly_changes_length() -> None:
+    """A length-changing edit must still produce a loadable class."""
+    print("ir: insert/delete + re-layout + recomputed frames")
+    from jdec.ir import assemble as ASM
+    from jdec.ir import assume as AS
+    from jdec.ir import attrs as AT
+    from jdec.ir import frames as FR
+    from jdec.ir import types as TT
+
+    # unit: deletion must refuse to break a branch
+    prog = ASM.Program.parse(bytes([0x03, 0x99, 0x00, 0x04, 0x04, 0xAC]))
+    try:
+        prog.delete(5, 6)          # ifeq at 1 targets 5
+        refused = False
+    except TT.FrameError:
+        refused = True
+    check("deleting a branch target is refused", refused)
+
+    # unit: deleting unreachable tail really shortens the array
+    prog2 = ASM.Program.parse(bytes([0x10, 0x63, 0x57, 0xB1]))   # bipush 99; pop; return
+    prog2.delete(0, 3)
+    code2, _ = prog2.assemble()
+    check("deletion shrinks the code array", code2 == bytes([0xB1]), code2.hex())
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the end-to-end reassembly needs a JDK)")
+        return
+
+    # end-to-end: insert a nop into a fixture method, re-lay out, recompute
+    # frames, and let the JVM judge the result.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "reassembled"
+        edited = 0
+        for jar in (SAMPLE, MIXIN):
+            with zipfile.ZipFile(jar) as z:
+                for info in z.infolist():
+                    if not info.filename.endswith(".class"):
+                        continue
+                    try:
+                        cf = CF.parse(z.read(info.filename))
+                    except Exception:
+                        continue
+                    for m in cf.methods:
+                        ci = BC.method_code(cf, m)
+                        if ci is None or not ci.insns:
+                            continue
+                        if edited >= 8:
+                            break
+                        prog = ASM.Program.parse(ci.code, ci.handlers)
+                        first = prog.insns[0]
+                        prog.insert_after(first.pc, [BC.Insn(pc=0, op=0x00, length=1)])
+                        new_code, new_handlers = prog.assemble()
+                        AT.replace_code(cf, m, new_code, new_handlers,
+                                        ci.max_stack, ci.max_locals)
+                        try:
+                            states = AS.compute_frames(cf, m, new_code, new_handlers,
+                                                       ci.max_stack, ci.max_locals)
+                            need = FR.needed_pcs(BC.decode(new_code), new_handlers)
+                            AT.set_code_subattr(cf, m, "StackMapTable",
+                                                FR.encode(cf, states, need))
+                        except TT.FrameError:
+                            m.attrs_blob = m.attrs_blob   # keep the edit, no frames
+                        edited += 1
+                    dest = root / info.filename
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(cf.serialize())
+        check("methods were reassembled", edited >= 4, str(edited))
+        from jdec import verify as VF
+        rep = VF.verify(root)
+        check("reassembled classes still load under -Xverify:all",
+              not rep.invalid, rep.summary())
+
+
+def test_ir_transforms() -> None:
+    """The instruction-level passes delete instead of padding, and refuse to break a branch."""
+    print("ir: fold / predicate / unflatten / dead code, then a real jar")
+    from jdec import deflat as DF
+    from jdec.ir import assemble as ASM
+    from jdec.ir import transforms as TR
+    from jdec.ir import types as TT
+
+    def run(code, handlers=None):
+        prog = ASM.Program.parse(code, handlers or [])
+        counts = TR.optimize(prog)
+        out, _hs = prog.assemble()
+        return out, counts
+
+    # fold: iconst_2, iconst_3, iadd, pop, return -> iconst_5, pop, return
+    out, counts = run(bytes([0x05, 0x06, 0x60, 0x57, 0xB1]))
+    check("constant folding deletes both operands",
+          out == bytes([0x08, 0x57, 0xB1]), out.hex())
+    check("the fold is counted", counts["folded"] == 1, str(counts))
+
+    # predicate always taken:
+    #   0: iconst_0   1: ifeq +6 -> 7   4: iconst_1   5: ireturn
+    #   6: iconst_0   7: ireturn
+    prog = ASM.Program.parse(bytes([0x03, 0x99, 0x00, 0x06,
+                                    0x04, 0xAC, 0x03, 0xAC]), [])
+    n = TR.prune_predicates(prog)
+    out, _hs = prog.assemble()
+    check("a taken predicate becomes a single goto",
+          n == 1 and out[:3] == bytes([0xA7, 0x00, 0x06]) and len(out) == 7, out.hex())
+
+    # predicate never taken: the whole test disappears and control falls through
+    prog = ASM.Program.parse(bytes([0x04, 0x99, 0x00, 0x06, 0x04, 0xAC]), [])
+    n = TR.prune_predicates(prog)
+    out, _hs = prog.assemble()
+    check("a never-taken predicate disappears", n == 1 and out == bytes([0x04, 0xAC]),
+          out.hex())
+
+    # dead code after a goto. `Insn.is_terminator` only covers return/athrow, so
+    # an earlier version walked straight through a goto and kept this block.
+    prog = ASM.Program.parse(bytes([0xA7, 0x00, 0x05, 0x03, 0xB1, 0x04, 0xAC]), [])
+    n = TR.drop_dead_code(prog)
+    out, _hs = prog.assemble()
+    check("code after a goto is not reachable",
+          n == 1 and out == bytes([0xA7, 0x00, 0x03, 0x04, 0xAC]), out.hex())
+
+    # refusals are local: one branch target must not abandon the whole method
+    prog = ASM.Program.parse(bytes([0x03, 0x99, 0x00, 0x04, 0x04, 0xAC]), [])
+    try:
+        prog.remove({5})
+        refused = False
+    except TT.FrameError:
+        refused = True
+    check("removing a branch target is refused", refused)
+
+    # exception-table end_pc is exclusive: deleting the instruction sitting on
+    # it must round the range up, not make the method unassemblable
+    prog = ASM.Program.parse(bytes([0xB1, 0x03, 0x57]), [BC.Handler(0, 1, 0, 0)])
+    prog.remove({1})
+    _code, handlers = prog.assemble()
+    check("a deleted end_pc rounds up to the next instruction",
+          handlers[0].end_pc == 1, str([(h.start_pc, h.end_pc, h.handler_pc) for h in handlers]))
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the end-to-end part needs a JDK)")
+        return
+
+    import shutil
+    td = Path(tempfile.mkdtemp(prefix="jdec_ir_"))
+    try:
+        out = td / "ir.jar"
+        stats = DF.deflat_jar(SAMPLE, out, verify_output=False, ir_rewrite=True)
+        check("the IR path rewrites the fixture", stats["methods_unflattened"] > 0,
+              str(stats))
+        check("no method had to be rolled back", stats["methods_reverted"] == 0,
+              str(stats))
+        check("every rewrite got a recomputed table",
+              stats["frames_rebuilt"] == stats["methods_unflattened"], str(stats))
+
+        # `OldStyle.pick` is a state-machine dispatcher: after the rewrite its
+        # transitions must jump straight at the case body instead of going back
+        # through the switch. In the fixture the dispatcher sits at 83.
+        with zipfile.ZipFile(SAMPLE) as zin, zipfile.ZipFile(out) as zout:
+            before = CF.parse(zin.read("demo/legacy/OldStyle.class"))
+            after = CF.parse(zout.read("demo/legacy/OldStyle.class"))
+        m_before = next(m for m in before.methods if before.utf8(m.name_index) == "pick")
+        m_after = next(m for m in after.methods if after.utf8(m.name_index) == "pick")
+        old_gotos = {i.pc + i.arg for i in BC.method_code(before, m_before).insns if i.is_goto}
+        new_gotos = {i.pc + i.arg for i in BC.method_code(after, m_after).insns if i.is_goto}
+        check("the rewrite retargets transitions away from the dispatcher",
+              old_gotos != new_gotos, f"before={sorted(old_gotos)} after={sorted(new_gotos)}")
+
+        from jdec import behave as BH
+        from jdec import verify as VF
+        rep = VF.verify(out, classpath=[SAMPLE])
+        new_bad = {i.cls for i in rep.invalid} - {"demo/broken/Truncated"}
+        check("the IR output introduces no invalid class", not new_bad,
+              str(sorted(new_bad)[:3]))
+
+        cases = BH.parse_spec(
+            "demo/legacy/OldStyle|pick|java.lang.String|hello\n"
+            "demo/legacy/OldStyle|pick|java.lang.String|\n"
+            "demo/legacy/OldStyle|pick|java.lang.String|MOJANG\n"
+            "demo/legacy/OldStyle|messy|int|7\n")
+        bh = BH.compare(SAMPLE, out, cases)
+        check("the IR output answers every case", bh.compared == len(cases), str(bh.compared))
+        check("behaviour survives the instruction-level rewrite", bh.ok,
+              "; ".join(o.describe() for o in bh.diffs))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_pipeline_gate() -> None:
+    """A rewrite stage must report `partial` when the verifier had to put something back."""
+    print("pipeline: the pre-cleaning stage is gated")
+    from jdec import deflat as DF
+    from jdec import pipeline as PL
+
+    ok_stats = {"classes": 10, "methods_unflattened": 3,
+                "verify": {"verified": 9, "reverted": [], "still_invalid": [],
+                           "unresolved": 1}}
+    status, detail = PL.deflat_stage_status(ok_stats)
+    check("a fully verified rewrite is ok", status == PL.STAGE_OK, detail)
+    check("the detail carries the verify counts",
+          "-Xverify:all" in detail and "not judged" in detail, detail)
+
+    reverted = dict(ok_stats, verify={"verified": 8, "reverted": ["a/B"],
+                                      "still_invalid": [], "unresolved": 0})
+    status, detail = PL.deflat_stage_status(reverted)
+    check("a rewrite that had to be rolled back is partial",
+          status == PL.STAGE_PARTIAL, detail)
+    check("the detail says how many were rolled back", "reverted" in detail, detail)
+
+    skipped = dict(ok_stats, verify={"skipped": "java not found"})
+    status, _detail = PL.deflat_stage_status(skipped)
+    check("an unchecked rewrite is partial, not ok",
+          status == PL.STAGE_PARTIAL, status)
+
+    unverified = dict(ok_stats)
+    unverified.pop("verify")
+    status, _detail = PL.deflat_stage_status(unverified)
+    check("a report with no verify section is partial", status == PL.STAGE_PARTIAL, status)
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the end-to-end part needs a JDK)")
+        return
+
+    import shutil
+    td = Path(tempfile.mkdtemp(prefix="jdec_gate_"))
+    try:
+        out = td / "gated.jar"
+        stats = DF.deflat_jar(SAMPLE, out)          # IR path + gate, the default
+        check("deflat reports the verification result",
+              isinstance(stats.get("verify"), dict) and "skipped" not in stats["verify"],
+              str(stats.get("verify")))
+        check("the fixture output verifies cleanly",
+              stats["verify"].get("reverted") == [], str(stats["verify"].get("reverted")))
+        check("the default path is the instruction-level one",
+              stats.get("frames_rebuilt", 0) > 0, str(stats))
+        status, detail = PL.deflat_stage_status(stats)
+        check("a clean run is a clean stage", status == PL.STAGE_OK, detail)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_devirt_output_loads() -> None:
+    """A devirtualized method must get frames, and the gate must prove it loads."""
+    print("devirt: translated bodies carry a StackMapTable and load")
+    from jdec import bvm_devirt as BVM
+    from jdec import stubs as SB
+    from jdec import verify as VF
+    from jdec.ir import attrs as AT
+
+    O = BVM.ORDINAL_BY_NAME
+    # static (I)I  ->  iload_0; ifeq L; iconst_1; ireturn; L: iconst_0; ireturn
+    # A branch on purpose: straight-line code would verify without any table.
+    # The argument is in slot 0 because the method is static.
+    vm_code = [O["ILOAD"], 0,
+               O["IFEQ"], 6,
+               O["ICONST_1"], O["IRETURN"],
+               O["ICONST_0"], O["IRETURN"]]
+    pool = {999: BVM.BVMMethod(code_id=999, name="branchy", desc="(I)I",
+                               code=vm_code, max_locals=1, max_stack=1)}
+
+    def host_with_vm_call():
+        cf = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
+        helper = BVM.ConstantPoolHelper(cf)
+        mref = helper.add_methodref("com/example/VM", "execute", "(I)V")
+        blob = bytes([0x11, (999 >> 8) & 0xFF, 999 & 0xFF,
+                      0xB8, (mref >> 8) & 0xFF, mref & 0xFF, 0xAC])
+        attr = BVM.BVMDevirtualizer.build_code_attribute(cf, 1, 1, blob, [])
+        cf.methods.append(CF.Member(
+            access_flags=CF.ACC_PUBLIC | CF.ACC_STATIC,
+            name_index=cf.intern_utf8("branchy"),
+            descriptor_index=cf.intern_utf8("(I)I"),
+            attrs_blob=struct.pack(">H", 1) + attr))
+        return cf
+
+    cf = host_with_vm_call()
+    translated = BVM.BVMTranslator.translate_method(pool[999], cf)
+    check("the translated body really branches",
+          any(i.is_branch for i in BC.decode(translated.bytecode)),
+          translated.bytecode.hex())
+
+    notes: list[str] = []
+    cf_out, n = BVM.BVMDevirtualizer.devirtualize_class_file(cf, pool, notes=notes)
+    check("the method was devirtualized", n == 1, str(n))
+    check("no frame was refused", not notes, "; ".join(notes[:3]))
+    subattrs = [name for name, _p in AT.code_subattrs(cf_out, cf_out.methods[-1])]
+    check("the rebuilt Code carries a StackMapTable",
+          "StackMapTable" in subattrs, str(subattrs))
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the end-to-end part needs a JDK)")
+        return
+
+    import shutil
+    td = Path(tempfile.mkdtemp(prefix="jdec_devirt_"))
+    try:
+        good = td / "good"
+        (good / "com" / "example").mkdir(parents=True)
+        (good / "com/example/Host.class").write_bytes(cf_out.serialize())
+        rep = VF.verify(good)
+        check("a devirtualized class loads under -Xverify:all",
+              rep.invalid == [], rep.summary())
+
+        # Negative control: the same class built without `member` gets no frames
+        # and must be rejected — otherwise this test proves nothing about them.
+        cf_raw = host_with_vm_call()
+        attr = BVM.BVMDevirtualizer.build_code_attribute(
+            cf_raw, translated.max_stack, translated.max_locals,
+            translated.bytecode, translated.handlers)      # no member -> no frames
+        BVM.BVMDevirtualizer.set_code_attribute(cf_raw, cf_raw.methods[-1], attr)
+        bad = td / "bad"
+        (bad / "com" / "example").mkdir(parents=True)
+        (bad / "com/example/Host.class").write_bytes(cf_raw.serialize())
+        rep_bad = VF.verify(bad)
+        check("without frames the same class is rejected",
+              [i.cls for i in rep_bad.invalid] == ["com/example/Host"],
+              rep_bad.summary())
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
 
 
 def test_weak_engine_is_rescued() -> None:
@@ -3205,12 +3703,16 @@ def test_decompiler_trap_pruning() -> None:
     check("master optimizer preserves code length", len(opt_code) == len(combined_code))
     check("master optimizer eliminated zero-length handler", len(opt_h) == 0 and stats["handlers_pruned"] == 1)
     check("master optimizer recorded multiple passes", stats["total"] >= 4, str(stats))
-    check("dead code block at end of method NOPed out", opt_code[14:] == bytes([0, 0, 0]))
+    # The trailing terminator stays: NOPing the last instruction lets control
+    # fall off the end of the code array (measured on HMCL: 3 classes).
+    check("dead code block at end of method NOPed out",
+          opt_code[14:16] == bytes([0, 0]) and opt_code[16] == 0xBF,
+          opt_code[14:].hex())
 
     # 7. Whole-jar deflat_jar integration on SAMPLE
     with tempfile.TemporaryDirectory() as td:
         out_deflat = Path(td) / "deflat_sample.jar"
-        jar_stats = DF.deflat_jar(SAMPLE, out_deflat)
+        jar_stats = DF.deflat_jar(SAMPLE, out_deflat, ir_rewrite=False)
         check("deflat_jar processed classes", jar_stats["classes"] == 11)
         check("deflat output jar exists and is valid zip", out_deflat.exists() and zipfile.is_zipfile(out_deflat))
         with zipfile.ZipFile(out_deflat) as zout:
@@ -4926,6 +5428,13 @@ def main() -> int:
     test_verify_gate()
     test_deflat_output_loads()
     test_behaviour_is_preserved()
+    test_frame_generation()
+    test_ir_transforms()
+    test_pipeline_gate()
+    test_devirt_output_loads()
+    test_dead_code_keeps_control_flow()
+    test_frames_match_javac()
+    test_ir_assembly_changes_length()
     test_weak_engine_is_rescued()
     test_yarn_compose()
     test_official_srg_compose()
