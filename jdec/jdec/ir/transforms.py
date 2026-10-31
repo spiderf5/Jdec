@@ -430,6 +430,20 @@ def unflatten_dispatchers(prog, cf=None) -> int:
     return total
 
 
+def _linear(insns) -> bool:
+    """True when control can only fall through from first to last.
+
+    No early terminator, branch, switch or subroutine call means every
+    instruction is reachable by fall-through, so there is no dead code and
+    no handler range can lose its live instruction.
+    """
+    for ins in insns[:-1]:
+        if (ins.is_terminator or ins.is_goto or ins.is_branch
+                or ins.targets or ins.op in (0xA8, 0xA9)):
+            return False
+    return True
+
+
 def drop_dead_code(prog, code_len: int = 0, handlers=None) -> int:
     """Remove instructions nothing can reach, then handlers with no live range.
 
@@ -438,6 +452,8 @@ def drop_dead_code(prog, code_len: int = 0, handlers=None) -> int:
     worse than an unreachable instruction.
     """
     if not prog.insns:
+        return 0
+    if _linear(prog.insns):
         return 0
     live = reachable_pcs(prog.insns, prog.handlers)
     pcs = sorted(i.pc for i in prog.insns)
