@@ -185,6 +185,7 @@ def fold_constants(prog, cf=None) -> int:
             if not -32768 <= value <= 32767:
                 continue
             folded = _const_insn(op.pc, value)
+            p.note("fold", left=v1, right=v2, op=op.op, result=value)
             if _refused(p.remove, {a.pc, b.pc}):
                 continue
             p.replace(op.pc, [folded])
@@ -195,6 +196,7 @@ def fold_constants(prog, cf=None) -> int:
 
 def _replace_pair(p, first, branch, target: int, taken: bool) -> bool:
     """Shared tail of every predicate rule: jump, or fall through."""
+    p.note("predicate", taken=taken, target=target)
     if not taken:
         return not _refused(p.remove, {i.pc for i in first} | {branch.pc})
     if _refused(p.remove, {i.pc for i in first}):
@@ -276,6 +278,7 @@ def drop_redundant_goto(prog) -> int:
             if ins.op not in (OP_GOTO, OP_GOTO_W) or ins.arg is None:
                 continue
             if ins.pc + ins.arg == insns[i + 1].pc:
+                p.note("goto", target=ins.pc + ins.arg)
                 if not _refused(p.remove, {ins.pc}):
                     return True
                 continue
@@ -330,6 +333,7 @@ def thread_jumps(prog) -> int:
             continue
         target = ins.pc + ins.arg
         seen = {ins.pc, target}
+        chain = [ins.pc, target]
         for _ in range(8):
             nxt = by_pc.get(target)
             if nxt is None or nxt.op not in (OP_GOTO, OP_GOTO_W) or nxt.arg is None:
@@ -338,12 +342,12 @@ def thread_jumps(prog) -> int:
             if hop in seen:
                 break
             seen.add(hop)
+            chain.append(hop)
             target = hop
         if target == ins.pc + ins.arg:
             continue
-        ins.arg = target - ins.pc
-        if ins.op == OP_GOTO and not -32768 <= ins.arg <= 32767:
-            ins.op, ins.length = OP_GOTO_W, 5
+        prog.retarget(ins.pc, target, kind="thread",
+                      chain=chain, target=target)
         changed += 1
     return changed
 
@@ -415,7 +419,10 @@ def unflatten_dispatchers(prog, cf=None) -> int:
                 target = cases.get(value)
                 if target is None or target == dest:
                     continue
-                _retarget(jump, target)
+                prog.retarget(jump.pc, target, kind="unflatten",
+                              switch_pc=sw.pc, state_slot=slot, value=value,
+                              case_target=target, dispatcher=dispatcher,
+                              const_pc=c.pc, store_pc=st.pc, target=target)
                 found += 1
         total += found
         if not found:
@@ -444,7 +451,7 @@ def drop_dead_code(prog, code_len: int = 0, handlers=None) -> int:
         if any(pcs[k] in live for k in range(lo, hi)):
             kept.append(h)
     if len(kept) != len(prog.handlers):
-        prog.handlers = kept
+        prog.set_handlers(kept, kind="dead_handlers", live=sorted(live))
         live = reachable_pcs(prog.insns, kept)
 
     # `end_pc` is exclusive, so the instruction sitting on it is not protected:
@@ -462,6 +469,7 @@ def drop_dead_code(prog, code_len: int = 0, handlers=None) -> int:
         doomed.add(ins.pc)
     if not doomed:
         return 0
+    prog.note("dead", doomed=sorted(doomed), live=sorted(live))
     try:
         prog.remove(doomed)
     except FrameError:
@@ -491,12 +499,16 @@ def optimize(prog, cf=None) -> dict:
 # driver: rewrite one method, or leave it alone
 # --------------------------------------------------------------------------
 
-def rewrite_method(cf, member, hier=None) -> int:
+def rewrite_method(cf, member, hier=None, *, check_reasons=True) -> int:
     """Optimise one method in place; returns the number of rewrites.
 
     Raises `FrameError` if the result cannot be shown loadable — the caller
     restores the original `attrs_blob`. Every failure mode ends in "keep the
     original", never in "ship something unverified".
+
+    `check_reasons` replays the edit journal independently before anything is
+    written: an optimization whose precondition cannot be re-derived from the
+    original bytes is refused, and the method keeps its original body.
     """
     ci = BC.method_code(cf, member, decode_insns=False)
     if ci is None or not ci.code:
@@ -511,6 +523,14 @@ def rewrite_method(cf, member, hier=None) -> int:
         raise FrameError(f"rewritten method is {len(code)} bytes")
     if not code:
         raise FrameError("rewrite emptied the method")
+
+    if check_reasons:
+        from . import reasons as RS      # local: reasons reads transforms lazily
+        bad = RS.replay(prog.original_code, prog.original_handlers,
+                        prog.journal, code, handlers, cf=cf)
+        if bad:
+            raise FrameError("unjustified rewrite: "
+                             + "; ".join(v.describe() for v in bad[:3]))
 
     states = AS.compute_frames(cf, member, code, handlers,
                                ci.max_stack, ci.max_locals, hier)

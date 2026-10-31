@@ -497,6 +497,17 @@ def prune_dead_code(code: bytes, handlers: list[BC.Handler] | None = None) -> tu
                 # fall into the catch block with an empty stack. Both are
                 # behaviour changes, not stale frames (measured: 13 + 3 classes).
                 continue
+            if insn.is_branch or insn.is_goto or insn.op in (
+                    OP_TABLESWITCH, OP_LOOKUPSWITCH):
+                # A dead branch is left alone. NOPing it turns "jump away" into
+                # "fall through", and the verifier then judges the fall-through
+                # path against the frame that the *next* instruction declares:
+                # measured on ThemeCondition.normalizeValue, where `goto 286`
+                # sat right before a stack-map entry at 273 and the class was
+                # rejected with "current frame's stack size doesn't match".
+                # The instruction is unreachable either way, so keeping it costs
+                # two bytes and changes nothing.
+                continue
             if insn.op != 0:
                 pruned_count += 1
             for p in range(insn.pc, insn.pc + insn.length):
@@ -946,31 +957,50 @@ def _revert_shifted_methods(cf: CF.ClassFile, before: list[bytes],
     return reverted
 
 
-def _rewrite_class_ir(cf: CF.ClassFile, hier) -> tuple[int, int]:
+def _method_signature(cf: CF.ClassFile, member) -> tuple[str, str, str]:
+    return (cf.name, cf.utf8(member.name_index), cf.utf8(member.descriptor_index))
+
+
+def _rewrite_class_ir(cf: CF.ClassFile, hier,
+                      rewritten: list | None = None,
+                      refusals: list | None = None,
+                      check_reasons: bool = True) -> tuple[int, int]:
     """Run the instruction-level passes over one class.
 
     Returns (methods rewritten, methods rolled back). A rollback restores the
     original `attrs_blob`, so the output is never worse than the input — the
     same invariant the byte passes are held to.
+
+    `rewritten` collects `(class, name, descriptor)` for every method that
+    actually changed, which is what the behaviour harness needs to know which
+    methods are worth deriving cases for. `refusals` collects the methods the
+    reason checker would not justify; they keep their original body.
     """
     from .ir import transforms as _transforms
     edits = reverted = 0
     for m in cf.methods:
         before = m.attrs_blob
         try:
-            if _transforms.rewrite_method(cf, m, hier):
+            if _transforms.rewrite_method(cf, m, hier,
+                                          check_reasons=check_reasons):
                 edits += 1
-        except Exception:  # noqa: BLE001 - FrameError, decode error, anything
+                if rewritten is not None:
+                    rewritten.append(_method_signature(cf, m))
+        except Exception as exc:  # noqa: BLE001 - FrameError, decode error, etc
             if m.attrs_blob != before:
                 m.attrs_blob = before
                 reverted += 1
+            if refusals is not None and str(exc).startswith("unjustified"):
+                refusals.append(_method_signature(cf, m) + (str(exc),))
     return edits, reverted
 
 
 def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                strip_frames: bool = False,
                recompute_frames: bool = False,
-               ir_rewrite: bool = True) -> dict:
+               ir_rewrite: bool = True,
+               classpath=(),
+               check_reasons: bool = True) -> dict:
     """Rewrite flattened control flow and prune bytecode traps across an entire jar.
 
     The default path works on the instruction list (`ir/transforms.py`): a
@@ -998,12 +1028,13 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                          "the instruction-level path computes the frames that "
                          "strip_frames removes on purpose")
     stats: dict = {"classes": 0, "methods_unflattened": 0, "traps_pruned": 0,
-                   "methods_reverted": 0, "frames_rebuilt": 0}
+                   "methods_reverted": 0, "frames_rebuilt": 0,
+                   "rewritten": [], "reason_refused": []}
     hier = None
     if recompute_frames or ir_rewrite:
         try:
             from .ir import hierarchy as _hierarchy
-            hier = _hierarchy.Hierarchy.from_jar(jar_in)
+            hier = _hierarchy.Hierarchy.from_jar(jar_in, extra=classpath)
         except Exception:  # noqa: BLE001 - Object fallback still works
             hier = None
     jar_out.parent.mkdir(parents=True, exist_ok=True)
@@ -1015,7 +1046,9 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                 try:
                     cf = CF.parse(data)
                     if ir_rewrite:
-                        edits, reverted = _rewrite_class_ir(cf, hier)
+                        edits, reverted = _rewrite_class_ir(
+                            cf, hier, stats["rewritten"],
+                            stats["reason_refused"], check_reasons)
                         stats["methods_unflattened"] += edits
                         stats["traps_pruned"] += edits
                         stats["frames_rebuilt"] += edits
@@ -1043,6 +1076,7 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                         changed = {i for i, (m, old) in
                                    enumerate(zip(cf.methods, before))
                                    if m.attrs_blob != old}
+                        _record_rewritten(cf, changed, stats)
                         # 只剥被改写方法的帧：没动过的方法帧本来是对的
                         _strip_stackmaps(cf, only=changed)
                         data = cf.serialize()
@@ -1055,6 +1089,7 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                         stats["methods_reverted"] += len(reverted)
                         stats["methods_unflattened"] += edits - len(reverted)
                         stats["traps_pruned"] += edits - len(reverted)
+                        _record_rewritten(cf, changed - set(reverted), stats)
                         data = cf.serialize()
                     elif edits > 0:
                         # default: keep the original table. These rewrites are
@@ -1063,16 +1098,36 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                         # is experimental (see change-report).
                         stats["methods_unflattened"] += edits
                         stats["traps_pruned"] += edits
+                        changed = {i for i, (m, old) in
+                                   enumerate(zip(cf.methods, before))
+                                   if m.attrs_blob != old}
+                        _record_rewritten(cf, changed, stats)
                         data = cf.serialize()
                 except Exception:
                     pass
             zout.writestr(name, data)
     if verify_output:
-        stats["verify"] = _verify_rewrite(jar_in, jar_out)
+        stats["verify"] = _verify_rewrite(jar_in, jar_out, classpath,
+                                          stats.get("rewritten"))
     return stats
 
 
-def _verify_rewrite(jar_in: Path, jar_out: Path) -> dict:
+def _record_rewritten(cf, indices, stats: dict) -> None:
+    """Name the methods the *byte* path actually changed.
+
+    Without this, `--byte-patch --rewritten` wrote an empty file: the list was
+    only filled by the instruction-level path, so the behaviour harness was
+    told "nothing was rewritten" about a jar that had 1366 rewritten methods.
+    """
+    for i in sorted(indices):
+        try:
+            stats["rewritten"].append(_method_signature(cf, cf.methods[i]))
+        except Exception:
+            continue
+
+
+def _verify_rewrite(jar_in: Path, jar_out: Path, classpath=(),
+                    rows=None) -> dict:
     """Run the JVM gate on the output and roll back any class it rejects."""
     try:
         from . import toolchain as TC
@@ -1082,6 +1137,7 @@ def _verify_rewrite(jar_in: Path, jar_out: Path) -> dict:
     if not TC.find_java():
         return {"skipped": "java not found: set JAVA_HOME or put java on PATH"}
     try:
-        return VF.verify_or_keep(jar_in, jar_out).to_dict()
+        return VF.verify_or_keep(jar_in, jar_out, classpath=classpath,
+                                 rows=rows).to_dict()
     except Exception as exc:  # noqa: BLE001 - the rewrite itself already succeeded
         return {"skipped": f"{type(exc).__name__}: {exc}"}

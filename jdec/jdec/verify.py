@@ -95,7 +95,7 @@ public final class JdecVerifyDriver {
         // define every class outside our Linker and resolveClass() would then be
         // a no-op on somebody else's class (measured: a deliberately broken
         // class still reported PASS).
-        ClassLoader parent = ClassLoader.getPlatformClassLoader();
+        ClassLoader parent = platformOrBootstrap();
         Linker loader = new Linker(urls, parent);
         for (String raw : names) {
             String name = raw.trim();
@@ -111,6 +111,22 @@ public final class JdecVerifyDriver {
         out.flush();
     }
 
+    /** The platform loader, or the bootstrap loader on JDK 8.
+     *
+     * `ClassLoader.getPlatformClassLoader()` is JDK 9+. The driver is compiled
+     * with --release 8 so one build runs on every JDK in the matrix; calling
+     * that method directly would make the whole 8 column impossible.
+     */
+    private static ClassLoader platformOrBootstrap() {
+        try {
+            java.lang.reflect.Method m =
+                    ClassLoader.class.getMethod("getPlatformClassLoader");
+            return (ClassLoader) m.invoke(null);
+        } catch (Throwable t) {
+            return null;   // JDK 8: the bootstrap loader is the right parent
+        }
+    }
+
     /** Classify by what was thrown for THIS class, not by its root cause.
      *
      * Walking the cause chain made the gate nondeterministic: a class whose
@@ -121,8 +137,12 @@ public final class JdecVerifyDriver {
      */
     private static String kind(Throwable t) {
         String n = t.getClass().getName();
-        if (n.equals("java.lang.VerifyError") || n.equals("java.lang.ClassFormatError")
-                || n.equals("java.lang.UnsupportedClassVersionError")) {
+        if (n.equals("java.lang.UnsupportedClassVersionError")) {
+            // the bytes were never looked at; saying "invalid" would be a lie
+            // and would make an old JDK report a whole jar as broken
+            return "SKIP";
+        }
+        if (n.equals("java.lang.VerifyError") || n.equals("java.lang.ClassFormatError")) {
             return "INVALID";
         }
         if (n.equals("java.lang.NoClassDefFoundError")
@@ -160,16 +180,20 @@ class VerifyReport:
     verified: int = 0
     invalid: list[VerifyIssue] = field(default_factory=list)
     unresolved: list[VerifyIssue] = field(default_factory=list)
+    skipped: list[VerifyIssue] = field(default_factory=list)
     errors: list[VerifyIssue] = field(default_factory=list)
     elapsed: float = 0.0
     driver_output: str = ""
 
     @property
     def ok(self) -> bool:
-        """Verified, with nothing rejected. Missing dependencies are not a pass
-        either: an unresolved class was not judged."""
+        """Every class in the target was judged, and nothing was rejected.
+
+        Unresolved and skipped are not a pass: in both cases the verifier never
+        looked at the class, and "not judged" must never read as "fine".
+        """
         return (self.checked > 0 and not self.invalid and not self.errors
-                and not self.unresolved)
+                and not self.unresolved and not self.skipped)
 
     @property
     def verdict(self) -> str:
@@ -177,6 +201,8 @@ class VerifyReport:
             return "FAIL"
         if self.unresolved:
             return "INCOMPLETE"
+        if self.skipped:
+            return "PARTIAL"
         if not self.checked:
             return "NOTHING CHECKED"
         return "PASS"
@@ -192,6 +218,9 @@ class VerifyReport:
         if self.unresolved:
             lines.append(f"unresolved: {len(self.unresolved)} (dependency missing, "
                          f"not judged)")
+        if self.skipped:
+            lines.append(f"skipped   : {len(self.skipped)} (class file newer than "
+                         f"this JVM, no verdict)")
         if self.errors:
             lines.append(f"errors    : {len(self.errors)}")
         lines.append(f"elapsed   : {self.elapsed:.2f}s")
@@ -205,6 +234,7 @@ class VerifyReport:
             "verified": self.verified,
             "invalid": [i.__dict__ for i in self.invalid],
             "unresolved": [i.__dict__ for i in self.unresolved],
+            "skipped": [i.__dict__ for i in self.skipped],
             "errors": [i.__dict__ for i in self.errors],
             "elapsed_seconds": round(self.elapsed, 3),
             "verdict": self.verdict,
@@ -235,8 +265,12 @@ def _driver_dir() -> Path:
         out.mkdir(parents=True, exist_ok=True)
         src = out / f"{DRIVER_CLASS}.java"
         src.write_text(DRIVER_JAVA, encoding="utf-8")
-        r = TC.run_javac(["-encoding", "UTF-8", "-d", str(out), str(src)],
+        args = ["-encoding", "UTF-8", "-d", str(out), str(src)]
+        r = TC.run_javac(["--release", "8"] + args,
                          purpose="building the verification driver")
+        if r.returncode != 0:
+            # javac 8 has no --release; the driver still has to build there
+            r = TC.run_javac(args, purpose="building the verification driver")
         if r.returncode != 0:
             raise TC.ToolchainError(
                 "cannot build the JVM verification driver: "
@@ -249,14 +283,86 @@ _DRIVER_CACHE: Path | None = None
 
 
 def class_names(target: Path) -> list[str]:
-    """Internal names (a/b/C) of every class in a jar or a class directory."""
+    """Internal names (a/b/C) of every class in a jar or a class directory.
+
+    Multi-release jars carry a second copy of some classes under
+    `META-INF/versions/N/`. Those are *the same* classes (the JVM picks one at
+    load time); enumerating them produced `NoClassDefFoundError: ... (wrong
+    name: ...)` for every one of them, which then read as "dependency missing".
+    Measured on HMCL: 47 of the 1043 unresolved classes were this artefact.
+    """
     p = Path(target)
     if p.is_dir():
         return sorted(f.relative_to(p).as_posix()[:-len(".class")]
                       for f in p.rglob("*.class"))
     with zipfile.ZipFile(p) as z:
         return [i.filename[:-len(".class")] for i in z.infolist()
-                if i.filename.endswith(".class") and not i.filename.endswith("module-info.class")]
+                if i.filename.endswith(".class")
+                and not i.filename.endswith("module-info.class")
+                and not i.filename.startswith("META-INF/")]
+
+
+_JVM_MAJOR: dict[tuple[str, float], int] = {}
+
+
+def jvm_major(exe: str) -> int:
+    """Highest class-file major version this JVM will load (52 = Java 8, 65 = 21).
+
+    Returns 0 when it cannot be determined, in which case nothing is skipped —
+    an unknown JVM is treated as "judge everything and let it fail", which is
+    the old behaviour.
+    """
+    try:
+        st = os.stat(exe)
+        key = (str(exe), st.st_mtime)
+    except OSError:
+        key = (str(exe), 0.0)
+    if key in _JVM_MAJOR:
+        return _JVM_MAJOR[key]
+    major = 0
+    try:
+        r = subprocess.run([exe, "-XshowSettings:properties", "-version"],
+                           capture_output=True, text=True, errors="replace",
+                           timeout=30)
+        for line in (r.stderr or "").splitlines():
+            if "java.class.version" in line and "=" in line:
+                major = int(float(line.split("=", 1)[1].strip()))
+                break
+    except Exception:  # noqa: BLE001 - an unprobeable JVM is not fatal
+        major = 0
+    _JVM_MAJOR[key] = major
+    return major
+
+
+def class_majors(target: Path) -> dict[str, int]:
+    """internal name -> class-file major version. Reads 8 bytes per class."""
+    out: dict[str, int] = {}
+    p = Path(target)
+    if p.is_dir():
+        for f in p.rglob("*.class"):
+            try:
+                head = f.read_bytes()[:8]
+            except OSError:
+                continue
+            if len(head) >= 8 and head[:4] == b"\xca\xfe\xba\xbe":
+                out[f.relative_to(p).as_posix()[:-len(".class")]] = int.from_bytes(
+                    head[6:8], "big")
+        return out
+    with zipfile.ZipFile(p) as z:
+        for info in z.infolist():
+            name = info.filename
+            if not name.endswith(".class") or name.endswith("module-info.class"):
+                continue
+            if name.startswith("META-INF/"):
+                continue      # multi-release copy of a class already counted
+            try:
+                with z.open(info) as fh:
+                    head = fh.read(8)
+            except Exception:  # noqa: BLE001 - unreadable entry, no version
+                continue
+            if len(head) >= 8 and head[:4] == b"\xca\xfe\xba\xbe":
+                out[name[:-len(".class")]] = int.from_bytes(head[6:8], "big")
+    return out
 
 
 def _join_cp(entries: list[str]) -> str:
@@ -288,6 +394,22 @@ def verify(target: Path, *, classpath=(), timeout: int = 900,
             "java not found: set JAVA_HOME to a JDK or put java on PATH "
             "[running the verification driver]")
 
+    # A class file newer than the JVM is not invalid — it was never read. Ask
+    # the JVM what it accepts and hand it only the classes it can load.
+    ceiling = jvm_major(exe)
+    if ceiling:
+        majors = class_majors(target)
+        too_new = [n for n in names if majors.get(n, 0) > ceiling]
+        if too_new:
+            rep.skipped = [VerifyIssue(n, "SKIP",
+                                       f"class v{majors[n]} > jvm v{ceiling}")
+                           for n in too_new]
+            skip = set(too_new)
+            names = [n for n in names if n not in skip]
+    if not names:
+        rep.elapsed = time.time() - t0
+        return rep
+
     with tempfile.TemporaryDirectory(prefix="jdec_verify_") as td:
         names_file = Path(td) / "classes.txt"
         names_file.write_text("\n".join(names), encoding="utf-8")
@@ -316,6 +438,8 @@ def verify(target: Path, *, classpath=(), timeout: int = 900,
             rep.invalid.append(VerifyIssue(name, kind, detail))
         elif kind == "UNRESOLVED":
             rep.unresolved.append(VerifyIssue(name, kind, detail))
+        elif kind == "SKIP":
+            rep.skipped.append(VerifyIssue(name, kind, detail))
         else:
             rep.errors.append(VerifyIssue(name, kind, detail))
 
@@ -340,6 +464,7 @@ class KeepResult:
     verified: int = 0
     reverted: list[str] = field(default_factory=list)
     unresolved: int = 0
+    unjudged_rewritten: int = 0      # rewritten methods in an unresolved class
     input_invalid: int = 0
     still_invalid: list[str] = field(default_factory=list)
     skipped: str | None = None
@@ -357,7 +482,9 @@ class KeepResult:
         if self.still_invalid:
             parts.append(f"{len(self.still_invalid)} still invalid")
         if self.unresolved:
-            parts.append(f"{self.unresolved} not judged (missing deps)")
+            extra = (f", {self.unjudged_rewritten} of them rewritten"
+                     if self.unjudged_rewritten else "")
+            parts.append(f"{self.unresolved} not judged (missing deps{extra})")
         return ", ".join(parts)
 
     def to_dict(self) -> dict:
@@ -365,6 +492,7 @@ class KeepResult:
             "verified": self.verified,
             "reverted": list(self.reverted),
             "unresolved": self.unresolved,
+            "unjudged_rewritten": self.unjudged_rewritten,
             "input_invalid": self.input_invalid,
             "still_invalid": list(self.still_invalid),
         }
@@ -375,9 +503,24 @@ class KeepResult:
         return out
 
 
+def unjudged_rewritten(rep: VerifyReport, rows) -> list[str]:
+    """Rewritten methods living in a class the verifier never judged.
+
+    This is the number that matters. "0 rejected" over a jar where a quarter of
+    the classes were never looked at is a much weaker claim than the same
+    sentence over a fully judged jar, and the difference is exactly these
+    methods.
+    """
+    bad = ({i.cls for i in rep.invalid} | {i.cls for i in rep.unresolved}
+           | {i.cls for i in rep.skipped})
+    return [f"{cls}.{name}{desc}" for cls, name, desc in rows if cls in bad]
+
+
 def verify_or_keep(original: Path, rewritten: Path, *,
                    java: str | None = None,
-                   timeout: int = 900) -> KeepResult:
+                   timeout: int = 900,
+                   classpath=(),
+                   rows=None) -> KeepResult:
     """Guarantee that a rewritten jar is never worse than its input.
 
     Every class the verifier rejects *because of the rewrite* is replaced with
@@ -389,11 +532,18 @@ def verify_or_keep(original: Path, rewritten: Path, *,
     same path their pipeline already uses.
     """
     res = KeepResult()
-    rep_in = verify(original, java=java, timeout=timeout)
-    rep_out = verify(rewritten, classpath=[original], java=java, timeout=timeout)
+    extra = [Path(c) for c in classpath]
+    rep_in = verify(original, classpath=extra, java=java, timeout=timeout)
+    rep_out = verify(rewritten, classpath=[original] + extra,
+                     java=java, timeout=timeout)
     bad_in = {i.cls for i in rep_in.invalid}
     res.input_invalid = len(bad_in)
     res.unresolved = len(rep_out.unresolved)
+    if rows:
+        # "0 rejected" over a jar where some classes were never looked at is a
+        # conditional claim. Count the rewritten methods that fall in that hole
+        # so the caller can say so instead of implying a clean sweep.
+        res.unjudged_rewritten = len(unjudged_rewritten(rep_out, rows))
 
     to_revert = [i.cls for i in rep_out.invalid if i.cls not in bad_in]
     if not to_revert:
@@ -417,7 +567,8 @@ def verify_or_keep(original: Path, rewritten: Path, *,
     tmp.replace(rewritten)
 
     res.reverted = to_revert
-    after = verify(rewritten, classpath=[original], java=java, timeout=timeout)
+    after = verify(rewritten, classpath=[original] + extra,
+                   java=java, timeout=timeout)
     res.verified = after.verified
     res.still_invalid = sorted(i.cls for i in after.invalid)
     res.unresolved = len(after.unresolved)

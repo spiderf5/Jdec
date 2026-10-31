@@ -55,6 +55,105 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_reasons(args: argparse.Namespace) -> int:
+    """Audit the rewrite journal: every accepted edit must replay."""
+    import zipfile
+    from . import bytecode as BC
+    from .ir import reasons as RS
+
+    original = Path(args.original)
+    rewritten = Path(args.rewritten) if args.rewritten else None
+    for path in (original, rewritten):
+        if path is not None and not path.exists():
+            print(f"no such file: {path}")
+            return 2
+    rw_names: set[str] = set()
+    rw_bytes: dict[str, bytes] = {}
+    if rewritten is not None:
+        with zipfile.ZipFile(rewritten) as z:
+            for info in z.infolist():
+                if info.filename.endswith(".class") \
+                        and not info.filename.startswith("META-INF/"):
+                    rw_names.add(info.filename)
+                    rw_bytes[info.filename] = z.read(info.filename)
+
+    audits: list = []
+    with zipfile.ZipFile(original) as z:
+        names = [i.filename for i in z.infolist()
+                 if i.filename.endswith(".class")
+                 and not i.filename.startswith("META-INF/")]
+        for name in sorted(names):
+            try:
+                cf = CF.parse(z.read(name))
+            except Exception:
+                continue
+            for member in cf.methods:
+                try:
+                    audits.append(RS.audit_method(cf, member))
+                except Exception as exc:  # noqa: BLE001 - reported, not fatal
+                    audits.append(RS.MethodAudit(
+                        cf.name, cf.utf8(member.name_index),
+                        cf.utf8(member.descriptor_index)))
+                    audits[-1].violations.append(
+                        RS.Violation("audit", f"could not audit: {exc}"))
+    candidates = [a for a in audits if a.edits]
+    bad = [a for a in audits if a.violations]
+    mismatched = []
+    if rewritten is not None:
+        for a in candidates:
+            if a.violations or a.after_code is None:
+                continue
+            entry = a.cls + ".class"
+            if entry not in rw_names:
+                mismatched.append(f"{a.cls}: missing from the rewritten jar")
+                continue
+            rw_cf = CF.parse(rw_bytes[entry])
+            rw_method = next((m for m in rw_cf.methods
+                              if rw_cf.utf8(m.name_index) == a.method
+                              and rw_cf.utf8(m.descriptor_index) == a.descriptor),
+                             None)
+            if rw_method is None:
+                mismatched.append(f"{a.cls}.{a.method}: missing in the rewrite")
+                continue
+            ci = BC.method_code(rw_cf, rw_method, decode_insns=False)
+            code = ci.code if ci else b""
+            if code != a.after_code:
+                mismatched.append(f"{a.cls}.{a.method}: rewritten bytes are not "
+                                  f"the audited derivation")
+    print(f"audited   : {len(audits)} method(s), {len(candidates)} with edits")
+    print(f"justified : {len(candidates) - len(bad)} of {len(candidates)} "
+          f"candidate(s) replay cleanly")
+    if bad:
+        print(f"violations: {len(bad)}")
+        for a in bad[:args.limit]:
+            print(f"  {a.describe()}")
+        if len(bad) > args.limit:
+            print(f"  ... and {len(bad) - args.limit} more")
+    if rewritten is not None:
+        print(f"pair      : {len(mismatched)} rewritten method(s) not explained "
+              f"by the journal")
+        for line in mismatched[:args.limit]:
+            print(f"  {line}")
+        if len(mismatched) > args.limit:
+            print(f"  ... and {len(mismatched) - args.limit} more")
+    if args.json:
+        import json
+        payload = {
+            "audited": len(audits),
+            "candidates": len(candidates),
+            "violations": [v.describe() for a in bad for v in a.violations],
+            "unexplained": mismatched,
+        }
+        Path(args.json).write_text(json.dumps(payload, ensure_ascii=False,
+                                              indent=2), encoding="utf-8")
+        print(f"json      : {args.json}")
+    if not audits:
+        print("exit 2: nothing was audited")
+        return 2
+    return 0 if not bad and not mismatched else 1
+
+
 def cmd_ircheck(args: argparse.Namespace) -> int:
     """Gate for the IR layer: parse -> re-assemble -> compare bytes."""
     from . import ir as IR
@@ -99,14 +198,34 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if not p.exists():
         print(f"no such file: {p}")
         return 2
+    cp = list(args.cp or ())
+    if getattr(args, "siblings", False):
+        for sib in sorted(p.parent.glob("*.jar")):
+            if sib.resolve() != p.resolve() and str(sib) not in cp:
+                cp.append(str(sib))
     try:
-        rep = VF.verify(p, classpath=args.cp or (), limit=args.limit)
+        rep = VF.verify(p, classpath=cp, limit=args.limit,
+                        java=getattr(args, "java", None),
+                        timeout=getattr(args, "timeout", None) or 900)
     except Exception as exc:  # noqa: BLE001 - reported, not retried
         print(str(exc))
         return 2
     print(rep.summary())
     limit = args.show or 10
-    for group in (rep.invalid, rep.unresolved, rep.errors):
+    if getattr(args, "focus", None):
+        try:
+            rows = _read_rewritten(args.focus)
+        except (OSError, ValueError) as exc:
+            print(f"cannot read rewritten list: {exc}")
+            return 2
+        bad = VF.unjudged_rewritten(rep, rows)
+        print(f"rewritten : {len(rows)} method(s); {len(bad)} in a class that "
+              f"was not judged")
+        for line in bad[:limit]:
+            print(f"  UNJUDGED {line}")
+        if len(bad) > limit:
+            print(f"  ... and {len(bad) - limit} more")
+    for group in (rep.invalid, rep.unresolved, rep.skipped, rep.errors):
         for issue in group[:limit]:
             print(f"  {issue.describe()}")
         if len(group) > limit:
@@ -125,6 +244,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # the gate could not judge these: not a pass
         print(f"note: {len(rep.unresolved)} class(es) were never judged "
               f"(missing dependencies); pass --allow-unresolved to accept that")
+        return 1
+    if rep.skipped and not getattr(args, "allow_skipped", False):
+        print(f"note: {len(rep.skipped)} class(es) are newer than this JVM and "
+              f"were never read; pass --allow-skipped to accept that, or use a "
+              f"newer JDK")
         return 1
     if rep.errors:
         return 1
@@ -145,28 +269,141 @@ def cmd_behave(args: argparse.Namespace) -> int:
               "executes their code (static initialisers included). "
               "Pass --execute to allow it.")
         return 3
-    try:
-        cases = BH.parse_spec(Path(args.spec).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        print(f"cannot read spec: {exc}")
-        return 2
-    if not cases:
-        print("spec contains no cases")
-        return 2
-    try:
-        rep = BH.compare(orig, rewritten, cases)
-    except Exception as exc:  # noqa: BLE001 - reported, not retried
-        print(str(exc))
-        return 2
-    print(rep.summary())
-    for d in rep.diffs[:args.show]:
-        print(f"  DIFF {d.describe()}")
-    if len(rep.diffs) > args.show:
-        print(f"  ... and {len(rep.diffs) - args.show} more")
-    if args.json:
+    engine = getattr(args, "engine", "jvm") or "jvm"
+    cases: list = []
+    if args.spec:
+        try:
+            cases = BH.parse_spec(Path(args.spec).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"cannot read spec: {exc}")
+            return 2
+        if not cases:
+            print("spec contains no cases")
+            return 2
+
+    rows = None
+    der = None
+    if args.derive:
+        from . import cases as CS
+        if args.from_file:
+            try:
+                rows = _read_rewritten(args.from_file)
+            except (OSError, ValueError) as exc:
+                print(f"cannot read rewritten list: {exc}")
+                return 2
+        der = CS.derive(orig, rows, per_param=args.per_param)
+        print(f"derive    : {der.summary()}")
+        for ex in der.examples:
+            print(f"  - {ex}")
+        cases = cases + der.cases
+        if args.stable and cases:
+            kept, why = CS.stabilise(cases, orig, classpath=args.cp or ())
+            print(f"stable    : {why['kept']} kept "
+                  f"({why['kept'] - why['throws']} returned a value, "
+                  f"{why['throws']} threw the same exception both runs), "
+                  f"{why['unstable']} dropped (the original disagreed with "
+                  f"itself)")
+            cases = kept
+        if not cases and engine != "interp":
+            print("no case survived derivation: nothing was compared, so there "
+                  "is no verdict on behaviour")
+            return 4
+
+    diffs: list[str] = []
+    gate_failed = False
+    rep = None
+    if engine in ("jvm", "both"):
+        try:
+            rep = BH.compare(orig, rewritten, cases, classpath=args.cp or ())
+        except Exception as exc:  # noqa: BLE001 - reported, not retried
+            print(str(exc))
+            return 2
+        print(rep.summary())
+        diffs += [d.describe() for d in rep.diffs]
+        if args.derive:
+            cov = CS.coverage(rows, rep.outcomes, der,
+                              kept=cases if args.stable else None)
+            line = (f"coverage  : {cov['judged']}/{cov['total']} method(s) judged "
+                    f"({cov['value']} returned a value, {cov['throw']} threw the "
+                    f"same exception)")
+            if cov["total"]:
+                line += f" -> {100.0 * cov['judged'] / cov['total']:.1f}%"
+            print(line)
+            if cov["missing"]:
+                import collections as _c
+                hist = _c.Counter(why for _cls, _n, why in cov["missing"])
+                print(f"uncovered : {len(cov['missing'])} method(s), by reason:")
+                for why, n in hist.most_common(12):
+                    print(f"  {n:4d}  {why}")
+                if len(hist) > 12:
+                    print(f"  ... and {len(hist) - 12} more reason(s)")
+                for cls, name, why in cov["missing"][:args.show]:
+                    print(f"  UNCOVERED {cls}.{name}: {why}")
+            if args.gate is not None:
+                base = der.eligible or 0
+                pct = (100.0 * cov["judged"] / base) if base else 0.0
+                print(f"gate      : {cov['judged']}/{base} invokable method(s) = "
+                      f"{pct:.1f}% (threshold {args.gate:.0f}%)")
+                gate_failed = gate_failed or pct + 1e-9 < args.gate
+        for d in rep.diffs[:args.show]:
+            print(f"  DIFF {d.describe()}")
+        if len(rep.diffs) > args.show:
+            print(f"  ... and {len(rep.diffs) - args.show} more")
+        if rep.unusable:
+            for u in rep.unusable[:args.show]:
+                print(f"  SKIP {u.describe()}")
+            if len(rep.unusable) > args.show:
+                print(f"  ... and {len(rep.unusable) - args.show} more")
+
+    interp_rep = None
+    if engine in ("interp", "both"):
+        from .interp import diff as ID
+        if not rows:
+            print("interp    : needs --from (the rewritten-method list); "
+                  "there is nothing to execute")
+            return 2
+        interp_rep = ID.compare_rows(orig, rewritten, rows,
+                                     trials=args.trials)
+        print(interp_rep.summary())
+        diffs += [d.describe() for d in interp_rep.diff]
+        cov_i = CS.coverage(rows, ID.outcomes(interp_rep), der)
+        line = (f"interp    : {cov_i['judged']}/{cov_i['total']} method(s) judged "
+                f"-> {100.0 * cov_i['judged'] / cov_i['total']:.1f}%"
+                if cov_i["total"] else "interp    : nothing to compare")
+        print(line)
+        if cov_i["missing"]:
+            import collections as _c
+            hist = _c.Counter(why for _cls, _n, why in cov_i["missing"])
+            print(f"inconcl.  : {len(cov_i['missing'])} method(s), by reason:")
+            for why, n in hist.most_common(12):
+                print(f"  {n:4d}  {why}")
+            if len(hist) > 12:
+                print(f"  ... and {len(hist) - 12} more reason(s)")
+        if args.interp_gate is not None and cov_i["total"]:
+            pct = 100.0 * cov_i["judged"] / cov_i["total"]
+            print(f"interp gate: {cov_i['judged']}/{cov_i['total']} method(s) = "
+                  f"{pct:.1f}% (threshold {args.interp_gate:.0f}%)")
+            gate_failed = gate_failed or pct + 1e-9 < args.interp_gate
+        for d in interp_rep.diff[:args.show]:
+            print(f"  DIFF {d.describe()}")
+        if len(interp_rep.diff) > args.show:
+            print(f"  ... and {len(interp_rep.diff) - args.show} more")
+
+    if args.json and rep is not None:
         rep.write_json(Path(args.json))
         print(f"json      : {args.json}")
-    return 0 if rep.ok else 1
+    # 0 = proven identical, 1 = proven different, 4 = nothing was proven,
+    # 5 = a coverage gate was not met. "the rewrite is wrong" (1), "the harness
+    # missed" (4) and "the harness did not look enough" (5) stay distinct.
+    if diffs:
+        return 1
+    if rep is not None and rep.verdict in ("PARTIAL", "NO VERDICT"):
+        return 4
+    judged_any = (rep is not None and rep.compared) or \
+        (interp_rep is not None and interp_rep.judged)
+    if not judged_any:
+        return 4
+    return 5 if gate_failed else 0
 
 
 def cmd_engines(args: argparse.Namespace) -> int:
@@ -674,6 +911,25 @@ def cmd_rename(args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_rewritten(path, rows) -> None:
+    """`class<TAB>method<TAB>descriptor` — what `behave --from` reads back."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(
+        "".join(f"{c}\t{n}\t{d}\n" for c, n, d in rows), encoding="utf-8")
+
+
+def _read_rewritten(path) -> list[tuple[str, str, str]]:
+    rows = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            raise ValueError(f"bad rewritten line: {line!r} (want class<TAB>name<TAB>desc)")
+        rows.append((parts[0], parts[1], parts[2]))
+    return rows
+
+
 def _print_verify(v) -> None:
     """One line for a `verify` report; nothing at all when there is none."""
     if not v:
@@ -706,7 +962,8 @@ def cmd_deflat(args: argparse.Namespace) -> int:
     stats = deflat.deflat_jar(p, out, verify_output=not args.no_verify,
                               strip_frames=args.strip_frames,
                               recompute_frames=args.recompute_frames,
-                              ir_rewrite=ir)
+                              ir_rewrite=ir, classpath=args.cp or (),
+                              check_reasons=not args.no_reasons)
     if stats.get("frames_rebuilt"):
         print(f"frames    : {stats['frames_rebuilt']} rewritten method(s) got a "
               f"recomputed StackMapTable")
@@ -714,9 +971,27 @@ def cmd_deflat(args: argparse.Namespace) -> int:
           f"{stats['classes']} class(es)"
           + (f" ({stats['methods_reverted']} kept original)"
              if stats.get("methods_reverted") else ""))
+    if args.no_reasons:
+        print("reasons   : skipped (--no-reasons); the rewrites are not justified")
+    else:
+        refused = stats.get("reason_refused") or []
+        if refused:
+            print(f"reasons   : {len(refused)} method(s) kept original; first: "
+                  f"{refused[0][0]}.{refused[0][1]} — {refused[0][3].split(': ', 1)[-1]}")
+        else:
+            print("reasons   : every accepted rewrite has a replayable derivation")
     print(f"output    : {out}")
+    if getattr(args, "rewritten", None):
+        _write_rewritten(args.rewritten, stats.get("rewritten") or [])
+        print(f"rewritten : {len(stats.get('rewritten') or [])} method(s) -> "
+              f"{args.rewritten}")
     v = stats.get("verify")
     _print_verify(v)
+    if v and v.get("unjudged_rewritten"):
+        print(f"warning   : {v['unjudged_rewritten']} rewritten method(s) live in "
+              f"a class the verifier could not load, so they were never judged. "
+              f"Pass --cp with the jar's dependencies; without them \"0 rejected\" "
+              f"is conditional.")
     if stats["methods_unflattened"]:
         if ir:
             print("note      : instruction-level rewrite: folded expressions and "
@@ -760,7 +1035,8 @@ def cmd_devirt(args: argparse.Namespace) -> int:
 
     if p.suffix.lower() == ".jar":
         res = DV.Devirtualizer.devirtualize_jar(
-            p, out, code_pool, verify_output=not getattr(args, "no_verify", False))
+            p, out, code_pool, verify_output=not getattr(args, "no_verify", False),
+            classpath=getattr(args, "cp", None) or ())
         print(f"devirt     : {res['devirtualized_methods']} method(s) in "
               f"{res['devirtualized_classes']} class(es) devirtualized")
         print(f"output     : {out}")
@@ -1016,6 +1292,19 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show at most N mismatches (default 10)")
     si.set_defaults(func=cmd_ircheck)
 
+    sr = sub.add_parser(
+        "reasons",
+        help="audit the rewrite journal: every accepted deflat edit must "
+             "replay from the original bytes")
+    sr.add_argument("original", help="the jar the rewrites started from")
+    sr.add_argument("rewritten", nargs="?", default=None,
+                    help="optional: also prove every rewritten method is the "
+                         "audited derivation")
+    sr.add_argument("--json", default=None, help="write the full report as JSON")
+    sr.add_argument("--limit", type=int, default=10,
+                    help="show at most N problems (default 10)")
+    sr.set_defaults(func=cmd_reasons)
+
     sv = sub.add_parser(
         "verify",
         help="JVM gate: load every class under -Xverify:all "
@@ -1028,6 +1317,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only check the first N classes")
     sv.add_argument("--show", type=int, default=10,
                     help="show at most N problems per bucket")
+    sv.add_argument("--java", default=None,
+                    help="java executable to verify with (default: JAVA_HOME); "
+                         "classes newer than that JVM are reported SKIP, not INVALID")
+    sv.add_argument("--timeout", type=int, default=900)
+    sv.add_argument("--focus", default=None,
+                    help="rewritten-methods file (from `deflat --rewritten`); "
+                         "reports how many of them sit in a class that was not judged")
+    sv.add_argument("--siblings", action="store_true",
+                    help="also put every other *.jar in the target's directory on "
+                         "the classpath (one-shot experiment; can shadow the real deps)")
+    sv.add_argument("--allow-skipped", action="store_true",
+                    help="treat classes newer than this JVM as acceptable")
     sv.add_argument("--json", default=None, help="write the full report as JSON")
     sv.add_argument("--allow-unresolved", action="store_true",
                     help="classes whose dependencies are missing were not judged; "
@@ -1040,11 +1341,38 @@ def build_parser() -> argparse.ArgumentParser:
              "and compare (executes target code; needs --execute)")
     sb.add_argument("original", help="the jar you started from")
     sb.add_argument("rewritten", help="the jar a rewrite produced")
-    sb.add_argument("--spec", required=True,
+    sb.add_argument("--spec", default=None,
                     help="cases file, one per line: class|method|argTypes|argValues "
                          "(types: int,long,boolean,double,float,short,byte,char,FQCN)")
+    sb.add_argument("--derive", action="store_true",
+                    help="derive cases from the jar itself: every method whose "
+                         "parameters can be synthesised (primitives, String, "
+                         "arrays, objects), arity <= 8")
+    sb.add_argument("--from", dest="from_file", default=None,
+                    help="with --derive: only these methods, as written by "
+                         "`deflat --rewritten` (class<TAB>name<TAB>descriptor)")
+    sb.add_argument("--per-param", type=int, default=4,
+                    help="how many inputs per parameter (default 4)")
+    sb.add_argument("--no-stable", dest="stable", action="store_false",
+                    help="skip the self-consistency baseline (two runs of the "
+                         "original are compared to drop non-deterministic cases)")
     sb.add_argument("--execute", action="store_true",
                     help="required: this runs methods from the target jars")
+    sb.add_argument("--cp", action="append", default=None, metavar="PATH",
+                    help="extra classpath entry the target needs to load "
+                         "(repeatable). Without it every case in a class whose "
+                         "supertype lives elsewhere is unusable")
+    sb.add_argument("--engine", choices=["jvm", "interp", "both"], default="jvm",
+                    help="jvm: reflective differential; interp: the in-memory "
+                         "interpreter; both: run and cross-check")
+    sb.add_argument("--trials", type=int, default=4,
+                    help="interp: deterministic input vectors per method")
+    sb.add_argument("--interp-gate", type=float, default=None, metavar="PCT",
+                    help="fail (exit 5) when fewer than PCT%% of ALL rewritten "
+                         "methods got a conclusive interp verdict")
+    sb.add_argument("--gate", type=float, default=None, metavar="PCT",
+                    help="fail (exit 5) when fewer than PCT%% of the invokable "
+                         "methods got a verdict")
     sb.add_argument("--show", type=int, default=10)
     sb.add_argument("--json", default=None)
     sb.set_defaults(func=cmd_behave)
@@ -1287,6 +1615,9 @@ def build_parser() -> argparse.ArgumentParser:
     sdef.add_argument("--no-verify", action="store_true",
                       help="skip the -Xverify:all gate (the output is then not "
                            "guaranteed to load)")
+    sdef.add_argument("--rewritten", default=None,
+                      help="write the class/method/descriptor of every rewritten "
+                           "method to this file (input for `behave --from`)")
     sdef.add_argument("--byte-patch", action="store_true",
                       help="use the old byte-patching passes (NOP fill, original "
                            "StackMapTable kept) instead of the instruction-level "
@@ -1297,6 +1628,15 @@ def build_parser() -> argparse.ArgumentParser:
     sdef.add_argument("--strip-frames", action="store_true",
                       help="byte-patch, then strip the StackMapTables: for feeding "
                            "a decompiler, not for running the jar")
+    sdef.add_argument("--no-reasons", action="store_true",
+                      help="skip the independent replay of rewrite reasons "
+                           "(diagnostics only: the pipeline then reports partial)")
+    sdef.add_argument("--cp", action="append", default=None, metavar="PATH",
+                      help="extra classpath entry holding the target's libraries "
+                           "(repeatable). Frame generation needs the real "
+                           "supertypes: without them every merge with a library "
+                           "type widens to Object and the verifier rejects the "
+                           "method afterwards")
     sdef.set_defaults(func=cmd_deflat)
 
     def _add_devirt_args(parser):
@@ -1308,6 +1648,9 @@ def build_parser() -> argparse.ArgumentParser:
                             help="output path (default: <input>_devirt.<ext>)")
         parser.add_argument("--pool", default=None,
                             help="JSON file containing dumped virtual code pools / methods")
+        parser.add_argument("--cp", action="append", default=None, metavar="PATH",
+                            help="extra classpath entry holding the target's "
+                                 "libraries (repeatable); see `deflat --cp`")
         parser.set_defaults(func=cmd_devirt)
 
     sdevirt = sub.add_parser("devirt",

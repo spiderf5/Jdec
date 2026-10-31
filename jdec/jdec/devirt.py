@@ -1438,6 +1438,7 @@ class Devirtualizer:
         output_jar: Path,
         code_pool: dict[int, VMMethod],
         verify_output: bool = True,
+        classpath=(),
     ) -> dict[str, Any]:
         """Devirtualize an entire JAR archive using provided code_pool.
 
@@ -1450,7 +1451,7 @@ class Devirtualizer:
         hier = None
         try:
             from .ir import hierarchy as _hierarchy
-            hier = _hierarchy.Hierarchy.from_jar(input_jar)
+            hier = _hierarchy.Hierarchy.from_jar(input_jar, extra=classpath)
         except Exception:  # noqa: BLE001 - Object fallback still works
             hier = None
         working_pool = dict(code_pool)

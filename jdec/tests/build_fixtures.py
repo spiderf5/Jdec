@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "tests" / "samples" / "mixin"
 BUILD = ROOT / "tests" / "build" / "mixin"
 JAR = ROOT / "tests" / "mixin.jar"
+JSR_JAR = ROOT / "tests" / "jsr.jar"
 
 FLOW_SRC = ROOT / "tests" / "samples" / "flow"
 FLOW_BUILD = ROOT / "tests" / "build" / "flow"
@@ -44,6 +45,15 @@ DEMO_BUILD = ROOT / "tests" / "build" / "demo"
 BROKEN_BUILD = ROOT / "tests" / "build" / "broken"
 BROKEN_CLASS = "demo/broken/Truncated.class"
 SAMPLE_JAR = ROOT / "tests" / "sample.jar"
+
+# A second, tiny fixture compiled with `--release 8` (class file major 52).
+# The main fixtures are built by whatever javac is installed, i.e. major 65 on
+# a JDK 21 machine, and a JDK 8 verifier cannot read those at all — so without
+# this the "does the output load on more than one JVM" matrix would have
+# nothing to judge inside the repo.
+LEGACY8_SRC = ROOT / "tests" / "samples" / "legacy8"
+LEGACY8_BUILD = ROOT / "tests" / "build" / "legacy8"
+LEGACY8_JAR = ROOT / "tests" / "legacy8.jar"
 
 # written at the jar root, as Fabric would ship them
 META_FILES = ("fabric.mod.json", "demo.mixins.json", "demo.refmap.json")
@@ -86,6 +96,128 @@ def _compile(javac: str, src: Path, build: Path) -> None:
                           capture_output=True, text=True, errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(f"javac failed:\n{proc.stderr[:2000]}")
+
+
+def _compile_release(javac: str, src: Path, build: Path, release: int) -> None:
+    """Like _compile, but pinned to a class-file version (needs javac 9+)."""
+    if build.exists():
+        shutil.rmtree(build, ignore_errors=True)
+    build.mkdir(parents=True, exist_ok=True)
+    sources = sorted(str(p) for p in src.rglob("*.java"))
+    if not sources:
+        raise RuntimeError(f"no sources under {src}")
+    proc = subprocess.run([javac, "-nowarn", "--release", str(release),
+                           "-d", str(build)] + sources,
+                          capture_output=True, text=True, errors="replace")
+    if proc.returncode != 0:
+        raise RuntimeError(f"javac --release {release} failed://n{proc.stderr[:2000]}")
+
+
+def ensure_legacy8_jar(quiet: bool = True) -> Path | None:
+    """Class files at major 52, so JDK 8 / 17 / 21 can all judge them."""
+    javac = _javac()
+    if javac is None:
+        if not quiet:
+            print("javac not found: cannot build legacy8.jar")
+        return None
+    if not LEGACY8_SRC.is_dir():
+        if not quiet:
+            print(f"no sources at {LEGACY8_SRC}")
+        return None
+    try:
+        _compile_release(javac, LEGACY8_SRC, LEGACY8_BUILD, 8)
+    except Exception as exc:  # noqa: BLE001 - old javac without --release
+        if not quiet:
+            print(f"legacy8 fixture not built: {exc}")
+        return None
+    LEGACY8_JAR.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(LEGACY8_JAR, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(LEGACY8_BUILD.rglob("*.class")):
+            z.write(p, p.relative_to(LEGACY8_BUILD).as_posix())
+    return LEGACY8_JAR
+
+
+def build_jsr_class_bytes() -> bytes:
+    """A class at major 50 whose method uses `jsr`/`ret`.
+
+    javac has not emitted a subroutine since Java 6, so this cannot be compiled
+    — and `jsr` is illegal in class files from major 51 on, which is why the
+    fixture has to be at 50 and why the frames are deliberately absent (the
+    type-inference verifier runs for 50.0 methods without a StackMapTable).
+    """
+    import struct
+
+    cp = bytearray()
+    count = 0
+
+    def utf8(s: str) -> int:
+        nonlocal count
+        b = s.encode("utf-8")
+        cp.extend(b"\x01" + struct.pack(">H", len(b)) + b)
+        count += 1
+        return count
+
+    def cls(name_idx: int) -> int:
+        nonlocal count
+        cp.extend(b"\x07" + struct.pack(">H", name_idx))
+        count += 1
+        return count
+
+    def nat(n: int, d: int) -> int:
+        nonlocal count
+        cp.extend(b"\x0C" + struct.pack(">HH", n, d))
+        count += 1
+        return count
+
+    def methodref(c: int, nt: int) -> int:
+        nonlocal count
+        cp.extend(b"\x0A" + struct.pack(">HH", c, nt))
+        count += 1
+        return count
+
+    this_name = utf8("demo/jsr/JsrDemo")
+    this_class = cls(this_name)
+    obj_name = utf8("java/lang/Object")
+    obj_class = cls(obj_name)
+    init = utf8("<init>")
+    void_desc = utf8("()V")
+    code_name = utf8("Code")
+    init_nat = nat(init, void_desc)
+    obj_init = methodref(obj_class, init_nat)
+    choose = utf8("choose")
+    int_desc = utf8("(I)I")
+
+    def method(flags: int, name_idx: int, desc_idx: int, max_stack: int,
+               max_locals: int, code: bytes) -> bytes:
+        body = struct.pack(">HHI", max_stack, max_locals, len(code)) + code
+        body += struct.pack(">HH", 0, 0)          # no handlers, no attributes
+        attr = struct.pack(">HI", code_name, len(body)) + body
+        return (struct.pack(">HHHH", flags, name_idx, desc_idx, 1) + attr)
+
+    # iconst_2, iconst_3, iadd, pop  -> something for the folder to chew on
+    # iconst_1, jsr +4 (-> 9), ireturn, astore_1, ret 1
+    choose_code = bytes([0x05, 0x06, 0x60, 0x57,
+                         0x04, 0xA8, 0x00, 0x04, 0xAC,
+                         0x4B, 0xA9, 0x01])
+    body = (struct.pack(">HHHH", 0x0021, this_class, obj_class, 0)
+            + struct.pack(">H", 0)
+            + struct.pack(">H", 2)
+            + method(0x0001, init, void_desc, 1, 1,
+                     bytes([0x2A, 0xB7, obj_init >> 8, obj_init & 0xFF, 0xB1]))
+            + method(0x0009, choose, int_desc, 2, 2, choose_code)
+            + struct.pack(">H", 0))
+    return (b"\xCA\xFE\xBA\xBE" + struct.pack(">HH", 0, 50)
+            + struct.pack(">H", count + 1) + bytes(cp) + body)
+
+
+def ensure_jsr_jar(quiet: bool = True) -> Path:
+    """Materialise tests/jsr.jar (hand-built; no compiler can produce this)."""
+    data = build_jsr_class_bytes()
+    if not JSR_JAR.is_file() or JSR_JAR.read_bytes() != data:
+        JSR_JAR.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(JSR_JAR, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("demo/jsr/JsrDemo.class", data)
+    return JSR_JAR
 
 
 def build() -> Path:

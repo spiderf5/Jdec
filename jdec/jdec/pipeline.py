@@ -169,6 +169,19 @@ def _mapping_set_for(declared: str, prof: PB.JarProfile) -> str:
     return "mojang"
 
 
+def _split_cp(cp: str) -> list[str]:
+    """`a.jar;b.jar` -> the two entries, ignoring blanks."""
+    if not cp:
+        return []
+    sep = ";" if (";" in cp and ":" not in cp.replace("\\", "")) else ":"
+    out = []
+    for part in cp.split(sep):
+        part = part.strip()
+        if part:
+            out.append(part)
+    return out
+
+
 def deflat_stage_status(stats: dict) -> tuple[str, str]:
     """(status, detail) for the pre-cleaning stage, from deflat's own report.
 
@@ -193,7 +206,11 @@ def deflat_stage_status(stats: dict) -> tuple[str, str]:
         bits.append(f"{len(v['still_invalid'])} invalid in the input")
     if v.get("unresolved"):
         bits.append(f"{v['unresolved']} not judged (missing deps)")
-    status = STAGE_PARTIAL if v.get("reverted") else STAGE_OK
+    refused = stats.get("reason_refused") or []
+    if refused:
+        bits.append(f"{len(refused)} rewrite(s) kept original: no replayable "
+                    f"derivation")
+    status = STAGE_PARTIAL if (v.get("reverted") or refused) else STAGE_OK
     return status, f"{head}; " + ", ".join(bits)
 
 
@@ -351,7 +368,10 @@ def run_pipeline(
             # purpose (stale ones made CFR drop classes); they are no longer
             # stale, so stripping would only make the file unloadable for
             # nothing.
-            stats = DF.deflat_jar(current_jar, preclean_jar)
+            # 用户的 cp 里放着这个 jar 依赖的库(如 JavaFX)。帧合并需要真实
+            # 父类,否则每次与库类型相遇都会退化成 Object,验证器随后拒绝。
+            stats = DF.deflat_jar(current_jar, preclean_jar,
+                                  classpath=_split_cp(cp))
             unflattened_count = stats.get("methods_unflattened", 0)
             status, detail = deflat_stage_status(stats)
             v_note = detail.split("; ", 1)[1] if "; " in detail else ""

@@ -187,37 +187,30 @@ class Hierarchy:
         self._lca.clear()
 
     @classmethod
-    def from_jar(cls, path: Path) -> "Hierarchy":
+    def from_jar(cls, path: Path, extra=()) -> "Hierarchy":
+        """Index `path`, plus any `extra` jars/dirs that hold its dependencies.
+
+        A library the target references but does not contain (JavaFX in HMCL)
+        has no known supertypes, so every merge involving it widens to
+        `java/lang/Object` — sound for the frame, but too wide at the consumer:
+        the verifier then rejects the class with "Type Object is not assignable
+        to javafx/animation/Animation". Indexing the dependency jars costs one
+        parse each and removes the whole class of failure.
+        """
         h = cls()
         referenced: set[str] = set()
         with zipfile.ZipFile(path) as z:
-            for info in z.infolist():
-                if not info.filename.endswith(".class"):
-                    continue
-                try:
-                    cf = CF.parse(z.read(info.filename))
-                    sup = None
-                    if cf.super_class:
-                        e = cf.cp[cf.super_class]
-                        if e and e[0] == CF.C_CLASS:
-                            sup = cf.utf8(e[1][0])
-                    ifaces = []
-                    for i in cf.interfaces:
-                        e = cf.cp[i]
-                        if e and e[0] == CF.C_CLASS:
-                            ifaces.append(cf.utf8(e[1][0]))
-                    h.add(cf.name, sup, ifaces)
-                    for e in cf.cp:
-                        if e and e[0] == CF.C_CLASS:
-                            try:
-                                referenced.add(cf.utf8(e[1][0]))
-                            except Exception:
-                                pass
-                except Exception:
-                    continue
-        # Anything the jar references but does not define is a platform type.
-        # Without its supertypes, a merge between two JDK exceptions widens to
-        # Object and the handler frame becomes too wide at the use site.
+            cls._index_zips([z], h, referenced)
+        for e in extra:
+            p = Path(e)
+            if p.is_dir():
+                cls._index_dir(p, h, referenced)
+            elif p.is_file() and zipfile.is_zipfile(p):
+                with zipfile.ZipFile(p) as z:
+                    cls._index_zips([z], h, referenced)
+        # Anything still unknown is a platform type. Without its supertypes, a
+        # merge between two JDK exceptions widens to Object and the handler
+        # frame becomes too wide at the use site.
         missing = [n for n in referenced
                    if n not in h._parents and not n.startswith("[")]
         for name, (sup, ifaces) in resolve_platform_types(sorted(missing)).items():
@@ -225,25 +218,68 @@ class Hierarchy:
                 h._parents[name] = ((sup,) if sup else ()) + tuple(ifaces)
         return h
 
-    @classmethod
-    def from_classes(cls, classes) -> "Hierarchy":
-        """Build from already-parsed ClassFile objects (no second pass)."""
-        h = cls()
-        for cf in classes:
+    @staticmethod
+    def _index_zips(zips, h: "Hierarchy", referenced: set) -> None:
+        for z in zips:
+            for info in z.infolist():
+                if not info.filename.endswith(".class"):
+                    continue
+                if info.filename.startswith("META-INF/"):
+                    continue      # multi-release copy: the base entry is indexed
+                try:
+                    cf = CF.parse(z.read(info.filename))
+                except Exception:
+                    continue
+                h._index_one(cf, referenced)
+
+    @staticmethod
+    def _index_dir(root: Path, h: "Hierarchy", referenced: set) -> None:
+        for f in Path(root).rglob("*.class"):
             try:
-                sup = None
-                if cf.super_class:
-                    e = cf.cp[cf.super_class]
-                    if e and e[0] == CF.C_CLASS:
-                        sup = cf.utf8(e[1][0])
-                ifaces = []
-                for i in cf.interfaces:
-                    e = cf.cp[i]
-                    if e and e[0] == CF.C_CLASS:
-                        ifaces.append(cf.utf8(e[1][0]))
-                h.add(cf.name, sup, ifaces)
+                cf = CF.parse(f.read_bytes())
             except Exception:
                 continue
+            h._index_one(cf, referenced)
+
+    def _index_one(self, cf, referenced: set) -> None:
+        try:
+            sup = None
+            if cf.super_class:
+                e = cf.cp[cf.super_class]
+                if e and e[0] == CF.C_CLASS:
+                    sup = cf.utf8(e[1][0])
+            ifaces = []
+            for i in cf.interfaces:
+                e = cf.cp[i]
+                if e and e[0] == CF.C_CLASS:
+                    ifaces.append(cf.utf8(e[1][0]))
+            # The target's own definition always wins; a dependency may only
+            # fill in what the target does not define.
+            if cf.name not in self._parents:
+                self.add(cf.name, sup, ifaces)
+            for e in cf.cp:
+                if e and e[0] == CF.C_CLASS:
+                    try:
+                        referenced.add(cf.utf8(e[1][0]))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    @classmethod
+    def from_classes(cls, classes, extra=()) -> "Hierarchy":
+        """Build from already-parsed ClassFile objects (no second pass)."""
+        h = cls()
+        referenced: set[str] = set()
+        for cf in classes:
+            h._index_one(cf, referenced)
+        for e in extra:
+            p = Path(e)
+            if p.is_dir():
+                cls._index_dir(p, h, referenced)
+            elif p.is_file() and zipfile.is_zipfile(p):
+                with zipfile.ZipFile(p) as z:
+                    cls._index_zips([z], h, referenced)
         return h
 
     # ---- queries ----------------------------------------------------

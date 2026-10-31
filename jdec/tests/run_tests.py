@@ -1757,6 +1757,974 @@ def test_devirt_output_loads() -> None:
         shutil.rmtree(td, ignore_errors=True)
 
 
+def test_dead_branch_is_not_nop_ed() -> None:
+    """The byte path must not turn a dead `goto` into a fall-through.
+
+    Measured on HMCL's `ThemeCondition.normalizeValue`: a `goto` sat right
+    before a stack-map entry, every branch to it had been threaded away, and
+    NOPing it let control fall into the entry with a value on the stack. The
+    class was rejected ("Current frame's stack size doesn't match stackmap")
+    and the whole class was rolled back. The instruction is unreachable either
+    way, so keeping it is free.
+    """
+    print("deflat(byte path): dead branches are left in place")
+    from jdec import deflat as DF
+
+    code = bytes([0xB1,                  # return  -> everything below is dead
+                  0xA7, 0x00, 0x04,      # goto +4
+                  0x03, 0xAC,            # iconst_0; ireturn
+                  0x03, 0xAC])
+    out, _n = DF.prune_dead_code(code)
+    check("the dead branch survives, operand bytes included",
+          out[1:4] == bytes([0xA7, 0x00, 0x04]), out.hex())
+    # the trailing `ireturn` stays: NOPing the last terminator would let
+    # control run off the end of the code array, which the existing guard
+    # already refuses
+    check("the rest of the dead block is nop'ed",
+          out[4:7] == b"\x00" * 3 and out[7] == 0xAC, out.hex())
+
+    live = bytes([0x03, 0xAC])
+    same, n = DF.prune_dead_code(live)
+    check("a method with nothing dead is untouched", same == live and n == 0)
+
+
+def test_rewritten_list_from_both_paths() -> None:
+    """Both deflat paths must name the methods they changed.
+
+    `--byte-patch --rewritten` used to write an empty file — only the
+    instruction-level path filled the list — so `behave --from` was told
+    "nothing was rewritten" about a jar with 412 rewritten methods.
+    """
+    print("deflat: the rewritten list is filled by both paths")
+    from jdec import deflat as DF
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_rw_"))
+    try:
+        for ir in (True, False):
+            out = td / f"out{int(ir)}.jar"
+            stats = DF.deflat_jar(SAMPLE, out, verify_output=False,
+                                  ir_rewrite=ir)
+            tag = "instruction-level" if ir else "byte-patch"
+            check(f"{tag} names at least one rewritten method",
+                  bool(stats.get("rewritten")), str(stats.get("rewritten")))
+            if stats.get("rewritten"):
+                cls, name, desc = stats["rewritten"][0]
+                check(f"{tag} writes class/name/descriptor",
+                      cls and name and desc.startswith("("),
+                      str(stats["rewritten"][0]))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_jsr_subroutine_is_left_alone() -> None:
+    """`jsr`/`ret`: the IR cannot type a subroutine, so the method must survive.
+
+    The failure mode this guards against is not "we did not optimise it" but
+    "we rewrote half of it and shipped a method whose frames are gone". A
+    fixture at major 50 with a `jsr` is the only way to exercise that path:
+    javac stopped emitting subroutines in Java 6 and class files from 51 on
+    cannot contain one at all.
+    """
+    print("jsr/ret: the IR refuses, and the method comes out byte-identical")
+    from jdec import deflat as DF
+    from jdec.ir.roundtrip import audit_jar
+
+    jar = build_fixtures.ensure_jsr_jar()
+    check("the fixture exists", jar.is_file())
+    rep = audit_jar(jar)
+    check("the subroutine round-trips byte-exactly",
+          not rep.mismatches and not rep.undecodable,
+          f"{len(rep.mismatches)} mismatch, {len(rep.undecodable)} undecodable")
+
+    with zipfile.ZipFile(jar) as z:
+        before = z.read("demo/jsr/JsrDemo.class")
+    cf = CF.parse(before)
+    check("the fixture really is a major-50 class with a jsr",
+          cf.major == 50 and b"\xa8" in before, f"major={cf.major}")
+
+    # the gate that matters: `rewrite_method` finds something to fold, then
+    # refuses — before it touches the class — because it cannot type the body
+    from jdec.ir import transforms as TR
+    member = [m for m in cf.methods if cf.utf8(m.name_index) == "choose"][0]
+    try:
+        TR.rewrite_method(cf, member, None)
+        refused = False
+    except Exception:  # noqa: BLE001 - FrameError is the expected answer
+        refused = True
+    check("rewrite_method refuses a method with jsr", refused)
+    check("and it left the method alone", cf.serialize() == before)
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_jsr_"))
+    try:
+        out = td / "jsr_deflat.jar"
+        stats = DF.deflat_jar(jar, out, verify_output=False)
+        with zipfile.ZipFile(out) as z:
+            after = z.read("demo/jsr/JsrDemo.class")
+        check("the class came out byte-identical", after == before,
+              f"{len(before)} -> {len(after)} bytes")
+        check("nothing is claimed as rewritten",
+              stats.get("rewritten") == [], str(stats.get("rewritten")))
+        # and the round trip still holds on the output
+        rep2 = audit_jar(out)
+        check("the output still round-trips", not rep2.mismatches,
+              f"{len(rep2.mismatches)} mismatch")
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+
+
+def test_reason_replay_and_rollback() -> None:
+    """Every accepted edit must replay from the original bytes."""
+    print("reasons: the journal replays, and tampering is caught")
+    import zipfile
+    from jdec import classfile as CF, bytecode as BC
+    from jdec.ir import reasons as RS
+
+    with zipfile.ZipFile(SAMPLE) as z:
+        data = z.read("demo/legacy/OldStyle.class")
+    cf = CF.parse(data)
+    member = [m for m in cf.methods
+              if cf.utf8(m.name_index) == "pick"][0]
+    audit = RS.audit_method(cf, member)
+    check("the fixture rewrite has edits", audit.edits > 0, str(audit.edits))
+    check("the accepted rewrite replays cleanly", audit.ok, audit.describe())
+
+    if audit.after_code is None:
+        return
+    broken = bytearray(audit.after_code)
+    for i, b in enumerate(broken):          # corrupt the first immediate
+        if b in (0x04, 0x03, 0x02):
+            broken[i] = 0x05
+            break
+    bad = RS.replay(audit.before_code,
+                    [],  # empty handlers is enough for this method
+                    [], bytes(broken), [])
+    check("an unexplained product is a violation", bool(bad),
+          "replay accepted bytes without a journal")
+
+    cf2 = CF.parse(data)
+    member2 = [m for m in cf2.methods
+               if cf2.utf8(m.name_index) == "pick"][0]
+    from jdec import deflat as DF
+    check("deflat refuses nothing here", DF.deflat_jar is not None)
+
+
+def test_unflatten_strict_rejection() -> None:
+    """The two known false-positive paths must be refused by the checker."""
+    print("reasons: unflatten without a state slot, or with an extra branch")
+    import struct
+    from jdec import bytecode as BC
+    from jdec.ir import assemble as ASM, reasons as RS
+    from jdec.ir import transforms as TR
+
+    def build(with_selector_iload: bool, extra_branch: bool):
+        insns: list[BC.Insn] = []
+        pc = 0
+        if with_selector_iload:
+            insns.append(BC.Insn(pc=0, op=0x15, arg=5, length=2)); pc = 2
+        else:
+            insns.append(BC.Insn(pc=0, op=0x2A, length=1)); pc = 1
+            insns.append(BC.Insn(pc=1, op=0xB6, arg=1, length=3)); pc = 4
+        sw_pc = pc
+        pad = (4 - (sw_pc + 1) % 4) % 4
+        npairs = 3
+        length = 1 + pad + 4 + 4 + 8 * npairs
+        body = sw_pc + length                 # first case target
+        targets = [body + 30, body, body + 10, body + 20]
+        insns.append(BC.Insn(pc=sw_pc, op=0xAB, length=length,
+                             targets=targets, switch_keys=[1, 2, 3],
+                             pad=b"\x00" * pad))
+        pc = body
+        # the state triple: const; istore 5; goto dispatcher
+        insns.append(BC.Insn(pc=pc, op=0x04, length=1)); pc += 1
+        st_pc = pc
+        insns.append(BC.Insn(pc=pc, op=0x36, arg=5, length=2)); pc += 2
+        jump_pc = pc
+        insns.append(BC.Insn(pc=pc, op=0xA7, arg=sw_pc - pc, length=3))
+        pc += 3
+        if extra_branch:
+            insns.append(BC.Insn(pc=pc, op=0xA7, arg=st_pc - pc, length=3))
+            pc += 3
+        while pc <= body + 30:                # case bodies and default target
+            insns.append(BC.Insn(pc=pc, op=0x00, length=1)); pc += 1
+        code = BC.encode(insns)
+        return code, sw_pc, st_pc, jump_pc
+
+    for with_iload, extra in ((False, False), (True, True)):
+        code, sw_pc, st_pc, jump_pc = build(with_iload, extra)
+        prog = ASM.Program.parse(code, [])
+        n = TR.unflatten_dispatchers(prog, None)
+        if not with_iload and not extra:
+            check("the pass still retargets a guessed state slot", n >= 1,
+                  str(n))
+        if not prog.journal:
+            continue
+        try:
+            out_code, out_handlers = prog.assemble()
+        except FrameError as exc:
+            from jdec.ir.types import FrameError
+            check("an unrepeatable edit is refused", True, str(exc))
+            continue
+        bad = RS.replay(prog.original_code, prog.original_handlers,
+                        prog.journal, out_code, out_handlers, cf=None)
+        check(f"checker refuses (selector-iload={with_iload}, "
+              f"extra-branch={extra})", bool(bad),
+              "the known false-positive path passed the checker")
+
+
+def test_interp_same_negative_and_models() -> None:
+    """Same model both sides: agreement, difference, and model behaviour."""
+    print("interp: original==original, a broken rewrite differs, models run")
+    from pathlib import Path as _P
+    from jdec.interp import diff as ID
+
+    if JAVAC is None:
+        print("  (skipped: needs javac)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_interp_"))
+    try:
+        ok = _compile_java(td, {
+            "demo/ip/Target.java": """
+                package demo.ip;
+                import java.nio.file.*;
+                public final class Target {
+                    public static int pick(int v) { return v < 2 ? v + 1 : v * 2; }
+                    public static String make(String name) throws Exception {
+                        Path dir = Paths.get("/case/sub");
+                        Files.createDirectories(dir);
+                        Path file = dir.resolve(name + ".txt");
+                        Files.writeString(file, "hello " + name);
+                        return Files.readString(file);
+                    }
+                    public static int fail(String host) throws Exception {
+                        new java.net.Socket(host, 1);
+                        return 1;
+                    }
+                }
+            """,
+        })
+        jar = _jar_from(ok, td / "ok.jar")
+        rows = [("demo/ip/Target", "pick", "(I)I"),
+                ("demo/ip/Target", "make", "(Ljava/lang/String;)Ljava/lang/String;"),
+                ("demo/ip/Target", "fail", "(Ljava/lang/String;)I")]
+        rep = ID.compare_rows(jar, jar, rows, trials=3)
+        check("original vs original never differs",
+              not rep.diff, "; ".join(d.describe() for d in rep.diff))
+        check("the file model makes IO decisive",
+              all(r.verdict == "same" for r in rep.rows[:2]),
+              "; ".join(r.describe() for r in rep.rows))
+        check("a refused connection is deterministic",
+              rep.rows[2].verdict == "same", rep.rows[2].describe())
+
+        bad_src = _compile_java(td / "bad", {
+            "demo/ip/Target.java": """
+                package demo.ip;
+                public final class Target {
+                    public static int pick(int v) { return v < 2 ? v + 1 : v * 3; }
+                }
+            """,
+        })
+        bad = _jar_from(bad_src, td / "bad.jar")
+        rep_bad = ID.compare_rows(jar, bad, rows[:1], trials=4)
+        check("a changed constant is a DIFF",
+              rep_bad.rows[0].verdict == "diff", rep_bad.rows[0].describe())
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_devirt_behaviour() -> None:
+    """A devirtualized body must *compute* what the plain bytecode computes.
+
+    `test_devirt_output_loads` proves the translated method loads. Loading is
+    not behaviour: an off-by-one in the case table would still verify. This
+    builds the same method twice — once as a VM blob to be translated, once as
+    the plain bytecode a compiler would emit — and runs both through the
+    differential harness.
+    """
+    print("devirt: translated body vs the plain method, same answers")
+    import zipfile
+    from jdec import behave as BH
+    from jdec import bvm_devirt as BVM
+    from jdec import stubs as SB
+
+    if EN.find_java() is None:
+        print("  (skipped: needs a JVM to run the two jars)")
+        return
+
+    O = BVM.ORDINAL_BY_NAME
+    # the VM program: `if (arg == 0) return 1; return 0;` in VM ordinals
+    vm_code = [O["ILOAD"], 0,
+               O["IFEQ"], 6,
+               O["ICONST_1"], O["IRETURN"],
+               O["ICONST_0"], O["IRETURN"]]
+    pool = {999: BVM.BVMMethod(code_id=999, name="branchy", desc="(I)I",
+                               code=vm_code, max_locals=1, max_stack=1)}
+    # the same program as real JVM bytecode (`ifeq` offset is relative to the
+    # opcode at 1, so 1 + 5 = 6 is the `iconst_0`)
+    plain = bytes([0x1A, 0x99, 0x00, 0x05, 0x04, 0xAC, 0x03, 0xAC])
+
+    def host(body_builder):
+        cf = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
+        helper = BVM.ConstantPoolHelper(cf)
+        mref = helper.add_methodref("com/example/VM", "execute", "(I)V")
+        blob = bytes([0x11, (999 >> 8) & 0xFF, 999 & 0xFF,
+                      0xB8, (mref >> 8) & 0xFF, mref & 0xFF, 0xAC])
+        member = CF.Member(
+            access_flags=CF.ACC_PUBLIC | CF.ACC_STATIC,
+            name_index=cf.intern_utf8("branchy"),
+            descriptor_index=cf.intern_utf8("(I)I"),
+            attrs_blob=b"")
+        cf.methods.append(member)
+        BVM.BVMDevirtualizer.set_code_attribute(
+            cf, member,
+            body_builder(cf, member, blob))
+        return cf
+
+    # the expected side: the same body written out by hand, with frames
+    def expected_body(cf, member, _blob):
+        return BVM.BVMDevirtualizer.build_code_attribute(
+            cf, 1, 1, plain, [], member=member)
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_devirt_behave_"))
+    try:
+        src = td / "vm.jar"
+        vm_cf = host(lambda cf, member, blob:
+                     BVM.BVMDevirtualizer.build_code_attribute(
+                         cf, 1, 1, blob, [], member=member))
+        with zipfile.ZipFile(src, "w") as z:
+            z.writestr("com/example/Host.class", vm_cf.serialize())
+
+        out = td / "devirt.jar"
+        res = BVM.BVMDevirtualizer.devirtualize_jar(src, out, pool,
+                                                    verify_output=False)
+        check("the VM blob was devirtualized", res["devirtualized_methods"] == 1,
+              str(res["devirtualized_methods"]))
+
+        ref = td / "expected.jar"
+        with zipfile.ZipFile(ref, "w") as z:
+            z.writestr("com/example/Host.class", host(expected_body).serialize())
+
+        cases = [BH.Case("com/example/Host", "branchy", ("int",), (v,))
+                 for v in ("0", "1", "-7", "42")]
+        rep = BH.compare(ref, out, cases)
+        check("every case was judged", rep.compared == len(cases),
+              f"{rep.compared}/{len(cases)}: {rep.summary()}")
+        check("no translated answer differs",
+              not rep.diffs, "; ".join(d.describe() for d in rep.diffs[:3]))
+        # the case table has to matter: a translation that always returned the
+        # same constant would pass a one-input test
+        check("both branches were exercised",
+              {o.left for o in rep.outcomes} >= {"OK:Integer:0", "OK:Integer:1"},
+              str(sorted({o.left for o in rep.outcomes})))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def _compile_java(td: Path, files: dict[str, str], classpath=()) -> Path:
+    """Compile `{relative/path.java: source}` under `td/src` into `td/classes`."""
+    src = td / "src"
+    cls = td / "classes"
+    for rel, text in files.items():
+        f = src / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text, encoding="utf-8")
+    cls.mkdir(parents=True, exist_ok=True)
+    import subprocess
+    cp = [str(c) for c in classpath]
+    proc = subprocess.run([JAVAC, "-nowarn", "-d", str(cls)]
+                          + (["-cp", os.pathsep.join(cp)] if cp else [])
+                          + [str(p) for p in sorted(src.rglob("*.java"))],
+                          capture_output=True, text=True, errors="replace")
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr[-1500:])
+    return cls
+
+
+def _jar_from(classes: Path, out: Path, extra: dict[str, bytes] | None = None) -> Path:
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(classes.rglob("*.class")):
+            z.write(p, p.relative_to(classes).as_posix())
+        for name, data in (extra or {}).items():
+            z.writestr(name, data)
+    return out
+
+
+def test_receiver_and_argument_synthesis() -> None:
+    """A method must be invocable when its class has no no-arg constructor.
+
+    This is the whole "193 of 411" gap: a receiver used to require a public
+    no-arg constructor. The driver now falls back to a constructor with
+    synthesised arguments and then to a zero-state instance, and a reference
+    parameter can be more than null.
+    """
+    print("behave: receivers and arguments are synthesised, not just null")
+    from jdec import behave as BH
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: needs a JDK)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_recv_"))
+    try:
+        cls = _compile_java(td, {
+            "demo/recv/Target.java": """
+                package demo.recv;
+                public final class Target {
+                    private final int base;
+                    private final String tag;
+                    public Target(int base, String tag) { this.base = base; this.tag = tag; }
+                    public int plus(int x) { return base + x; }
+                    public String describe() { return tag + ":" + base; }
+                    public static int len(java.util.List<String> xs) { return xs.size(); }
+                    public static int strLen(String s) { return s.length(); }
+                }
+            """,
+        })
+        jar = _jar_from(cls, td / "target.jar")
+
+        def run(cases):
+            return BH.compare(jar, jar, cases)
+
+        rep = run([BH.Case("demo.recv.Target", "plus", ("int",), ("1",))])
+        check("an instance method with only an arg-constructor is invocable",
+              rep.compared == 1 and not rep.diffs, rep.summary())
+
+        rep = run([BH.Case("demo.recv.Target", "describe", (), ())])
+        check("the constructed receiver carries its state",
+              rep.outcomes and rep.outcomes[0].left.startswith("OK:s:"),
+              rep.summary())
+
+        rep = run([BH.Case("demo.recv.Target", "len", ("java.util.List",), ("@new",))])
+        check("a `@new` reference argument is a real instance",
+              rep.outcomes and rep.outcomes[0].left == "OK:Integer:0",
+              rep.summary())
+
+        rep = run([BH.Case("demo.recv.Target", "strLen", ("java.lang.String",), ("@new",))])
+        check("`@new` on String is the empty string",
+              rep.outcomes and rep.outcomes[0].left == "OK:Integer:0",
+              rep.summary())
+
+        rep = run([BH.Case("demo.recv.Target", "len", ("java.util.List",), ("@null",))])
+        check("a null argument still NPEs, and that counts as a throw",
+              rep.outcomes and rep.outcomes[0].evidence == "throw",
+              rep.summary())
+
+        # the identity-hash question: two loaders can never agree on one
+        rep = run([BH.Case("demo.recv.Target", "describe", (), ())])
+        check("no case is a false difference", not rep.diffs, rep.summary())
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_behave_classpath() -> None:
+    """A class whose supertype lives in another jar needs `--cp` to be judged."""
+    print("behave: the dependency classpath reaches both loaders")
+    from jdec import behave as BH
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: needs a JDK)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_cp_"))
+    try:
+        dep_cls = _compile_java(td / "dep", {
+            "demo/dep/Base.java": """
+                package demo.dep;
+                public class Base { public int twice(int x) { return 2 * x; } }
+            """,
+        })
+        dep = _jar_from(dep_cls, td / "dep.jar")
+        app_cls = _compile_java(td / "app", {
+            "demo/app/Child.java": """
+                package demo.app;
+                public class Child extends demo.dep.Base {
+                    public int four(int x) { return twice(twice(x)); }
+                }
+            """,
+        }, classpath=[dep_cls])
+        app = _jar_from(app_cls, td / "app.jar")
+
+        case = BH.Case("demo.app.Child", "four", ("int",), ("3",))
+        without = BH.compare(app, app, [case])
+        check("without the dependency the case is unusable",
+              without.outcomes[0].status == "unusable", without.summary())
+        with_cp = BH.compare(app, app, [case], classpath=[dep])
+        check("with it, the method runs and answers",
+              with_cp.outcomes[0].left == "OK:Integer:12", with_cp.summary())
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_verify_skips_multirelease() -> None:
+    """`META-INF/versions/N/...` is the same class, not a second one."""
+    print("verify: multi-release entries are not enumerated")
+    from jdec import verify as VF
+
+    if JAVAC is None:
+        print("  (skipped: needs javac)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_mr_"))
+    try:
+        cls = _compile_java(td, {
+            "demo/mr/Plain.java": "package demo.mr; public class Plain { public int f() { return 1; } }",
+        })
+        jar = _jar_from(cls, td / "mr.jar",
+                        {"META-INF/versions/9/demo/mr/Plain.class":
+                         (cls / "demo/mr/Plain.class").read_bytes()})
+        names = VF.class_names(jar)
+        check("the versioned copy is not listed as a class",
+              names == ["demo/mr/Plain"], str(names))
+        rep = VF.verify(jar)
+        check("nothing is reported unresolved",
+              not rep.unresolved and rep.verified == 1, rep.summary())
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_hierarchy_extra_classpath() -> None:
+    """Two library subclasses must merge to their library superclass."""
+    print("hierarchy: dependency jars supply supertypes for the merge")
+    from jdec.ir import hierarchy as H
+
+    if JAVAC is None:
+        print("  (skipped: needs javac)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_hier_"))
+    try:
+        dep_cls = _compile_java(td / "dep", {
+            "demo/lib/Anim.java": "package demo.lib; public class Anim {}",
+            "demo/lib/Sub1.java": "package demo.lib; public class Sub1 extends Anim {}",
+            "demo/lib/Sub2.java": "package demo.lib; public class Sub2 extends Anim {}",
+        })
+        dep = _jar_from(dep_cls, td / "dep.jar")
+        app_cls = _compile_java(td / "app", {
+            "demo/app/Use.java": """
+                package demo.app;
+                public class Use {
+                    public static demo.lib.Anim pick(boolean b) {
+                        return b ? new demo.lib.Sub1() : new demo.lib.Sub2();
+                    }
+                }
+            """,
+        }, classpath=[dep_cls])
+        app = _jar_from(app_cls, td / "app.jar")
+
+        blind = H.Hierarchy.from_jar(app)
+        check("without the dependency the merge widens to Object",
+              blind.lca("demo/lib/Sub1", "demo/lib/Sub2") == H.OBJECT,
+              blind.lca("demo/lib/Sub1", "demo/lib/Sub2"))
+        withcp = H.Hierarchy.from_jar(app, extra=[dep])
+        check("with it, the merge finds the real superclass",
+              withcp.lca("demo/lib/Sub1", "demo/lib/Sub2") == "demo/lib/Anim",
+              withcp.lca("demo/lib/Sub1", "demo/lib/Sub2"))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_coverage_accounting() -> None:
+    """Coverage counts methods, and says why the rest were not judged."""
+    print("coverage: per-method verdicts, values vs throws, and reasons")
+    from jdec import cases as CS
+    from jdec import behave as BH
+
+    rows = [("a/A", "m", "()V"), ("a/B", "n", "()V"), ("a/C", "o", "()V"),
+            ("a/D", "p", "()V")]
+    c = BH.Case("a/A", "m")
+    oc = BH.CaseOutcome
+
+    class Der:
+        reason_of = {("a/C", "o"): "touches java/nio/file/Files",
+                     ("a/D", "p"): "instance method on an abstract type"}
+
+    cov = CS.coverage(rows, [
+        oc(c, "OK:i:1", "OK:i:1", "same"),
+        oc(BH.Case("a/A", "m"), "THROW:X:y", "THROW:X:y", "same"),
+        oc(BH.Case("a/B", "n"), "THROW:X:y", "THROW:X:y", "same"),
+    ], Der)
+    check("two methods were judged", cov["judged"] == 2, str(cov))
+    check("a value is counted as a value", cov["value"] == 1, str(cov))
+    check("an identical throw is counted apart", cov["throw"] == 1, str(cov))
+    check("the method with both is counted once",
+          sum(1 for m in cov["missing"] if m[1] == "m") == 0, str(cov["missing"]))
+    reasons = {name: why for _cls, name, why in cov["missing"]}
+    check("the filter's reason is carried through",
+          reasons.get("o") == "touches java/nio/file/Files", str(reasons))
+    check("a method that never got a case is still listed",
+          "p" in reasons, str(reasons))
+
+
+def test_behave_semantics() -> None:
+    """A case the harness cannot invoke must not count as evidence."""
+    print("behave: same / diff / unusable, and what each verdict means")
+    from jdec import behave as BH
+
+    c = BH.Case("demo/X", "f", ("int",), ("1",))
+    check("a judged agreement is 'same'",
+          BH.CaseOutcome(c, "OK:i:1", "OK:i:1", "same").same)
+    check("a judged disagreement is not 'same'",
+          not BH.CaseOutcome(c, "OK:i:1", "OK:i:2", "diff").same)
+    # the old rule was `left == right`, so an un-invokable case (both sides
+    # "ERROR:...") compared equal and was counted as identical
+    check("an outcome built without a status is never 'same'",
+          not BH.CaseOutcome(c, "OK:i:1", "OK:i:1").same)
+
+    def report(*outcomes) -> BH.BehaveReport:
+        rep = BH.BehaveReport(original="a.jar", rewritten="b.jar")
+        rep.outcomes.extend(outcomes)
+        return rep
+
+    ok1 = BH.CaseOutcome(c, "OK:i:1", "OK:i:1", "same")
+    bad = BH.CaseOutcome(c, "OK:i:1", "OK:i:2", "diff")
+    skip = BH.CaseOutcome(c, "ERROR:X:y", "ERROR:X:y", "unusable", "no method")
+
+    check("no cases is NO VERDICT, not a pass",
+          report().verdict == "NO VERDICT" and not report().ok)
+    check("all-agree is PASS", report(ok1).verdict == "PASS" and report(ok1).ok)
+    check("a difference is FAIL", report(ok1, bad).verdict == "FAIL")
+    check("an unusable case downgrades PASS to PARTIAL",
+          report(ok1, skip).verdict == "PARTIAL" and not report(ok1, skip).ok)
+    check("unusable cases are not counted as compared",
+          report(ok1, skip).compared == 1, str(report(ok1, skip).compared))
+    check("two identical ERRORs are not identical",
+          skip.status == "unusable" and not skip.same)
+    check("summary names the unusable count",
+          "unusable" in report(ok1, skip).summary(),
+          report(ok1, skip).summary())
+    check("json carries the verdict",
+          report(ok1, skip).to_dict()["verdict"] == "PARTIAL")
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the end-to-end part needs a JDK)")
+        return
+
+    # end-to-end: a spec where one class does not exist must not read as PASS
+    with tempfile.TemporaryDirectory() as td:
+        spec = Path(td) / "cases.txt"
+        spec.write_text("demo/legacy/OldStyle|pick|java.lang.String|hello\n"
+                        "demo/legacy/NoSuchClass|pick|java.lang.String|hello\n",
+                        encoding="utf-8")
+        import contextlib
+        import io
+        from jdec import cli as CL
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = CL.main(["behave", str(SAMPLE), str(SAMPLE),
+                          "--spec", str(spec), "--execute"])
+        out = buf.getvalue()
+        check("a partly-unusable run exits 4, not 0", rc == 4, f"rc={rc}")
+        check("the CLI reports PARTIAL", "result    : PARTIAL" in out, out[-200:])
+        check("the CLI names the skipped case", "SKIP " in out, out[-200:])
+
+    # the coverage gate is a separate exit code: "the rewrite is wrong" (1),
+    # "nothing was proven" (4) and "we did not look enough" (5) are different
+    with tempfile.TemporaryDirectory() as td:
+        out_jar = Path(td) / "d.jar"
+        rewritten = Path(td) / "rw.txt"
+        from jdec import deflat as DF
+        stats = DF.deflat_jar(SAMPLE, out_jar, verify_output=False)
+        rewritten.write_text(
+            "\n".join("\t".join(r) for r in stats.get("rewritten") or []),
+            encoding="utf-8")
+        if stats.get("rewritten"):
+            import contextlib
+            import io
+            from jdec import cli as CL
+
+            def run(gate):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = CL.main(["behave", str(SAMPLE), str(out_jar), "--derive",
+                                  "--from", str(rewritten), "--execute",
+                                  "--gate", str(gate)])
+                return rc, buf.getvalue()
+
+            rc, text = run(0)
+            check("a met gate keeps exit 0", rc == 0, f"rc={rc}: {text[-200:]}")
+            rc, text = run(101)
+            check("an impossible gate exits 5, not 1", rc == 5, f"rc={rc}")
+            check("the gate line names both numbers",
+                  "gate      :" in text and "threshold 101%" in text,
+                  text[-300:])
+
+
+def test_case_derivation() -> None:
+    """Derived cases must be callable, stable, and honestly counted."""
+    print("cases: descriptor parsing, filters, and the stability baseline")
+    from jdec import cases as CS
+
+    check("split_descriptor handles primitives",
+          CS.split_descriptor("(IJ)Z") == (["I", "J"], "Z"))
+    check("split_descriptor handles objects and arrays",
+          CS.split_descriptor("(Ljava/lang/String;[I)V")
+          == (["Ljava/lang/String;", "[I"], "V"), "")
+    check("split_descriptor handles no arguments",
+          CS.split_descriptor("()V") == ([], "V"))
+    try:
+        CS.split_descriptor("broken")
+        raised = False
+    except ValueError:
+        raised = True
+    check("split_descriptor rejects a non-descriptor", raised)
+
+    check("an array uses its binary name",
+          CS._type_name("[I") == "[I")
+    check("a reference type becomes an FQCN",
+          CS._type_name("Ljava/util/List;") == "java.util.List")
+    check("a primitive keeps its java name", CS._type_name("I") == "int")
+
+    pick = ("demo/legacy/OldStyle", "pick",
+            "(Ljava/lang/String;)Ljava/lang/String;")
+    der = CS.derive(SAMPLE, [pick])
+    check("the rewritten method was considered", der.considered == 1, str(der.considered))
+    check("it passed the filters", der.eligible == 1, der.summary())
+    check("four string inputs were derived", len(der.cases) == 4, str(len(der.cases)))
+
+    # an instance method with no no-arg constructor cannot be given a receiver
+    spawn = ("demo/legacy/OldStyle", "spawn", "(I)V")
+    der2 = CS.derive(SAMPLE, [spawn])
+    check("a method that starts a thread is not derived",
+          not der2.cases and "java/lang/Thread" in " ".join(der2.dropped),
+          der2.summary())
+
+    kept, why = CS.stabilise(der.cases, SAMPLE)
+    check("the stable baseline keeps the pure string cases", len(kept) == 4,
+          f"{len(kept)} kept, {why}")
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the end-to-end part needs a JDK)")
+        return
+
+    # a case that only ever throws is not evidence: build one by asking for a
+    # method whose argument is an object (the driver passes null -> NPE)
+    import shutil
+    td = Path(tempfile.mkdtemp(prefix="jdec_derive_"))
+    try:
+        out = td / "d.jar"
+        from jdec import deflat as DF
+        stats = DF.deflat_jar(SAMPLE, out, verify_output=False)
+        rows = stats.get("rewritten") or []
+        check("deflat reports the rewritten methods", bool(rows), str(rows))
+        check("the report carries class, name and descriptor",
+              all(len(r) == 3 and r[2].startswith("(") for r in rows), str(rows[:2]))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_verify_matrix() -> None:
+    """The gate must know what a JVM can read, and say so instead of failing."""
+    print("verify: class-version aware, same fixture judged by 8 / 17 / 21")
+    from jdec import verify as VF
+
+    jar = build_fixtures.ensure_legacy8_jar()
+    check("the legacy8 fixture builds", jar is not None and jar.is_file())
+    if jar is None or not jar.is_file():
+        return
+    majors = VF.class_majors(jar)
+    check("it carries class files at major 52",
+          set(majors.values()) == {52}, str(sorted(set(majors.values()))))
+
+    exes: list[Path] = []
+    for root in (os.environ.get("JDEC_JDKS", ""),
+                 "D:/JAVA8", "D:/JAVA17", "D:/java21"):
+        for part in str(root).split(os.pathsep):
+            if not part:
+                continue
+            exe = Path(part) / "bin" / ("java.exe" if os.name == "nt" else "java")
+            if exe.is_file() and exe not in exes:
+                exes.append(exe)
+    if not exes:
+        print("  (skipped: no JDK found; set JDEC_JDKS to the JDK roots)")
+        return
+
+    judged = 0
+    for exe in exes:
+        rep = VF.verify(jar, java=str(exe))
+        label = exe.parent.parent.name
+        check(f"{label} judges every legacy8 class",
+              rep.skipped == [] and rep.invalid == [] and rep.verified > 0,
+              rep.summary())
+        if rep.verified:
+            judged += 1
+    check("at least one JVM actually judged the fixture", judged >= 1, str(judged))
+
+    # the behaviour driver is built with --release 8 for the same reason: one
+    # build has to run on every JVM in the matrix
+    from jdec import behave as BH
+    case = BH.Case("demo/legacy8/Legacy8Math", "pick", ("int",), ("3",))
+    for exe in exes:
+        rep = BH.compare(jar, jar, [case], java=str(exe))
+        label = exe.parent.parent.name
+        check(f"{label} runs the behaviour driver",
+              rep.compared == 1 and rep.outcomes[0].left == "OK:Integer:6",
+              rep.summary())
+
+    # The regression that matters: an old JVM used to report a whole modern jar
+    # as INVALID (UnsupportedClassVersionError), which made `verify_or_keep`
+    # revert everything and the exit code meaningless.
+    oldest = min(exes, key=lambda e: VF.jvm_major(str(e)) or 99)
+    ceiling = VF.jvm_major(str(oldest))
+    newest = max(majors.values())
+    sample_major = max(VF.class_majors(SAMPLE).values())
+    if ceiling and ceiling < sample_major:
+        rep = VF.verify(SAMPLE, java=str(oldest))
+        check("a jar newer than the JVM is skipped, not called invalid",
+              rep.invalid == [] and len(rep.skipped) == rep.checked, rep.summary())
+        check("and that reports PARTIAL, never PASS",
+              rep.verdict == "PARTIAL", rep.verdict)
+    else:
+        print(f"  (no JVM older than class v{sample_major}; skip check)")
+
+
+def test_focus_reports_unjudged() -> None:
+    """`verify --focus` must separate "0 rejected" from "0 judged"."""
+    print("verify: how many rewritten methods live in an unjudged class")
+    from jdec import verify as VF
+
+    rep = VF.VerifyReport(target="x.jar", checked=4, verified=2)
+    rep.unresolved.append(VF.VerifyIssue("a/A", "UNRESOLVED", "no dep"))
+    rep.skipped.append(VF.VerifyIssue("b/B", "SKIP", "v65 > v61"))
+    rep.invalid.append(VF.VerifyIssue("c/C", "INVALID", "bad"))
+    rows = [("a/A", "m", "()V"), ("b/B", "m", "()V"), ("c/C", "m", "()V"),
+            ("d/D", "m", "()V")]
+    bad = VF.unjudged_rewritten(rep, rows)
+    check("unjudged counts unresolved, skipped and invalid classes",
+          len(bad) == 3, str(bad))
+    check("a fully judged class is not counted",
+          "d/D.m()V" not in bad, str(bad))
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the end-to-end part needs a JDK)")
+        return
+
+    import shutil
+    td = Path(tempfile.mkdtemp(prefix="jdec_focus_"))
+    try:
+        out = td / "f.jar"
+        from jdec import deflat as DF
+        stats = DF.deflat_jar(SAMPLE, out, verify_output=False)
+        rows = stats["rewritten"]
+        rep = VF.verify(out, classpath=[SAMPLE])
+        check("the fixture's rewritten methods are all judged",
+              VF.unjudged_rewritten(rep, rows) == [],
+              str(VF.unjudged_rewritten(rep, rows)))
+
+        # a rewritten method inside a class the verifier rejected is reported
+        # by name — that is the whole point of the number
+        bad2 = VF.unjudged_rewritten(
+            rep, list(rows) + [("demo/broken/Truncated", "m", "()V")])
+        check("a rewrite inside a rejected class is named",
+              bad2 == ["demo/broken/Truncated.m()V"], str(bad2))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def test_insert_branch_to_label() -> None:
+    """Edit a method with a label, and have the JVM still accept it."""
+    print("ir: label-marked branch insertion, and identity after replace")
+    from jdec.ir import assemble as ASM
+    from jdec.ir import assume as AS
+    from jdec.ir import attrs as AT
+    from jdec.ir import frames as FR
+
+    # a branch to a replaced position must land on the FIRST replacement
+    prog = ASM.Program.parse(bytes([0x04, 0xAC]), [])
+    prog.replace(0, [BC.Insn(pc=0, op=0x05, length=1),
+                     BC.Insn(pc=0, op=0x57, length=1)])   # iconst_2; pop
+    jump = BC.Insn(pc=0, op=0xA7, arg=0, length=3)
+    prog.insert_after(1, [jump])
+    jump.pc = 50
+    jump.arg = 0 - 50                                        # target original pc 0
+    out, _hs = prog.assemble()
+    check("a branch to a replaced pc lands on the first instruction",
+          int.from_bytes(out[-2:], "big", signed=True) == -3, out.hex())
+
+    # label edition: append a block, mark it, jump to it
+    q = ASM.Program.parse(bytes([0x04, 0xAC]), [])          # iconst_1; ireturn
+    label = q.new_label()
+    q.insert_after(1, [BC.Insn(pc=0, op=0x07, length=1),   # iconst_7
+                       BC.Insn(pc=0, op=0xAC, length=1)])  # ireturn
+    q.mark(q.insns[-2].pc, label)
+    q.insert_branch(0, 0xA7, label, before=True)
+    out, _hs = q.assemble()
+    check("a label branch encodes to the marked block",
+          out == bytes([0xA7, 0x00, 0x05, 0x04, 0xAC, 0x07, 0xAC]), out.hex())
+
+    unmarked = q.new_label()
+    try:
+        q.insert_branch(0, 0xA7, unmarked)
+        refused = False
+    except Exception:
+        refused = True
+    check("a branch to an unmarked label is refused", refused)
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the JVM half needs a JDK)")
+        return
+
+    import shutil
+    td = Path(tempfile.mkdtemp(prefix="jdec_label_"))
+    try:
+        src = td / "src"
+        src.mkdir(parents=True)
+        with zipfile.ZipFile(SAMPLE) as z:
+            # extract everything: a class whose siblings are missing comes back
+            # UNRESOLVED, and "not judged" is not what this test is about
+            for name in z.namelist():
+                if not name.endswith(".class"):
+                    continue
+                dest = src / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(z.read(name))
+            cf = CF.parse(z.read("demo/legacy/OldStyle.class"))
+        # <init>()V ends in `return`; move that return into an appended block
+        target = next(m for m in cf.methods
+                      if cf.utf8(m.name_index) == "<init>")
+        ci = BC.method_code(cf, target)
+        last = ci.insns[-1]
+        check("the fixture constructor ends in return", last.op == 0xB1, hex(last.op))
+        prog = ASM.Program.parse(ci.code, ci.handlers)
+        mark = prog.new_label()
+        prog.insert_after(prog.insns[-1].pc, [BC.Insn(pc=0, op=0xB1, length=1)])
+        prog.mark(prog.insns[-1].pc, mark)
+        prog.insert_branch(last.pc, 0xA7, mark, before=True)   # goto the new return
+        prog.remove({last.pc})                                 # drop the old one
+        code, handlers = prog.assemble()
+        AT.replace_code(cf, target, code, handlers, ci.max_stack, ci.max_locals)
+        states = AS.compute_frames(cf, target, code, handlers,
+                                   ci.max_stack, ci.max_locals)
+        need = FR.needed_pcs(BC.decode(code), handlers)
+        AT.set_code_subattr(cf, target, "StackMapTable",
+                            FR.encode(cf, states, need, target, ci.max_locals))
+        (src / "demo/legacy/OldStyle.class").write_bytes(cf.serialize())
+        # verify takes a jar or a directory, not a single class file; the
+        # inner-class reference simply comes back unresolved, which is fine —
+        # what this asserts is that nothing is rejected
+        from jdec import verify as VF
+        rep = VF.verify(src)
+        bad = {i.cls for i in rep.invalid}
+        stuck = {i.cls for i in rep.unresolved}
+        check("the label-edited class is not rejected", "demo/legacy/OldStyle" not in bad,
+              rep.summary())
+        check("and it was actually judged, not left unresolved",
+              "demo/legacy/OldStyle" not in stuck, rep.summary())
+        check("nothing else broke either",
+              bad <= {"demo/broken/Truncated"}, str(sorted(bad)))
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def test_weak_engine_is_rescued() -> None:
     """Lead engine fails on modern syntax; a later engine must recover it."""
     if _no_engines():
@@ -5432,6 +6400,23 @@ def main() -> int:
     test_ir_transforms()
     test_pipeline_gate()
     test_devirt_output_loads()
+    test_devirt_behaviour()
+    test_jsr_subroutine_is_left_alone()
+    test_dead_branch_is_not_nop_ed()
+    test_rewritten_list_from_both_paths()
+    test_reason_replay_and_rollback()
+    test_unflatten_strict_rejection()
+    test_interp_same_negative_and_models()
+    test_behave_semantics()
+    test_receiver_and_argument_synthesis()
+    test_behave_classpath()
+    test_verify_skips_multirelease()
+    test_hierarchy_extra_classpath()
+    test_coverage_accounting()
+    test_case_derivation()
+    test_verify_matrix()
+    test_focus_reports_unjudged()
+    test_insert_branch_to_label()
     test_dead_code_keeps_control_flow()
     test_frames_match_javac()
     test_ir_assembly_changes_length()

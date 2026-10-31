@@ -142,17 +142,39 @@ python jdec.py verify rewritten.jar --cp original.jar --allow-unresolved
 | `--byte-patch` | 旧的字节补丁：等长 NOP 填充，保留原 StackMapTable | 对照 / 回退 |
 | `--strip-frames` | 剥帧，不保证可加载 | `auto` 喂给反编译器的中间产物 |
 
-实测（2026-10-30，HotSpot 21）：
+实测（2026-10-30，HotSpot 21）。**带依赖**这一列是把目标自己的库放上 classpath
+（`--cp`）之后的结果——依赖不全时"0 拒绝"是有条件的，见下：
 
-| 语料 | 改写方法 | 回滚 | 产物校验 | 耗时 |
-|---|---|---|---|---|
-| HMCL 15.0 MB / 3693 类 | 411 | 0 | 2697 通过 / 1043 缺依赖 / 0 拒绝 | 7.9s |
-| OptiFine 1.75 MB / 467 类 | 19 | 0 | 252 通过 / 215 缺依赖 / 0 拒绝 | 2.3s |
+| 语料 | 改写方法 | 回滚 | 产物校验（不带依赖） | 产物校验（带依赖） | 耗时 |
+|---|---|---|---|---|---|
+| HMCL / 3693 类 | 411 | 0 | 2697 通过 / 996 未判定 / 0 拒绝 | **3693 通过 / 0 未判定 / 0 拒绝** | 9.0s |
+| OptiFine / 467 类 | 19 | 0 | 252 通过 / 215 未判定 / 0 拒绝 | （缺 Minecraft，未跑） | 2.3s |
 
-旧的字节路径在 HMCL 上是 412 个方法、12.8s：改写效果相当，但产物里是一长串 `nop`，
-而且正确性依赖"改写恰好等长"这个巧合。差的那 1 个方法，是字节路径先把前面的死代码
-抹成 `nop`、再顺手抹掉一条跳过这些 `nop` 的 `goto`；指令级路径里那两条指令还活着，
-没有可省的 `goto`。
+**为什么一定要给 `--cp`：** 帧的类型合并需要真实的父类。库类型不认识时，每次合并
+都会退化成 `java/lang/Object`，帧就比 javac 宽，而 `verify` 在同一个不完整 classpath
+上跑，看不见这个问题。把 JavaFX 放上去之后，HMCL 立刻有 2 个类被验证器拒绝
+（`Type 'java/lang/Object' is not assignable to 'javafx/animation/Animation'`）。
+`deflat` 现在会在这种时候打一行 warning 并点名"有 N 个改写方法从未被判定"。
+
+两条路径在 HMCL 上改的方法数几乎相同（字节路径 412、指令级 411）。差的 1 个是
+`MultiMCModpackInstallTask$MMCInstancePatchesAssembleTask.execute`：有一条
+`goto 下一条指令` 是多余的，但它是另一条 `ifeq` 的跳转目标。字节路径可以把这条
+`goto` 抹成 `nop`（偏移不变，跳转落在 `nop` 上继续往下走），指令级路径是**真删**
+并重排，删掉一个分支目标就得顺带改所有指向它的跳转——它不做这件事，于是整方法保留。
+方向是更保守，不是更激进。
+
+字节路径的产物里是一长串 `nop`，正确性还依赖"改写恰好等长"这个巧合；它保留下来是
+为了对照，以及在没有 javac 的环境里给反编译器喂输入。
+
+`verify` 认类文件版本：类比 JVM 新时记 **SKIP**（没被读过），而不是 INVALID。
+
+```bash
+python jdec.py verify out.jar --java D:/JAVA17/bin/java --focus rewritten.txt
+```
+
+`--focus` 报的是 `unjudged_rewritten`——**改写方法里有多少落在从未被判定的类上**。
+这个数字比"0 个类被拒绝"有用得多：HMCL 上不带依赖时，411 个改写方法里有 163 个
+所在类缺依赖，"0 拒绝"实际只覆盖 248 个；补上 JavaFX 之后是 **411/411**。
 
 `devirt` 走同一条规矩：重建的 Code 现在带 StackMapTable（`build_code_attribute` 接受
 方法本身，才拿得到隐式初始帧），jar 级产物整体过 `-Xverify:all`，被拒绝的类回滚成
@@ -173,15 +195,49 @@ demo/legacy/OldStyle|pick|java.lang.String|hello
 demo/legacy/OldStyle|pick|java.lang.String|
 ```
 
-- 静态方法和实例方法都支持（实例方法会用无参构造器创建一个对象）
+- 静态方法和实例方法都支持。实例方法的接收者按 构造器（需要参数时用确定性样本值
+  合成）→ 枚举常量 → 平台实现（`List`→`ArrayList` 等）→ `Unsafe.allocateInstance`
+  的顺序构造，所以**不要求有无参构造器**
 - 参数类型：`int` / `long` / `boolean` / `double` / `float` / `short` / `byte` /
-  `char` / 全限定类名（目前只支持 String 这类可直接构造的）
+  `char` / 全限定类名。引用参数除了字面量，还可以用控制 token：`@null`、`@new`
+  （造一个实例）、`@arr0` / `@arr1`（空数组 / 一个元素）、`@s:文本`、`@i:5` 等
+- 每条用例跑在自己的线程里，3 秒没结果记该用例不可用，不会拖死整批
 - 会**执行目标代码**（`Class.forName(..., true)` 会跑 `<clinit>`，字符串解密器就在
   这一步），所以必须显式 `--execute`，否则退出码 3
 
-退出码：0 全部一致 / 1 有差异 / 2 没有可比用例 / 3 未授权执行。
+退出码：0 全部一致 / 1 有差异 / 2 参数错 / 3 未授权执行 / **4 没有结论**
+（`PARTIAL`：部分用例调不起来；`NO VERDICT`：一条都没判定）/ **5 覆盖率门槛未达**。
+4 和 0 的区别很重要——"没证明"和"证明相同"不是一回事；5 和 1 也一样——"没看够"
+不是"改错了"。
 
-它是**回归工具，不是等价性证明**：覆盖多少完全取决于你写的用例。
+```bash
+python jdec.py behave in.jar out.jar --derive --from rewritten.txt --execute \
+    --cp deps/javafx-controls.jar --gate 90
+```
+
+`--gate` 的分母是**可调用集合**（派生出用例的方法数），不是全部改写方法：一个要写盘、
+要起线程的方法在这里本来就调不起来，把它算进分母会让门槛取决于目标恰好做什么。
+
+**用例可以自动派生**（`--derive`）：从改写清单出发，为可反射调用的方法生成固定输入。
+
+```bash
+python jdec.py deflat in.jar -o out.jar --rewritten rewritten.txt
+python jdec.py behave in.jar out.jar --derive --from rewritten.txt --execute
+```
+
+派生只剔除**观测不可靠**的方法：抽象 / native、`<init>` / `<clinit>`、以及方法体
+自己引用了线程、RNG、时钟、写入型 IO 的（按"整类 deny + (类, 方法) deny"判定，
+不再按包前缀一刀切——那会把 `Path`、`Duration` 这种纯类型也算进去）。随后跑
+**抖动基线**：`原始 × 原始` 在两个独立 JVM 里各跑一次，两次不一致的丢掉。
+
+两侧抛出**同一个**异常会保留：同一个输入在两个 jar 上产生同样的可观测结果，这是
+证据，只是比"返回了值"弱，所以分开计数（`identical: 765 (319 value, 446 throw)`）。
+
+它是**回归工具，不是等价性证明**：覆盖多少取决于能派生出多少可调用方法。HMCL 上
+411 个改写方法里 251 个拿到判定（61.1%，其中 132 个返回了值）；剩下 160 个逐条列了
+原因（71 个要文件系统沙箱、18 个是构造器、16 个自身结果不稳定、9 个宿主是抽象类、
+46 个是线程/网络/通道）。**能调用的 267 个里判定 251 个 = 94.0%。** 这些数字每
+次都打印，不藏。
 
 输出：
 
