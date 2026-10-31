@@ -6297,6 +6297,33 @@ def test_score_decl_and_noise() -> None:
     check("nested generic header still counts as a declaration",
           counts2.get("maxOf") == 1, str(counts2))
 
+    # (f) annotation members with `default` values are declarations too
+    ann = ("public @interface A {\n"
+           "    int x() default 0;\n"
+           '    String s() default "x";\n'
+           "    int[] a() default {};\n"
+           "    int plain();\n"
+           "}\n")
+    ann_counts = SCORE._decl_counts(ann)
+    check("annotation members with defaults count as declarations",
+          all(ann_counts.get(n) == 1 for n in ("x", "s", "a", "plain")),
+          str(ann_counts))
+    # (g) type-use annotations sit between modifiers and the return type
+    type_use = SCORE._decl_counts(
+        "protected @Nullable String handleArgumentType(String x) { return x; }\n"
+        "public @Range(from=0L, to=255L) int red();\n"
+        "public @Nullable Item item;\n")
+    check("type-use annotations still count as declarations",
+          type_use.get("handleArgumentType") == 1 and type_use.get("red") == 1
+          and type_use.get("item") == 1, str(type_use))
+    # (h) enum constants with anonymous bodies
+    enum_counts = SCORE._decl_counts(
+        "public enum E {\n    A { void f() {} },\n    B(1),\n"
+        "    @Deprecated C;\n    void g() {}\n}\n")
+    check("enum constants with bodies count",
+          all(enum_counts.get(n, 0) >= 1 for n in ("A", "B", "C")),
+          str(enum_counts))
+
     # (e) positive control: real declarations still hit
     decls = ("public class Showcase {\n"
              + "\n".join(f"    public int {m}() {{ return 1; }}" for m in members)

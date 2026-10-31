@@ -57,12 +57,13 @@ _PREFIX = r"(?:^|[{};])[ \t]*(?:(?:" + _ANN + r")\s*)*"
 _GENS = r"(?:" + _GEN + r")\s+"   # a generic parameter segment, e.g. <T extends C<T>>
 _METHOD_DECL_RE = re.compile(
     _PREFIX
-    + r"(?:(?:" + _MODS + r"\s+)+" + r"(?:" + _GENS + r")*" + r"(?:" + _TYPE + r"\s+)?"
+    + r"(?:(?:" + _MODS + r"\s+)+" + r"(?:" + _GENS + r")*" + r"(?:(?:" + _ANN + r")\s*)*(?:" + _TYPE + r"\s+)?"
     + r"|(?:^|[{};])[ \t]*(?:(?:" + _ANN + r")\s*)*(?:" + _MODS + r"\s+)*(?:" + _GENS + r")*"
-    + _TYPE + r"\s+)"
+    + r"(?:(?:" + _ANN + r")\s*)*" + _TYPE + r"\s+)"
     + r"(?P<name>[A-Za-z_$][\w$]*)[ \t]*\("
     + r"[^;{)]*(?:\([^)]*\)[^;{)]*)*"
-    + r"\)[ \t]*(?:throws\s+[\w$.,\s]+?)?(?=[;{])"
+    + r"\)[ \t]*(?:throws\s+[\w$.,\s]+?)?"
+    + r"(?:\s+default\b[^;]*)?(?=[;{])"
     , re.M
 )
 
@@ -71,13 +72,15 @@ _METHOD_DECL_RE = re.compile(
 # both a separator and a prefix so multi-declarator lines count every name.
 _FIELD_DECL_RE = re.compile(
     r"(?:^|[{};,])[ \t]*(?:(?:" + _ANN + r")\s*)*(?:" + _MODS + r"\s+)*(?:" + _GENS + r")*"
-    + _TYPE + r"\s+(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:\[\])*(?=[=;,])"
+    + r"(?:(?:" + _ANN + r")\s*)*" + _TYPE
+    + r"\s+(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:\[\])*(?=[=;,])"
     , re.M
 )
 
-# Enum constants are fields in bytecode: `enum Color { RED, GREEN; ... }`
-_ENUM_RE = re.compile(
-    r"\benum\s+[\w$]+\s*(?:" + _GEN + r")?(?:\s+implements\s+[\w$.,\s]+)?\{([^{}]*)")
+# Enum constants are fields in bytecode. Their initialisers may carry
+# arguments and anonymous-class bodies (`A { ... }, B(1) ;`), so the header
+# needs a brace-aware scan rather than a [^{}]* regex.
+_ENUM_HEAD_RE = re.compile(r"\benum\s+[A-Za-z_$][\w$]*[^{]*\{")
 # Record components are fields in bytecode: `record Point(int x, int y) {}`
 _RECORD_RE = re.compile(r"\brecord\s+[\w$]+\s*\(([^)]*)\)")
 
@@ -268,6 +271,53 @@ def _strip_noise(src: str) -> str:
     return "".join(out)
 
 
+def _enum_constant_names(text: str) -> list[str]:
+    names: list[str] = []
+    for m in _ENUM_HEAD_RE.finditer(text):
+        i = m.end()
+        depth = 0
+        j = i
+        while j < len(text):
+            c = text[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == ";" and depth == 0:
+                break
+            j += 1
+        header = text[i:j]
+        parts: list[str] = []
+        start = 0
+        paren = brace = 0
+        for k, c in enumerate(header):
+            if c == "(":
+                paren += 1
+            elif c == ")":
+                paren = max(0, paren - 1)
+            elif c == "{":
+                brace += 1
+            elif c == "}":
+                brace = max(0, brace - 1)
+            elif c == "," and paren == 0 and brace == 0:
+                parts.append(header[start:k])
+                start = k + 1
+        parts.append(header[start:])
+        for part in parts:
+            p = part.strip()
+            while True:
+                ann = re.match(r"@[\w$.]+(?:\((?:[^()]|\([^()]*\))*\))?\s*", p)
+                if not ann:
+                    break
+                p = p[ann.end():]
+            nm = re.match(r"[A-Za-z_$][\w$]*", p)
+            if nm and nm.group(0) not in _JAVA_KEYWORDS_FOR_DECLS:
+                names.append(nm.group(0))
+    return names
+
+
 def _decl_counts(stripped: str) -> dict[str, int]:
     """How many times each identifier appears in declaration position.
 
@@ -280,12 +330,8 @@ def _decl_counts(stripped: str) -> dict[str, int]:
         counts[m.group("name")] = counts.get(m.group("name"), 0) + 1
     for m in _FIELD_DECL_RE.finditer(stripped):
         counts[m.group("name")] = counts.get(m.group("name"), 0) + 1
-    for em in _ENUM_RE.finditer(stripped):
-        body = em.group(1)
-        head = body.split(";", 1)[0]
-        for ident in _IDENT_RE.findall(head):
-            if ident not in _JAVA_KEYWORDS_FOR_DECLS:
-                counts[ident] = counts.get(ident, 0) + 1
+    for name in _enum_constant_names(stripped):
+        counts[name] = counts.get(name, 0) + 1
     for rm in _RECORD_RE.finditer(stripped):
         for part in rm.group(1).split(","):
             idents = _IDENT_RE.findall(part)
