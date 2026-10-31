@@ -6555,7 +6555,8 @@ def test_cli_json_and_version() -> None:
     ver = subprocess.run([sys.executable, str(ROOT / "jdec.py"), "--version"],
                          cwd=ROOT, capture_output=True, text=True, timeout=60)
     check("--version exits 0", ver.returncode == 0, ver.stderr[-200:])
-    check("--version prints the package version", "0.2.0" in ver.stdout,
+    from jdec import __version__ as pkg_version
+    check("--version prints the package version", pkg_version in ver.stdout,
           ver.stdout)
     out = Path(tempfile.mkdtemp(prefix="jdec_reach_json_")) / "reach.json"
     try:
@@ -6648,6 +6649,161 @@ def test_web_source_path_containment() -> None:
         got = WB._get_source_for_engine(wd, "demo/A", "final")
         check("a report rel that escapes src/ is refused",
               "SECRET" not in got, got[:80])
+
+
+def test_export_rejects_escaping_resources() -> None:
+    """A hostile jar entry must not write outside src/main/resources.
+
+    The jar under analysis is the untrusted input; `..` in an entry name used
+    to be joined straight onto the destination, so exporting a malicious sample
+    could drop files anywhere the user could write.
+    """
+    print("project: jar entries that escape the resources tree are refused")
+    import zipfile as _zip
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        jar = root / "evil.jar"
+        with _zip.ZipFile(jar, "w") as z:
+            z.writestr("assets/ok.txt", "fine")
+            z.writestr("../escaped.txt", "pwned")
+            z.writestr("../../../../escaped_deep.txt", "pwned")
+
+        out = root / "proj"
+        stats = PJ.export_project(jar, out, with_stubs=False)
+        res = out / "src" / "main" / "resources"
+        check("a safe resource is still extracted",
+              (res / "assets" / "ok.txt").is_file())
+        check("only the safe entry is copied",
+              stats.get("resources_copied") == 1, str(stats))
+        check("escaping entries are counted, not silently dropped",
+              stats.get("resources_skipped") == 2, str(stats))
+        leaked = sorted(str(p.relative_to(root)) for p in root.rglob("escaped*"))
+        check("nothing escaped the project tree", leaked == [], str(leaked))
+
+
+def test_native_extract_keeps_same_basename() -> None:
+    """Two libraries sharing a basename must both survive extraction.
+
+    `win/x64/lwjgl.dll` and `win/x86/lwjgl.dll` used to be written to the same
+    path, so the report described one file while the directory held the other.
+    """
+    print("natives: same-named libraries for different arches do not overwrite")
+    from jdec import native_scan as NS
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        jar = root / "mod.jar"
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("native/windows/x64/lwjgl.dll", b"x64-payload")
+            z.writestr("native/windows/x86/lwjgl.dll", b"x86-payload")
+        out = root / "nat"
+        tri = NS.triage(jar, out, collect_decl=False)
+        rels = sorted(lib.rel for lib in tri.libs)
+        check("both libraries are reported", len(tri.libs) == 2, str(rels))
+        check("each has its own on-disk path", len(set(rels)) == 2, str(rels))
+        check("the architecture directory is preserved",
+              all(r.startswith("native/windows/") for r in rels), str(rels))
+        payloads = {(out / r).read_bytes() for r in rels}
+        check("no payload was overwritten",
+              payloads == {b"x64-payload", b"x86-payload"}, str(payloads))
+
+
+def test_stub_bundle_failure_is_visible() -> None:
+    """A failed stub build must not be reported as a bundled library.
+
+    The fallback writes the .java sources into mc_stubs.jar; that jar cannot
+    satisfy javac (it has no .class entries), so counting it as "bundled" turns
+    every unresolved vanilla symbol into a mystery for the user.
+    """
+    print("project: failed stub compile is reported, not counted as bundled")
+    import zipfile as _zip
+    from unittest import mock
+    from jdec import stubs as SB
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        jar = root / "plain.jar"
+        with _zip.ZipFile(jar, "w") as z:
+            z.writestr("a/B.class", b"\xca\xfe\xba\xbe")  # unparsable on purpose
+        out = root / "proj"
+        with mock.patch.object(SB, "build_stubs_jar",
+                               side_effect=RuntimeError("javac unavailable")):
+            stats = PJ.export_project(jar, out, with_stubs=True)
+        check("failed stub build is not counted as bundled",
+              stats["stubs_bundled"] == 0, str(stats))
+        check("failed stub build is reported as sources-only",
+              stats["stubs_sources_only"] == 1, str(stats))
+        stub_jar = out / "libs" / "mc_stubs.jar"
+        check("sources-only jar still exists for inspection", stub_jar.is_file())
+        with _zip.ZipFile(stub_jar) as z:
+            names = z.namelist()
+        check("sources-only jar contains sources, not classes",
+              bool(names) and all(n.endswith(".java") for n in names),
+              str(names[:3]))
+
+
+def test_web_cross_site_guard() -> None:
+    """Mutating workbench endpoints refuse browser requests from another origin.
+
+    `/api/export_project` is a GET with side effects and `/api/annotations` is a
+    plain POST; both are reachable from any page the user has open, so a missing
+    origin check is a drive-by write, not a theoretical concern.
+    """
+    print("web: cross-site requests cannot mutate the workbench")
+    import threading
+    import urllib.error
+    import urllib.request
+    from jdec import web as WB
+
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td)
+        (work / "report.json").write_text(
+            json.dumps({"outcomes": {}}), encoding="utf-8")
+        handler = lambda *a, **k: WB.WorkbenchHandler(*a, work_dir=work, **k)
+        server = WB.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{port}"
+
+        def status(request) -> int:
+            try:
+                with urllib.request.urlopen(request, timeout=10) as resp:
+                    return resp.status
+            except urllib.error.HTTPError as exc:
+                return exc.code
+
+        body = json.dumps({"class": "a/B", "tag": "threat"}).encode()
+        try:
+            hostile = urllib.request.Request(
+                base + "/api/annotations", data=body, method="POST",
+                headers={"Origin": "https://evil.example",
+                         "Content-Type": "application/json"})
+            check("cross-origin POST is refused", status(hostile) == 403)
+            check("refused POST did not write notes",
+                  not (work / "audit_notes.json").exists())
+
+            plain = urllib.request.Request(
+                base + "/api/annotations", data=body, method="POST",
+                headers={"Content-Type": "application/json"})
+            check("same-origin POST still works", status(plain) == 200)
+            check("same-origin POST wrote notes",
+                  (work / "audit_notes.json").is_file())
+
+            export = urllib.request.Request(
+                base + "/api/export_project",
+                headers={"Sec-Fetch-Site": "cross-site"})
+            check("cross-site export is refused", status(export) == 403)
+            check("refused export created no project",
+                  not (work / "project").exists())
+
+            read_only = urllib.request.Request(
+                base + "/api/tree", headers={"Sec-Fetch-Site": "cross-site"})
+            check("cross-site read-only API is refused too",
+                  status(read_only) == 403)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 def test_web_callgraph_error_semantics() -> None:
@@ -7443,6 +7599,10 @@ def main() -> int:
     test_web_source_path_containment()
     test_web_bytecode_endpoint()
     test_web_class_tags()
+    test_export_rejects_escaping_resources()
+    test_native_extract_keeps_same_basename()
+    test_stub_bundle_failure_is_visible()
+    test_web_cross_site_guard()
     test_cli_json_and_version()
     test_callgraph_and_reachability()
     test_conservative_prune()
