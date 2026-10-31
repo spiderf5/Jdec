@@ -1028,7 +1028,7 @@ def cmd_deflat(args: argparse.Namespace) -> int:
         elif args.recompute_frames:
             print("note      : StackMapTables were recomputed (full_frame) and "
                   "keep every offset javac required. This path still reverts more "
-                  "classes than the default; see jdec/change-report.md.")
+                  "classes than the default.")
         else:
             print("note      : StackMapTables kept as they were. These rewrites "
                   "are length-preserving, so the frames still describe the right "

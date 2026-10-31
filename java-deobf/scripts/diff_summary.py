@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""统计工作区的代码变更，供变更报告使用。
+"""统计工作区的代码变更，供提交说明使用。
 
 git 仓库：基于 git status + git diff --numstat 统计每个文件的状态与增删行数。
 非 git 目录：按文件修改时间扫描最近变动的源码文件（--recent，单位分钟）。
@@ -209,7 +209,7 @@ def to_text(info):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="统计工作区代码变更，供变更报告使用")
+    ap = argparse.ArgumentParser(description="统计工作区代码变更，供提交说明使用")
     ap.add_argument("root", nargs="?", default=".", help="项目根目录，默认当前目录")
     ap.add_argument("--recent", type=int, default=120, help="非 git 目录时扫描最近 N 分钟内修改的文件")
     ap.add_argument("--max-files", type=int, default=200, help="最多列出的文件数，默认 200")

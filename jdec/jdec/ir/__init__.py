@@ -11,7 +11,7 @@ reproduce its input exactly before it changes anything. If `classfile.parse` +
 built on top inherits an unknown amount of corruption, and every later failure
 looks like an IR bug when it is really an encoder bug.
 
-Current state (measured 2026-10-29, see jdec/change-report.md):
+Current state (measured 2026-10-29):
 
     class-level  4233/4233 parsed classes byte-identical (the one deliberately
                  truncated fixture is counted as unreadable, not as a pass)
@@ -37,7 +37,7 @@ proof this layer works.
 What it is not yet used for: deflat's rewritten methods. There the JVM still asks
 for frames at offsets the analysis never reaches (dead padding at the end of a
 protected range), so `deflat --recompute-frames` is opt-in and the default keeps
-the original table. See the 2026-10-30 change-report entry.
+the original table.
 
 What belongs here next:
 

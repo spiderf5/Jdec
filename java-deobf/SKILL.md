@@ -173,7 +173,7 @@ python jdec.py decompile X.jar -o out --verify-all
 | dumped 库的结构化查询                          | `python jdec.py nativedb <lib> --build <dir>`；`nativedb <dir> --search <kw>` |
 | BytecodeVM 类虚拟化器：静态反虚拟化方法论（提取→解码→路由） | `references/bytecode-vm.md`（专属工具已移出产品树，方法可迁移至同构 VM） |
 | 字节码级 VM 派发对拍（运行时 trace vs 静态 decode）  | ASM 注入 + 候选集校验，方法见 `references/bytecode-vm.md` §5                        |
-| 提交 / PR / 变更报告规范                        | `references/git-workflow.md`（校验命令见其「提交前自检」）           |
+| 提交 / PR 规范                        | `references/git-workflow.md`（校验命令见其「提交前自检」）           |
 
 ### 4.6 收尾核查
 
@@ -227,10 +227,10 @@ python scripts/deobf_scan.py <jar/class/目录> --text
     
   构建，构建失败跳过该组测试而非计为失败。
 
-## 7. 变更报告
+## 7. 提交说明
 
-修改 jdec 或本 skill 后，按 `assets/change-report-template.md` 生成
+修改 jdec 或本 skill 后，在提交信息里写清：
   
-`change-report.md`（追加式）。内容必须包含：任务目标、文件级变更、每处
+改了什么、为什么改、验证命令与结果、遗留风险与回滚方式。
   
-修改的理由、执行的命令与结果、修复轮次、遗留风险、回滚方式。
+不要向仓库追加过程性报告。

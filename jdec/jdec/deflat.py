@@ -1095,7 +1095,7 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                         # default: keep the original table. These rewrites are
                         # length-preserving, so the frames still sit at the same
                         # offsets; `--recompute-frames` regenerates them, which
-                        # is experimental (see change-report).
+                        # is experimental.
                         stats["methods_unflattened"] += edits
                         stats["traps_pruned"] += edits
                         changed = {i for i, (m, old) in
