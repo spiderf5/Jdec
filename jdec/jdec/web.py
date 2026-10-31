@@ -642,6 +642,7 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
                         info["quality"] = co.get("quality")
                         info["attempts"] = co.get("attempts", [])
                         info["status"] = co.get("status")
+                        info["score"] = co.get("score")
                 except Exception:
                     pass
 

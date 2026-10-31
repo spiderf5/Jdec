@@ -428,7 +428,8 @@
       if (cls !== currentData.selected) return;
       const tag = tagFor(cls) || {};
       const quality = info.quality || {};
-      const score = quality.score != null ? quality.score : tag.score;
+      const score = quality.score != null ? quality.score
+        : (info.score != null ? info.score : tag.score);
       const status = info.status || tag.status || "clean";
       const engine = info.engine || tag.engine || "-";
       let html = '<div class="card-title">' + esc(cls) + "</div>";
