@@ -16,7 +16,6 @@ delicate and are handled explicitly:
 
 from __future__ import annotations
 
-import io
 import json
 import re
 import urllib.request
@@ -352,7 +351,10 @@ def remap_class(cf, mapping: Mapping) -> int:
             if not e or e[0] != C_UTF8:
                 continue
             try:
-                s = e[1].decode("utf-8", "replace")
+                # modified UTF-8, both ways: a plain utf-8 round-trip rewrites
+                # NUL (C0 80 -> 00) and loses lone surrogates, and this pass
+                # touches *every* Utf8 that looks like a type reference
+                s = CF.decode_mutf8(e[1])
             except Exception:
                 continue
             if "L" not in s:
@@ -369,7 +371,7 @@ def remap_class(cf, mapping: Mapping) -> int:
 
             new_s = _TYPE_REF_RE.sub(sub, s)
             if hit:
-                cp[i] = (C_UTF8, new_s.encode("utf-8"))
+                cp[i] = (C_UTF8, CF.encode_mutf8(new_s))
                 cf._utf8_cache.pop(s, None)
                 changes += 1
 

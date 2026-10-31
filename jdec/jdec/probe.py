@@ -353,6 +353,16 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
             prof.signatures.append(
                 f"also matches {vendor} structurally (confidence {conf:.2f})")
 
+    # The name-shape score is a median over class/member names. On a two-class
+    # jar the medians are noise, yet the formula happily returns 100/100 and
+    # then labels the target "ProGuard-like" - which read as a contradiction
+    # next to analyze's "no structural signature matched".
+    if name_lengths and prof.classes < 10:
+        prof.obfuscation = min(prof.obfuscation, 50.0)
+        prof.signatures.append(
+            f"small sample ({prof.classes} classes): name-shape score capped "
+            "at 50, not evidence")
+
     if unicode_names > 0 and prof.obfuscation < 70:
         prof.obfuscation = 85.0
         prof.signatures.append("non-ASCII identifiers present")

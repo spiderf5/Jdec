@@ -50,6 +50,21 @@ META_FILES = ("fabric.mod.json", "demo.mixins.json", "demo.refmap.json")
 
 
 def _javac() -> str | None:
+    """Locate javac the same way the engines do.
+
+    `shutil.which` alone is not enough: a perfectly normal Windows setup is
+    "JDK installed under D:\\java21 and JAVA_HOME points at it, but no PATH
+    entry".  The fixture build used to fail there and the whole suite aborted
+    before a single assertion, while `engines.find_javac()` (which does honour
+    JAVA_HOME and the usual install dirs) would have found it.  Reuse it.
+    """
+    try:
+        from jdec.engines import find_javac
+        exe = find_javac()
+        if exe:
+            return exe
+    except Exception:  # noqa: BLE001 - tests must still run without the package
+        pass
     exe = shutil.which("javac")
     if exe:
         return exe

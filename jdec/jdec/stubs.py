@@ -12,9 +12,7 @@ resolves the 'needs-instance' and 'needs-bootstrap' failure buckets.
 
 from __future__ import annotations
 
-import os
 import shutil
-import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
@@ -78,29 +76,18 @@ public class BuiltInRegistries {
 
 
 def _find_javac(bin_name: str = "javac") -> str:
-    """Find javac on PATH, in JAVA_HOME, or via engines detection."""
-    if bin_name != "javac" and Path(bin_name).is_file():
-        return bin_name
-    from . import engines
-    jc = engines.find_javac()
-    if jc:
-        return jc
-    w = shutil.which(bin_name)
-    if w:
-        return w
-    jh = os.environ.get("JAVA_HOME")
-    if jh:
-        candidate = Path(jh) / "bin" / (bin_name + (".exe" if os.name == "nt" else ""))
-        if candidate.is_file():
-            return str(candidate)
-    return bin_name
+    """Kept for callers/tests; discovery lives in `toolchain` now."""
+    from . import toolchain as TC
+    return TC.find_javac(bin_name)
 
 
 def build_stubs_jar(dest: Path, javac_bin: str = "javac") -> Path:
     """Compile stub Java sources and package them into a jar."""
+    from . import toolchain as TC
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_dir = Path(tempfile.mkdtemp(prefix="jdec_stubs_build_"))
-    javac_resolved = _find_javac(javac_bin)
+    TC.require_javac("compiling stubs")
     try:
         java_files = []
         for rel_path, src in STUB_SOURCES.items():
@@ -109,19 +96,12 @@ def build_stubs_jar(dest: Path, javac_bin: str = "javac") -> Path:
             fpath.write_text(src, encoding="utf-8")
             java_files.append(str(fpath))
 
-        # Compile with javac
-        cmd = [javac_resolved, "-source", "8", "-target", "8"] + java_files
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               errors="replace", check=False)
-        except Exception:
-            r = None
-
-        if r is None or r.returncode != 0:
+        # A hung javac (AV scan, file lock) must not hang the whole CLI.
+        r = TC.run_javac(["-source", "8", "-target", "8"] + java_files,
+                         exe=javac_bin, purpose="compiling stubs")
+        if r.returncode != 0:
             # Fallback without -source 8 / -target 8 (for newer javac)
-            cmd = [javac_resolved] + java_files
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               errors="replace", check=False)
+            r = TC.run_javac(java_files, exe=javac_bin, purpose="compiling stubs")
 
         if r.returncode != 0:
             raise RuntimeError(f"javac failed to compile stubs: {r.stderr or r.stdout}")
@@ -137,14 +117,46 @@ def build_stubs_jar(dest: Path, javac_bin: str = "javac") -> Path:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _sources_fingerprint(sources: dict) -> str:
+    """Stable hash of the stub sources a cached jar was built from."""
+    import hashlib
+    import json
+    blob = json.dumps(sources, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _fingerprint_path(jar: Path) -> Path:
+    return jar.with_name(jar.name + ".sha256")
+
+
+def _cache_matches(jar: Path, fingerprint: str) -> bool:
+    side = _fingerprint_path(jar)
+    if not (jar.is_file() and side.is_file()):
+        return False
+    try:
+        return side.read_text(encoding="utf-8").strip() == fingerprint
+    except OSError:
+        return False
+
+
+def _write_fingerprint(jar: Path, fingerprint: str) -> None:
+    try:
+        _fingerprint_path(jar).write_text(fingerprint, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def ensure_stubs_jar(cache_dir: Path | None = None) -> Path:
     """Get or build the cached mc_stubs.jar."""
     if cache_dir is None:
         cache_dir = Path(__file__).resolve().parent.parent / "engines"
     cache_dir.mkdir(parents=True, exist_ok=True)
     stub_jar = cache_dir / "mc_stubs.jar"
-    if not stub_jar.is_file():
+    # filename-only caching kept a stale jar forever after STUB_SOURCES changed
+    fingerprint = _sources_fingerprint(STUB_SOURCES)
+    if not _cache_matches(stub_jar, fingerprint):
         build_stubs_jar(stub_jar)
+        _write_fingerprint(stub_jar, fingerprint)
     return stub_jar
 
 
@@ -173,7 +185,10 @@ def build_stub_class_bytes(slash_name: str) -> bytes:
     buf.extend(struct.pack(">H", 22))  # constant pool count = 22 (1..21)
 
     def add_utf8(s: str) -> None:
-        b = s.encode("utf-8")
+        # class files use modified UTF-8: NUL is C0 80 and astral characters
+        # are a CESU-8 surrogate pair, neither of which plain utf-8 produces
+        from .classfile import encode_mutf8
+        b = encode_mutf8(s)
         buf.extend(b"\x01" + struct.pack(">H", len(b)) + b)
 
     def add_class(name_idx: int) -> None:
@@ -383,10 +398,8 @@ def build_mock_agent_jar(dest: Path, javac_bin: str = "javac") -> Path:
         agent_src = tmp_dir / "jdec" / "mock" / "MockAgent.java"
         agent_src.parent.mkdir(parents=True, exist_ok=True)
         agent_src.write_text(MOCK_AGENT_JAVA, encoding="utf-8")
-        javac_resolved = _find_javac(javac_bin)
-        cmd = [javac_resolved, str(agent_src)]
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           errors="replace", check=False)
+        r = TC.run_javac([str(agent_src)], exe=javac_bin,
+                         purpose="building the mock agent")
         if r.returncode == 0:
             with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr("META-INF/MANIFEST.MF", manifest)
@@ -413,8 +426,10 @@ def ensure_mock_agent_jar(cache_dir: Path | None = None) -> Path:
         cache_dir = Path(__file__).resolve().parent.parent / "engines"
     cache_dir.mkdir(parents=True, exist_ok=True)
     agent_jar = cache_dir / "mock_agent.jar"
-    if not agent_jar.is_file():
+    fingerprint = _sources_fingerprint({"__mock_agent__": MOCK_AGENT_JAVA})
+    if not _cache_matches(agent_jar, fingerprint):
         build_mock_agent_jar(agent_jar)
+        _write_fingerprint(agent_jar, fingerprint)
     return agent_jar
 
 

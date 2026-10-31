@@ -255,6 +255,26 @@ def expand_wide(insns: list, raw_code: bytes) -> list:
     return out
 
 
+def _load_op(op: int) -> tuple[str, int | None] | None:
+    """(kind, slot) for a long/float/double local load; slot None = use ins.arg.
+
+    JVMS index ranges, not a guess: lload 0x16 + lload_0..3 = 0x1E-0x21,
+    fload 0x17 + fload_0..3 = 0x22-0x25, dload 0x18 + dload_0..3 = 0x26-0x29.
+    The old table put 0x24/0x25 (fload_2/3) in the double branch and derived
+    the slot from the opcode as well, so a float load silently produced a
+    double read from the wrong variable - and never reached unknown_ops.
+    """
+    if op in (0x16, 0x17, 0x18):
+        return {0x16: "long", 0x17: "float", 0x18: "double"}[op], None
+    if 0x1E <= op <= 0x21:
+        return "long", op - 0x1E
+    if 0x22 <= op <= 0x25:
+        return "float", op - 0x22
+    if 0x26 <= op <= 0x29:
+        return "double", op - 0x26
+    return None
+
+
 def walk_init(cf, insns, hooks: dict | None = None,
               raw_code: bytes = b"") -> tuple[dict, list[str]]:
     """Symbolically evaluate one init-method body.
@@ -314,15 +334,10 @@ def walk_init(cf, insns, hooks: dict | None = None,
             if op == 0x15 or 0x1A <= op <= 0x1D:          # iload / iload_n
                 idx = ins.arg if op == 0x15 else op - 0x1A
                 stack.append(locals_.get(idx, ("unknown", None)))
-            elif op in (0x16, 0x1E, 0x1F):                # lload / lload_n
-                idx = ins.arg if op == 0x16 else op - 0x1E
-                stack.append(locals_.get(idx, ("long", None)))
-            elif op in (0x17, 0x22, 0x23):                # fload / fload_n
-                idx = ins.arg if op == 0x17 else op - 0x22
-                stack.append(locals_.get(idx, ("float", None)))
-            elif op in (0x18, 0x24, 0x25):                # dload / dload_n
-                idx = ins.arg if op == 0x18 else op - 0x25 + 0x01
-                stack.append(locals_.get(idx, ("double", None)))
+            elif op in (0x16, 0x17, 0x18) or 0x1E <= op <= 0x29:  # l/f/d load
+                kind, slot = _load_op(op)
+                idx = ins.arg if slot is None else slot
+                stack.append(locals_.get(idx, (kind, None)))
             elif op == 0x19 or 0x2A <= op <= 0x2D:        # aload / aload_n
                 idx = ins.arg if op == 0x19 else op - 0x2A
                 stack.append(locals_.get(idx, ("unknown", None)))

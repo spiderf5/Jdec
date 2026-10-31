@@ -70,3 +70,5 @@ jdec/engines/frida/.mixin.out/
 study/
 # resident JDK for class v69 (installed via tsinghua adoptium mirror)
 jdk25/
+# stub-jar cache fingerprints (rebuilt from STUB_SOURCES)
+jdec/engines/*.sha256

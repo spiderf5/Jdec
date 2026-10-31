@@ -15,7 +15,6 @@ identifies dead code / unused library bloat, and provides jar pruning.
 from __future__ import annotations
 
 import collections
-import json
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +68,8 @@ class CallGraph:
     def __init__(self):
         self.methods: set[MethodRef] = set()
         self.classes: set[str] = set()
+        # entries that could not be parsed: never proof of being unused
+        self.unreadable: set[str] = set()
         self.class_methods: dict[str, list[MethodRef]] = {}
         # method -> edges
         self.callees: dict[MethodRef, list[CallEdge]] = {}
@@ -175,6 +176,7 @@ def build_callgraph(target: Path, custom_entrypoints: list[str] | None = None) -
                 cg.methods.add(mref)
                 cg.class_methods.setdefault(cf.name, []).append(mref)
         except Exception:
+            cg.unreadable.add(name)
             continue
 
     # 2. Extract method invocation opcodes and wire edges
@@ -471,10 +473,12 @@ def conservative_keepset(target: Path) -> tuple[set[str], dict[str, int]]:
     known: set[str] = set()
     dotted: dict[str, str] = {}
     parsed: list[tuple[str, CF.ClassFile]] = []
+    unreadable: set[str] = set()
     for name, data in _read_class_bytes(target).items():
         try:
             cf = CF.parse(data)
         except Exception:
+            unreadable.add(name)
             continue
         known.add(cf.name)
         dotted[cf.name.replace("/", ".")] = cf.name
@@ -515,6 +519,10 @@ def conservative_keepset(target: Path) -> tuple[set[str], dict[str, int]]:
             counts["bsm"] += 1
 
     keep &= known
+    # An unparseable class is not evidence of being unused: pruning it is how a
+    # corrupt-but-loadable class silently disappears from the slim jar.
+    keep |= unreadable
+    counts["unreadable"] = len(unreadable)
     return keep, counts
 
 
@@ -600,6 +608,7 @@ def export_json(rep: ReachabilityReport) -> dict:
             "dead_methods": len(rep.dead_methods),
             "reachability_pct": rep.reachability_pct,
             "dead_classes_pct": rep.dead_classes_pct,
+            "unreadable_classes": len(rep.call_graph.unreadable),
         },
         "entrypoints": [
             {

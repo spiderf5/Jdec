@@ -18,7 +18,6 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
-from dataclasses import dataclass, field
 from pathlib import Path
 
 GHIDRA_RELEASE_URL = (

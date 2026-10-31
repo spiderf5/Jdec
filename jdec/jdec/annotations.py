@@ -273,7 +273,9 @@ def constant_strings(cf) -> list[str]:
         e = cf.cp[i]
         if e and e[0] == C_STRING:
             try:
-                out.append(cf.utf8(e[1][0]))
+                # display path: utf8_text rejoins CESU-8 surrogate pairs, so an
+                # emoji literal stays one character instead of six U+FFFD
+                out.append(cf.utf8_text(e[1][0]))
             except Exception:
                 pass
     return out

@@ -22,7 +22,7 @@ from . import bytecode as BC
 from . import classfile as CF
 from .bytecode import (
     OP_GOTO, OP_GOTO_W, OP_TABLESWITCH, OP_LOOKUPSWITCH,
-    OP_IFNULL, OP_IFNONNULL, Insn, Handler
+    Insn, Handler
 )
 
 # Branch condition inversion mapping for far conditional jumps
@@ -449,11 +449,18 @@ def rebuild_stack_map_table(
     branch_targets: set[int] | None = None,
     handlers: list[Handler] | None = None,
 ) -> bytes:
-    """Generate a compliant StackMapTable attribute byte blob for branch targets.
+    """Structurally well-formed frames for branch targets — NOT verifier-proof.
 
-    Supports:
-    - Standard same_frame and same_frame_extended;
-    - same_locals_1_stack_item_frame for exception handler entry points.
+    Every non-handler target is emitted as `same_frame`, which asserts the
+    locals are unchanged from the previous frame; a real rewrite (far-jump
+    widening, devirtualisation) routinely violates that. A `finally` handler
+    (catch_type 0) needs the implicit `java/lang/Throwable` frame, which
+    cannot be expressed without adding a constant-pool Class entry.
+
+    A table a JVM actually accepts requires type inference over the rewritten
+    body — ROADMAP phase 02 ("类型 IR"), not a side effect of reassembly.
+    Until then this helper exists for structural assertions in tests; do not
+    ship its output inside a class that must pass `-Xverify`.
     """
     if branch_targets is None:
         try:
@@ -482,7 +489,8 @@ def rebuild_stack_map_table(
 
         if is_handler:
             catch_type = handler_targets[target_pc]
-            # verification_type_info: 7 (Object_variable_info) + cpool index
+            # 0 is not a valid cp index: a finally handler's frame needs
+            # java/lang/Throwable, which this helper cannot add (see docstring).
             cpool_idx = catch_type if (cf and 0 < catch_type < len(cf.cp)) else 0
             vtype = struct.pack(">BH", 7, cpool_idx)
             if 0 <= offset_delta <= 63:

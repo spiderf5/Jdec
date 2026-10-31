@@ -115,6 +115,33 @@ def decode_mutf8(data: bytes) -> str:
     return "".join(out)
 
 
+def decode_mutf8_text(data: bytes) -> str:
+    """decode_mutf8 with UTF-16 surrogate pairs joined back into code points.
+
+    decode_mutf8 keeps one Python character per JVM char on purpose: encrypted
+    payloads use char positions, and a lone surrogate is meaningful there. But
+    a CESU-8 pair is *one* character to a human, and anything that writes it
+    out (TSV, JSON, an LLM prompt) either raises or degrades both halves to
+    U+FFFD. Display paths use this variant instead.
+    """
+    s = decode_mutf8(data)
+    if not any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+        return s
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        hi = ord(s[i])
+        if 0xD800 <= hi <= 0xDBFF and i + 1 < n:
+            lo = ord(s[i + 1])
+            if 0xDC00 <= lo <= 0xDFFF:
+                out.append(chr(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)))
+                i += 2
+                continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
 def encode_mutf8(value: str) -> bytes:
     """JVM-spec modified UTF-8 encoder - the exact inverse of decode_mutf8.
 
@@ -231,6 +258,16 @@ class ClassFile:
         if e[0] != C_UTF8:
             raise ClassFormatError(f"cp[{index}] is not Utf8")
         return decode_mutf8(e[1])
+
+    def utf8_text(self, index: int) -> str:
+        """Display-safe decode: surrogate pairs are rejoined (decode_mutf8_text).
+
+        Use this wherever a literal is shown to a human or written to a file.
+        """
+        e = self.cp[index]
+        if e[0] != C_UTF8:
+            raise ClassFormatError(f"cp[{index}] is not Utf8")
+        return decode_mutf8_text(e[1])
 
     def utf8_raw(self, index: int) -> bytes:
         return self.cp[index][1]

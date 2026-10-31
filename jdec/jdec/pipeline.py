@@ -17,7 +17,6 @@ import json
 import shutil
 import sys
 import time
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -109,7 +108,12 @@ class PipelineResult:
 
     def to_dict(self) -> dict:
         return {
-            "target": str(self.target_jar.name),
+            # absolute path, not the bare file name: consumers (the web
+            # workbench, external tooling) resolve it to rebuild the call
+            # graph, and `Path("client.jar")` only exists if the process
+            # happens to run inside the jar's directory.
+            "target": str(self.target_jar.resolve()),
+            "target_name": self.target_jar.name,
             "out_dir": str(self.out_dir),
             "overall": self.overall_status,
             "exit_code": self.exit_code,
@@ -312,17 +316,31 @@ def run_pipeline(
         print("[2/7] Bytecode pre-cleaning (CFG de-flattening & constant folding) ...")
         preclean_jar = work_dir / "precleaned.jar"
         try:
-            stats = DF.deflat_jar(current_jar, preclean_jar)
+            stats = DF.deflat_jar(current_jar, preclean_jar,
+                                  strip_frames=True, verify_output=False)
             unflattened_count = stats.get("methods_unflattened", 0)
+            v = stats.get("verify") or {}
+            v_note = ""
+            if v.get("skipped"):
+                v_note = f"; verify skipped: {v['skipped']}"
+            elif v:
+                v_note = (f"; {v.get('verified', 0)} pass -Xverify:all"
+                          + (f", {len(v['reverted'])} reverted"
+                             if v.get("reverted") else ""))
             if unflattened_count > 0:
-                print(f"      unflattened {unflattened_count} method(s) across {stats.get('classes', 0)} class(es)")
-                record("deflat", STAGE_OK, f"unflattened {unflattened_count} method(s) in {stats.get('classes', 0)} class(es)")
+                print(f"      unflattened {unflattened_count} method(s) across {stats.get('classes', 0)} class(es){v_note}")
+                # 有类被验证器拒绝并回退 -> 阶段是 partial，不是 ok：
+                # 产物可用，但改写没有全量生效，这个区别必须留在报告里
+                status = STAGE_PARTIAL if v.get("reverted") else STAGE_OK
+                record("deflat", status,
+                       f"unflattened {unflattened_count} method(s) in "
+                       f"{stats.get('classes', 0)} class(es){v_note}")
                 # 不直接切 current_jar:反平坦化对某些目标(如 CFR 本就能
                 # 结构化的 ZKM goto 洪水)是净伤害。原 jar 先正常反编译,
                 # Phase 4 末尾按 clean 数对比决定是否采用 deflatted 版。
             else:
-                print("      no flattened switch dispatchers detected")
-                record("deflat", STAGE_OK, "no flattened switch dispatchers detected")
+                print(f"      no flattened switch dispatchers detected{v_note}")
+                record("deflat", STAGE_OK, f"no flattened switch dispatchers detected{v_note}")
         except Exception as exc:
             print(f"      ! de-flattening skipped: {exc}")
             record("deflat", STAGE_FAILED, f"de-flattening error: {exc}")
@@ -420,8 +438,11 @@ def run_pipeline(
                     gained = rep2.ok - (rep.ok if rep is not None else 0)
                     shutil.rmtree(src_dir, ignore_errors=True)
                     shutil.move(str(alt_dir / "src"), str(src_dir))
-                    shutil.copy2(alt_dir / "report.md", out_dir / "report.md")
-                    shutil.copy2(alt_dir / "report.json", out_dir / "report.json")
+                    # Regenerate from rep2 instead of copying alt_dir/report.*:
+                    # the copies described alt_dir/src, which the move just
+                    # deleted, so every path in them was stale.
+                    rep2.output = str(src_dir)
+                    DC.write_report(rep2, out_dir)
                     rep = rep2
                     print(f"      adopted de-flattened results (+{gained} clean)")
                 else:
@@ -601,9 +622,11 @@ def run_pipeline(
             d = ST.dump_strings(current_jar)
             ST.write_tsv(d, out_dir / "strings.tsv")
             ST.write_json(d, out_dir / "strings.json")
-            tc = d.tag_counts()
-            threat_count = sum(tc.values())
-            print(f"      strings: {d.total} literal(s) dumped, {threat_count} threat-tagged")
+            # literals, not labels: one literal can carry url+credential, and
+            # summing tag_counts() used to report more "threat strings" than
+            # there were strings
+            threat_count = sum(1 for _cls, _s, tags in d.rows if tags)
+            print(f"      strings: {d.total} literal(s) dumped, {threat_count} tagged")
         except Exception as exc:
             analysis_failures.append(f"strings dump error: {exc}")
             print(f"      ! strings dump failed: {exc}")

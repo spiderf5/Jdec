@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import collections
 import struct
-from dataclasses import dataclass
 from pathlib import Path
 import zipfile
 
@@ -31,7 +30,7 @@ from . import bytecode as BC
 from . import classfile as CF
 from .bytecode import (
     OP_GOTO, OP_GOTO_W, OP_TABLESWITCH, OP_LOOKUPSWITCH,
-    OP_IXOR, OP_LXOR, Insn
+    Insn
 )
 
 # Opcodes for loading integer constants
@@ -118,8 +117,32 @@ def _is_aload(insn: Insn, code: bytes) -> int | None:
     return None
 
 
-def simplify_constants(code: bytes, cf: CF.ClassFile | None = None) -> tuple[bytes, int]:
-    """Peephole simplification for simple constant arithmetic like iconst + ixor."""
+def _protected_pcs(code: bytes, extra: set[int] | None = None) -> set[int]:
+    """Instruction boundaries a rewrite must not swallow.
+
+    Folding `iconst a; iconst b; ixor` replaces three instructions with one and
+    NOPs the rest. That is only safe if nothing else enters the span: a branch
+    or an exception handler that starts at the second instruction would land on
+    a NOP with a different operand stack (VerifyError, or worse - a branch that
+    silently changes meaning). Jump targets come from the code itself; handler
+    PCs have to be supplied by the caller.
+    """
+    pcs: set[int] = set(extra or ())
+    try:
+        for insn in BC.decode(code):
+            pcs.update(insn.jump_targets())
+    except Exception:
+        return pcs
+    return pcs
+
+
+def simplify_constants(code: bytes, cf: CF.ClassFile | None = None,
+                       protected: set[int] | None = None) -> tuple[bytes, int]:
+    """Peephole simplification for simple constant arithmetic like iconst + ixor.
+
+    `protected` carries PCs the caller knows are entry points but which are not
+    visible as branch targets (exception handlers).
+    """
     try:
         insns = BC.decode(code)
     except Exception:
@@ -127,6 +150,7 @@ def simplify_constants(code: bytes, cf: CF.ClassFile | None = None) -> tuple[byt
 
     buf = bytearray(code)
     changes = 0
+    entry_pcs = _protected_pcs(code, protected)
 
     clean_insns = [i for i in insns if i.op != 0]
 
@@ -138,6 +162,10 @@ def simplify_constants(code: bytes, cf: CF.ClassFile | None = None) -> tuple[byt
             v1 = _get_int_const(in1, bytes(buf), cf=cf)
             v2 = _get_int_const(in2, bytes(buf), cf=cf)
             if v1 is not None and v2 is not None:
+                span_end = in3.pc + in3.length
+                # an entry point inside the span would be rewritten to a NOP
+                if any(in1.pc < t < span_end for t in entry_pcs):
+                    continue
                 calc = _INT_BIN_OPS[in3.op]
                 raw_res = calc(v1, v2)
                 folded = raw_res & 0xFFFFFFFF
@@ -164,8 +192,15 @@ def simplify_constants(code: bytes, cf: CF.ClassFile | None = None) -> tuple[byt
     return bytes(buf), changes
 
 
-def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tuple[bytes, int]:
-    """Eliminate constant and identity opaque predicates guarding dead branches."""
+def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None,
+                            protected: set[int] | None = None) -> tuple[bytes, int]:
+    """Eliminate constant and identity opaque predicates guarding dead branches.
+
+    Every rewrite here replaces a *sequence* with a single jump. If something
+    else can enter the sequence in the middle (a branch target, an exception
+    handler), the replacement changes its operand stack, so such candidates are
+    skipped instead of rewritten.
+    """
     try:
         insns = BC.decode(code)
     except Exception:
@@ -173,6 +208,10 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
 
     buf = bytearray(code)
     changes = 0
+    entry_pcs = _protected_pcs(code, protected)
+
+    def _clobbers_entries(start: int, end: int) -> bool:
+        return any(start < t < end for t in entry_pcs)
 
     clean = [i for i in insns if i.op != 0]
 
@@ -190,6 +229,8 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
                 elif in2.op == 0x9D: taken = (v > 0)
                 elif in2.op == 0x9E: taken = (v <= 0)
 
+                if _clobbers_entries(in1.pc, in2.pc + in2.length):
+                    continue
                 target_pc = in2.pc + in2.arg
                 rel = target_pc - in2.pc
                 span1 = (in2.pc + in2.length) - in1.pc
@@ -226,6 +267,8 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
                 elif in3.op == 0xA3: taken = (v1 > v2)
                 elif in3.op == 0xA4: taken = (v1 <= v2)
 
+                if _clobbers_entries(in1.pc, in3.pc + in3.length):
+                    continue
                 target_pc = in3.pc + in3.arg
                 rel = target_pc - in3.pc
                 span2 = (in3.pc + in3.length) - in1.pc
@@ -255,6 +298,8 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
             x2 = _is_iload(in2, bytes(buf))
             if x1 is not None and x2 is not None and x1 == x2:
                 taken = in3.op in (0x9F, 0xA2, 0xA4)
+                if _clobbers_entries(in1.pc, in3.pc + in3.length):
+                    continue
                 target_pc = in3.pc + in3.arg
                 rel = target_pc - in3.pc
                 span3 = (in3.pc + in3.length) - in1.pc
@@ -281,6 +326,8 @@ def prune_opaque_predicates(code: bytes, cf: CF.ClassFile | None = None) -> tupl
         in1, in2 = clean[i], clean[i + 1]
         if in1.op == 0x01 and in2.op in (0xC6, 0xC7) and in2.arg is not None:
             taken = (in2.op == 0xC6)
+            if _clobbers_entries(in1.pc, in2.pc + in2.length):
+                continue
             target_pc = in2.pc + in2.arg
             rel = target_pc - in2.pc
             if taken and -32768 <= rel <= 32767:
@@ -582,10 +629,13 @@ def optimize_code(code: bytes, handlers: list[BC.Handler] | None = None, cf: CF.
     }
 
     for _ in range(3):
-        cur_code, c_n = simplify_constants(cur_code, cf=cf)
+        # deflat rewrites in place (NOP fill keeps every PC valid), so handler
+        # entry points stay at their original offsets across the whole loop
+        entries = {pc for h in cur_handlers for pc in (h.start_pc, h.end_pc, h.handler_pc)}
+        cur_code, c_n = simplify_constants(cur_code, cf=cf, protected=entries)
         stats["constants"] += c_n
 
-        cur_code, op_n = prune_opaque_predicates(cur_code, cf=cf)
+        cur_code, op_n = prune_opaque_predicates(cur_code, cf=cf, protected=entries)
         stats["opaque_predicates"] += op_n
 
         cur_code, j_n = clean_redundant_jumps(cur_code)
@@ -724,17 +774,26 @@ def _strip_smt_from_code(cf: CF.ClassFile, payload: bytes) -> bytes | None:
         return None
 
 
-def _strip_stackmaps(cf: CF.ClassFile) -> int:
+def _strip_stackmaps(cf: CF.ClassFile, only: set[int] | None = None) -> int:
     """反平坦化后原 StackMapTable 帧全部失效（原地改写不更新帧），
     陈旧帧会让下游反编译器在这些类上出错误标记（真实样本实测掉档
     46 个类）。剥帧后 CFR/Vineflower 自行重算分析。返回处理的方法数。
 
-    已知边界：剥帧后的类不再携带栈映射帧，Java 7+ 的 JVM 校验可能
-    拒绝加载（VerifyError）。jdec 的产出目标是反编译输入，不受影响；
-    若要把产物直接跑在 JVM 上，需要自行重建帧。CLI 输出含此告警。"""
+    `only` 限定只剥这些下标的方法。**没改写的方法必须保留原帧**：
+    它们本来是对的，剥掉之后只要还含分支就会被 split verifier 拒绝。
+    早期版本剥全类，HMCL 上因此有 242 个类被验证器拒绝。
+
+    已知边界（2026-10-29 用真 JVM 校验器实测，**不是**推测）：
+    剥帧后的方法如果还含分支，split verifier 会直接拒绝——
+    `VerifyError: Expecting a stackmap frame at branch target N`。
+    所以 `deflat_jar` 逐方法回滚"改写后仍有分支目标"的方法，再用
+    `verify_or_keep` 兜底。要把这些改写保住，必须生成正确的帧，
+    也就是 ROADMAP 02 的帧生成。"""
     import struct as _s
     n = 0
-    for m in cf.methods:
+    for idx, m in enumerate(cf.methods):
+        if only is not None and idx not in only:
+            continue
         blob = m.attrs_blob
         if len(blob) < 2:
             continue
@@ -765,9 +824,65 @@ def _strip_stackmaps(cf: CF.ClassFile) -> int:
     return n
 
 
-def deflat_jar(jar_in: Path, jar_out: Path) -> dict:
-    """Rewrite flattened control flow and prune bytecode traps across an entire jar."""
-    stats = {"classes": 0, "methods_unflattened": 0, "traps_pruned": 0}
+def _revert_branchy_methods(cf: CF.ClassFile, before: list[bytes]) -> int:
+    """Put back any rewritten method whose body still has a branch target.
+
+    A method without a StackMapTable is only verifiable when it is straight-line
+    code: the split verifier demands a frame at every branch target. Reverting
+    the *method* (not the class) keeps every other rewrite in the class and
+    keeps the class loadable — class-level rollback threw away 343 classes'
+    worth of good edits for a handful of bad methods.
+    """
+    reverted = 0
+    for m, old in zip(cf.methods, before):
+        if m.attrs_blob == old:
+            continue
+        ci = BC.method_code(cf, m)
+        if ci is None or (ci.insns and (ci.branch_targets or ci.handlers)):
+            m.attrs_blob = old
+            reverted += 1
+    return reverted
+
+
+def _revert_shifted_methods(cf: CF.ClassFile, before: list[bytes],
+                            before_len: list[int]) -> int:
+    """Put back any rewritten method whose code moved.
+
+    Every rewrite here is length-preserving (NOP fill), so the original
+    StackMapTable keeps pointing at the same offsets and stays correct. If a
+    rewrite ever changes the length, the frames no longer line up — revert that
+    method instead of shipping a class whose frames describe the old layout.
+    """
+    reverted = 0
+    for i, (m, old) in enumerate(zip(cf.methods, before)):
+        if m.attrs_blob == old:
+            continue
+        ci = BC.method_code(cf, m)
+        if ci is None or len(ci.code) != before_len[i]:
+            m.attrs_blob = old
+            reverted += 1
+    return reverted
+
+
+def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
+               strip_frames: bool = False) -> dict:
+    """Rewrite flattened control flow and prune bytecode traps across an entire jar.
+
+    Two safety nets, in increasing cost:
+
+    1. per method — with `strip_frames` a rewrite that still contains branches
+       would need a StackMapTable we cannot generate yet, so that method keeps
+       its original Code attribute; without it, a rewrite that moved any offset
+       is reverted (frames are only valid at the layout they were computed for);
+    2. per class — `verify_or_keep` loads the result under `-Xverify:all` and
+       replaces any class the verifier rejects with the original bytes.
+
+    `strip_frames` trades JVM-loadability for decompiler quality: stale frames
+    made CFR/Vineflower drop ~46 classes in an earlier sample. For an artifact
+    that has to run, keep the frames (default).
+    """
+    stats: dict = {"classes": 0, "methods_unflattened": 0, "traps_pruned": 0,
+                   "methods_reverted": 0}
     jar_out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(jar_in) as zin, zipfile.ZipFile(jar_out, "w", zipfile.ZIP_DEFLATED) as zout:
         for name in zin.namelist():
@@ -776,13 +891,47 @@ def deflat_jar(jar_in: Path, jar_out: Path) -> dict:
                 stats["classes"] += 1
                 try:
                     cf = CF.parse(data)
+                    before = [m.attrs_blob for m in cf.methods]
+                    before_len = []
+                    for m in cf.methods:
+                        ci = BC.method_code(cf, m)
+                        before_len.append(len(ci.code) if ci else 0)
                     edits = deflat_class(cf)
+                    if edits > 0:
+                        if strip_frames:
+                            kept_back = _revert_branchy_methods(cf, before)
+                        else:
+                            kept_back = _revert_shifted_methods(cf, before, before_len)
+                        stats["methods_reverted"] += kept_back
+                        edits -= kept_back
                     if edits > 0:
                         stats["methods_unflattened"] += edits
                         stats["traps_pruned"] += edits
-                        _strip_stackmaps(cf)     # 陈旧帧必须剥掉,否则下游反编译掉档
+                        if strip_frames:
+                            changed = {i for i, (m, old) in
+                                       enumerate(zip(cf.methods, before))
+                                       if m.attrs_blob != old}
+                            # 只剥被改写方法的帧：没动过的方法帧本来是对的
+                            _strip_stackmaps(cf, only=changed)
                         data = cf.serialize()
                 except Exception:
                     pass
             zout.writestr(name, data)
+    if verify_output:
+        stats["verify"] = _verify_rewrite(jar_in, jar_out)
     return stats
+
+
+def _verify_rewrite(jar_in: Path, jar_out: Path) -> dict:
+    """Run the JVM gate on the output and roll back any class it rejects."""
+    try:
+        from . import toolchain as TC
+        from . import verify as VF
+    except Exception as exc:  # pragma: no cover - import cycle guard
+        return {"skipped": f"{type(exc).__name__}: {exc}"}
+    if not TC.find_java():
+        return {"skipped": "java not found: set JAVA_HOME or put java on PATH"}
+    try:
+        return VF.verify_or_keep(jar_in, jar_out).to_dict()
+    except Exception as exc:  # noqa: BLE001 - the rewrite itself already succeeded
+        return {"skipped": f"{type(exc).__name__}: {exc}"}

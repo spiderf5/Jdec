@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -54,6 +55,24 @@ from jdec.decompile import _iso_buckets, decompile, write_report  # noqa: E402
 from jdec.probe import JarProfile, profile_jar    # noqa: E402
 from jdec.score import evaluate       # noqa: E402
 
+# Every javac/java lookup in this file goes through these two. A JDK reachable
+# only through JAVA_HOME (no PATH entry) is a normal Windows setup; resolving
+# them once here keeps the gates and the subprocess calls in agreement.
+JAVAC = build_fixtures._javac()
+JAVA = EN.find_java()
+
+
+def _jdk_tool(name: str) -> str | None:
+    """javap/jar sit next to javac, which may be reachable only via JAVA_HOME."""
+    if JAVAC:
+        cand = Path(JAVAC).parent / (name + (".exe" if sys.platform == "win32" else ""))
+        if cand.is_file():
+            return str(cand)
+    return shutil.which(name)
+
+
+JAVAP = _jdk_tool("javap")
+
 SAMPLE = ROOT / "tests" / "sample.jar"
 MIXIN = ROOT / "tests" / "mixin.jar"
 FLOW = ROOT / "tests" / "flow.jar"
@@ -70,7 +89,7 @@ def _prepare_engines(quiet: bool = False) -> bool:
 
     The jars are gitignored, so a fresh checkout has none. A test that needs an
     engine must be skipped with a reason rather than killing the whole run -
-    decompile() raises SystemExit when no engine is available.
+    decompile() raises EngineUnavailable when no engine is available.
     """
     global ENGINES_READY
     try:
@@ -79,6 +98,14 @@ def _prepare_engines(quiet: bool = False) -> bool:
         if not quiet:
             print(f"engine setup failed: {exc}")
     ENGINES_READY = any(EN.ENGINES[k].available(ENGINES_DIR) for k in EN.ENGINES)
+    if ENGINES_READY and EN.find_java() is None:
+        # The jars are on disk but nothing can run them. Treat that as "no
+        # engine" so every engine-dependent case skips with a reason instead of
+        # failing one by one with "java not found on PATH".
+        ENGINES_READY = False
+        if not quiet:
+            print("NOTE       : decompiler jars present but no Java runtime found "
+                  "(set JAVA_HOME); engine-dependent tests will be SKIPPED")
     if not ENGINES_READY and not quiet:
         print("NOTE       : no decompiler engine available (offline?); "
               "engine-dependent tests will be SKIPPED")
@@ -316,6 +343,920 @@ def test_iso_buckets() -> None:
     flat = sorted(n for b in buckets for n in b)
     check("every colliding class lands in exactly one bucket",
           flat == sorted(n for g in collisions.values() for n in g), str(flat))
+
+
+def test_safe_rel_covers_package_segments() -> None:
+    """Collision-free paths must escape package segments, not just the class.
+
+    `pkg/A/x` and `pkg/a/x` differ only by package case. Encoding the simple
+    name alone left both on `pkg/a/x.java`, so one class was silently
+    overwritten while report.json credited both as recovered.
+    """
+    print("pipeline: collision-free paths escape every path segment")
+    from jdec.decompile import _safe_rel
+
+    check("simple-name encoding is unchanged",
+          _safe_rel("pkg/A") == "pkg/%41.java", _safe_rel("pkg/A"))
+    twin = {_safe_rel(n).lower() for n in ("pkg/A/x", "pkg/a/x")}
+    check("package-case twins get distinct paths", len(twin) == 2, str(twin))
+    three = {_safe_rel(n).lower() for n in ("pkg/A/A", "pkg/A/a", "pkg/a/A")}
+    check("three-way group stays distinct", len(three) == 3, str(three))
+    check("non-ASCII case twins stay distinct",
+          _safe_rel("pkg/Ä/x").lower() != _safe_rel("pkg/ä/x").lower(),
+          f"{_safe_rel('pkg/Ä/x')} vs {_safe_rel('pkg/ä/x')}")
+    escaped = _safe_rel("pkg/A/x")
+    decoded = "/".join(urllib.parse.unquote(s) for s in escaped[:-5].split("/"))
+    check("escaped path decodes back to the class name", decoded == "pkg/A/x", decoded)
+    wide = _safe_rel("pkg/Ä/x")
+    check("non-ASCII escape round-trips",
+          urllib.parse.unquote(wide[:-5]) == "pkg/Ä/x", wide)
+
+
+def test_web_report_rel_reverse_lookup() -> None:
+    """web must read the per-class key that write_report actually writes."""
+    print("web: report.json rel is honoured for twin-class previews")
+    from jdec import web as WB
+
+    work = Path(tempfile.mkdtemp())
+    (work / "src" / "pkg").mkdir(parents=True)
+    (work / "src" / "pkg" / "%41.java").write_text("class A {}", encoding="utf-8")
+    (work / "report.json").write_text(json.dumps(
+        {"classes": {"pkg/A": {"status": "ok", "rel": "pkg/%41.java"}}}), encoding="utf-8")
+    got = WB._get_source_for_engine(work, "pkg/A", "final")
+    check("twin-class source is found through rel",
+          got.strip() == "class A {}", repr(got[:60]))
+    (work / "report.json").write_text(json.dumps(
+        {"outcomes": {"pkg/A": {"rel": "pkg/%41.java"}}}), encoding="utf-8")
+    old = WB._get_source_for_engine(work, "pkg/A", "final")
+    check("older report.json (outcomes) still readable",
+          old.strip() == "class A {}", repr(old[:60]))
+
+
+def test_pipeline_summary_target_is_resolvable() -> None:
+    """The summary's target must survive being read outside its own directory."""
+    print("pipeline: summary target is an absolute, resolvable path")
+    prof = profile_jar(SAMPLE)
+    res = PIPE.PipelineResult(target_jar=SAMPLE, out_dir=Path("."), profile=prof)
+    data = res.to_dict()
+    check("target is absolute", Path(data["target"]).is_absolute(), data["target"])
+    check("target resolves to the analysed jar",
+          Path(data["target"]) == SAMPLE.resolve(), data["target"])
+    check("bare name still available for display",
+          data.get("target_name") == SAMPLE.name, str(data.get("target_name")))
+
+
+def test_bytecode_and_string_quality() -> None:
+    """The reporting path must not mangle literals or overstate threat tags."""
+    print("quality: iinc immediates, non-BMP literals, threat tags, exit codes")
+    from jdec import stubs as SB
+    from jdec.decompile import Report as DRep, decompile_exit_code
+
+    # 1. iinc carries two immediates; arg used to be 0x0203 for `iinc 2 3`
+    ins = BC.decode(bytes([0x84, 0x02, 0x03]))[0]
+    check("iinc keeps index and delta apart",
+          (ins.arg, ins.arg2) == (2, 3), f"arg={ins.arg} arg2={ins.arg2}")
+    check("plain iload is unaffected", BC.decode(bytes([0x15, 0x05]))[0].arg == 5)
+
+    # 2. A CESU-8 surrogate pair is one character, not six U+FFFD
+    cp = [b"\x01" + struct.pack(">H", 6) + b"\xed\xa0\xbd\xed\xb8\x80",
+          b"\x08" + struct.pack(">H", 1),
+          b"\x01" + struct.pack(">H", 3) + b"a/E",
+          b"\x07" + struct.pack(">H", 3)]
+    data = b"\xca\xfe\xba\xbe" + struct.pack(">HHH", 0, 52, len(cp) + 1) + b"".join(cp)
+    data += struct.pack(">HHHHHHH", 0x21, 4, 0, 0, 0, 0, 0)
+    cf = CF.parse(data)
+    lit = AN.constant_strings(cf)[0]
+    check("emoji literal survives the string dump", lit == "\U0001F600", repr(lit))
+
+    # 3. Threat tags: no exception-class / library-name false positives
+    check("RuntimeException is not exec", ST.classify("java/lang/RuntimeException") == [],
+          str(ST.classify("java/lang/RuntimeException")))
+    check("authlib is not a credential",
+          ST.classify("com.mojang.authlib.GameProfile") == [],
+          str(ST.classify("com.mojang.authlib.GameProfile")))
+    check("forward-slash Windows path is tagged",
+          ST.classify("C:/Users/Public/cfg.dat") == ["path"],
+          str(ST.classify("C:/Users/Public/cfg.dat")))
+    check("a URL is not read as a drive letter",
+          "path" not in ST.classify("https://example.com/a"),
+          str(ST.classify("https://example.com/a")))
+    blob = "a" * 48
+    check("a duplicate label is emitted once",
+          ST.classify(blob) == ["encrypted-blob"], str(ST.classify(blob)))
+
+    # 4. Exit codes: an empty run must not report success
+    base = dict(input="x.jar", output="src", started=0.0)
+    check("all recovered -> 0",
+          decompile_exit_code(DRep(total=3, ok=3, **base)) == 0)
+    check("one failed -> 1",
+          decompile_exit_code(DRep(total=3, ok=2, failed=1, **base)) == 1)
+    check("all failed -> 2",
+          decompile_exit_code(DRep(total=2, failed=2, **base)) == 2)
+    check("empty jar is not a failure",
+          decompile_exit_code(DRep(total=0, **base)) == 0)
+
+    # 5. A two-class jar cannot claim 100/100 obfuscation from name medians
+    with tempfile.TemporaryDirectory() as td:
+        jar = Path(td) / "tiny.jar"
+        with zipfile.ZipFile(jar, "w") as z:
+            for n in ("a/A", "a/B"):
+                z.writestr(n + ".class", SB.build_stub_class_bytes(n))
+        prof = profile_jar(jar)
+        check("small sample is capped", prof.obfuscation <= 50.0, str(prof.obfuscation))
+        check("small sample is called out",
+              any("small sample" in s for s in prof.signatures), str(prof.signatures))
+
+
+    # 6. deflat must not fold across an entry point (branch target/handler)
+    from jdec import deflat as DFM
+    targeted = bytes([0x03, 0x99, 0x00, 0x04, 0x04, 0x05, 0x82, 0xAC])
+    out, n = DFM.simplify_constants(targeted)
+    check("fold skips a span a branch jumps into", n == 0 and out == targeted, out.hex())
+    clean = bytes([0x03, 0x99, 0x00, 0x06, 0x04, 0x05, 0x82, 0xAC])
+    out2, n2 = DFM.simplify_constants(clean)
+    check("fold still happens when the span is entry-free",
+          n2 == 1 and out2[4] == 0x06, out2.hex())
+    op = bytes([0x03, 0x99, 0x00, 0x00, 0xB1])
+    _, n3 = DFM.prune_opaque_predicates(op)
+    check("opaque-predicate rewrite skips an entered span", n3 == 0)
+
+
+def test_safety_and_byte_fidelity() -> None:
+    """P0: destructive-output guard, float constants, byte-exact source rewrite."""
+    print("safety: pool output guard, devirt float, recover byte fidelity")
+    from unittest import mock
+    from jdec import pool as PL
+    from jdec import stubs as SB
+    from jdec.recover import rewrite_sources
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        src = root / "src"
+        (src / "pkg").mkdir(parents=True)
+        sample = src / "pkg" / "A.java"
+        sample.write_text("class A {}\n", encoding="utf-8")
+
+        refusals = []
+        for bad in (src, src.parent):
+            try:
+                PL.apply(src, None, bad)
+            except ValueError:
+                refusals.append(str(bad.name))
+        check("pool refuses output == input", "src" in refusals, str(refusals))
+        check("pool refuses output == input's parent",
+              root.name in refusals, str(refusals))
+        check("source tree survived the refusals", sample.is_file(), str(sample))
+
+        # CWD is patched to an unrelated scratch dir so a broken guard cannot
+        # delete the real working directory while the test runs
+        cwd_only = root / "cwd_only"
+        cwd_only.mkdir()
+        with mock.patch.object(Path, "cwd", return_value=cwd_only):
+            try:
+                PL.apply(src, None, cwd_only)
+                cwd_refused = False
+            except ValueError:
+                cwd_refused = True
+        check("pool refuses output == CWD", cwd_refused)
+
+        out = root / "src_pool"
+        st = PL.apply(src, None, out)
+        check("pool still writes to a fresh directory",
+              out.is_dir() and isinstance(st, dict), str(st))
+
+    # Path.read_text(newline=...) is Python 3.13+; the package claims 3.9+
+    offenders = []
+    for p in sorted((ROOT / "jdec").glob("*.py")):
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            code = ln.split("#", 1)[0]
+            if ("read_text(" in code or "write_text(" in code) and "newline=" in code:
+                offenders.append(f"{p.name}: {ln.strip()}")
+    check("no Path.read_text(newline=) (3.13-only)", not offenders, str(offenders))
+
+    cf = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
+    helper = DV.ConstantPoolHelper(cf)
+    idx = helper.add_constant(1.5)
+    entry = cf.cp[idx]
+    check("float constant uses CONSTANT_Float", entry[0] == CF.C_FLOAT, str(entry[0]))
+    check("float value round-trips",
+          abs(struct.unpack(">f", entry[1][0])[0] - 1.5) < 1e-6)
+    check("float is one operand slot", DV._const_is_two_word(1.5) is False)
+    check("long is still two slots", DV._const_is_two_word(1 << 40) is True)
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        raw = (b'class A {\n'
+               b'    String s = Enc.d("n1", "Q2ZnbA==", 42);\n'
+               b'    // stray byte: \x80\n'
+               b'}\n')
+        (d / "A.java").write_bytes(raw)
+        tsv = d / "recovered.tsv"
+        tsv.write_text("OK\tpkg.C\tn1\tQ2ZnbA==\t42\tsecret\n", encoding="utf-8")
+        st = rewrite_sources(d, tsv)
+        after = (d / "A.java").read_bytes()
+        check("recover rewrote the site", st.get("replaced") == 1, str(st))
+        check("LF endings preserved", b"\r\n" not in after, repr(after[:40]))
+        check("undecodable byte preserved", b"\x80" in after, repr(after))
+        check("plaintext written back", b'"secret"' in after)
+
+
+def _synthetic_pe(names_rva: int = 0x10A0, name_bytes: bytes = b"Java_test_Foo\x00") -> bytes:
+    """Minimal PE32 image with one export name; used to pin the export-table layout."""
+    buf = bytearray(0x320)
+    buf[0:2] = b"MZ"
+    struct.pack_into("<I", buf, 0x3C, 0x80)          # e_lfanew
+    buf[0x80:0x84] = b"PE\x00\x00"
+    struct.pack_into("<H", buf, 0x86, 1)             # NumberOfSections
+    struct.pack_into("<H", buf, 0x94, 0xE0)          # SizeOfOptionalHeader
+    struct.pack_into("<H", buf, 0x98, 0x10B)         # PE32 magic
+    struct.pack_into("<II", buf, 0xF8, 0x1000, 0x100)  # export dir RVA/size
+    struct.pack_into("<I", buf, 0x178 + 8, 0x1000)   # section VirtualSize
+    struct.pack_into("<I", buf, 0x178 + 12, 0x1000)  # section VirtualAddress
+    struct.pack_into("<I", buf, 0x178 + 16, 0x320)   # SizeOfRawData
+    struct.pack_into("<I", buf, 0x178 + 20, 0x200)   # PointerToRawData
+    exp = 0x200
+    struct.pack_into("<I", buf, exp + 20, 1)         # NumberOfFunctions
+    struct.pack_into("<I", buf, exp + 24, 1)         # NumberOfNames
+    struct.pack_into("<I", buf, exp + 28, 0x1040)    # AddressOfFunctions (decoy)
+    struct.pack_into("<I", buf, exp + 32, 0x1060)    # AddressOfNames
+    struct.pack_into("<I", buf, exp + 36, 0x1080)    # AddressOfNameOrdinals
+    struct.pack_into("<I", buf, 0x240, 0x10C0)       # function -> decoy string
+    struct.pack_into("<I", buf, 0x260, names_rva)
+    buf[0x2A0:0x2A0 + len(name_bytes)] = name_bytes
+    buf[0x2C0:0x2C0 + 6] = b"DECOY\x00"
+    return bytes(buf)
+
+
+def test_binary_semantics() -> None:
+    """P1: PE export table, l/f/d load opcodes, internal-name normalisation."""
+    print("binary: PE exports, clinit load slots, devirt name normalisation")
+    from jdec import native_scan as NS
+    from jdec import clinit_sim as CS
+    from jdec.decompile import _out_rel
+
+    check("PE export table reads AddressOfNames (not AddressOfFunctions)",
+          NS.parse_pe_exports(_synthetic_pe()) == ["Java_test_Foo"],
+          str(NS.parse_pe_exports(_synthetic_pe())))
+    unterminated = bytearray(_synthetic_pe(names_rva=0x1080))
+    unterminated[0x280:0x320] = b"A" * 0xA0          # no NUL terminator in range
+    check("unterminated export name is skipped, not sliced",
+          NS.parse_pe_exports(bytes(unterminated)) == [],
+          str(NS.parse_pe_exports(bytes(unterminated))))
+    check("non-PE input returns no exports", NS.parse_pe_exports(b"not a pe") == [])
+    check("truncated MZ header returns no exports",
+          NS.parse_pe_exports(b"MZ" + b"\x00" * 58) == [])
+
+    longs = {CS._load_op(op)[1] for op in range(0x1E, 0x22)}
+    floats = {CS._load_op(op)[1] for op in range(0x22, 0x26)}
+    doubles = {CS._load_op(op)[1] for op in range(0x26, 0x2A)}
+    check("load slot ranges are disjoint",
+          longs == floats == doubles == {0, 1, 2, 3}, f"{longs} {floats} {doubles}")
+    check("fload_2/fload_3 are floats",
+          CS._load_op(0x24) == ("float", 2) and CS._load_op(0x25) == ("float", 3),
+          f"{CS._load_op(0x24)} {CS._load_op(0x25)}")
+    check("dload_0 is double slot 0", CS._load_op(0x26) == ("double", 0))
+    check("lload_3 is long slot 3", CS._load_op(0x21) == ("long", 3))
+    check("indexed loads take the operand",
+          CS._load_op(0x16) == ("long", None)
+          and CS._load_op(0x17) == ("float", None)
+          and CS._load_op(0x18) == ("double", None))
+
+    check("dotted exception name becomes internal",
+          DV._norm_internal("java.lang.Exception") == "java/lang/Exception")
+    check("L...; wrapper is stripped",
+          DV._norm_internal("Ljava/lang/String;") == "java/lang/String")
+    check("array descriptor keeps its wrapper",
+          DV._norm_internal("[Ljava.lang.String;") == "[Ljava/lang/String;")
+    check("already-internal name is unchanged",
+          DV._norm_internal("java/lang/Object") == "java/lang/Object")
+
+    check("inlined nested class keeps the outer path",
+          _out_rel("pkg/A$B", "pkg/A", set()) == "pkg/A.java")
+    check("separate nested file keeps its own path",
+          _out_rel("pkg/A$B", "pkg/A$B", set()) == "pkg/A$B.java")
+    check("colliding outer path is still escaped",
+          _out_rel("pkg/A$b", "pkg/A", {"pkg/A"}) == "pkg/%41.java",
+          _out_rel("pkg/A$b", "pkg/A", {"pkg/A"}))
+
+
+def test_degradation_accounting() -> None:
+    """P2: "could not read it" must never look like "there was nothing"."""
+    print("accounting: callgraph / devirt / recover / natives / grounding")
+    from jdec import stubs as SB
+    from jdec import callgraph as CG
+    from jdec import recover as RC
+    from jdec import native_scan as NS
+    from jdec import mcmod as MM
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        jar = root / "mixed.jar"
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("pkg/Good.class", SB.build_stub_class_bytes("pkg/Good"))
+            z.writestr("pkg/Bad.class", b"\xca\xfe\xba\xbe broken")
+
+        cg = CG.build_callgraph(jar)
+        check("callgraph records the unreadable class",
+              cg.unreadable == {"pkg/Bad"}, str(cg.unreadable))
+        rep = CG.compute_reachability(cg)
+        check("reachability json exposes the count",
+              CG.export_json(rep)["summary"]["unreadable_classes"] == 1,
+              str(CG.export_json(rep)["summary"]))
+        keep, counts = CG.conservative_keepset(jar)
+        check("keep-set holds the unreadable class", "pkg/Bad" in keep, str(keep))
+        check("keep-set counts it", counts.get("unreadable") == 1, str(counts))
+        pruned = root / "pruned.jar"
+        CG.prune_jar(jar, pruned, keep)
+        with zipfile.ZipFile(pruned) as z:
+            names = z.namelist()
+        check("pruning keeps the unreadable entry", "pkg/Bad.class" in names, str(names))
+
+        poison = root / "poison.jar"
+        with zipfile.ZipFile(poison, "w") as z:
+            z.writestr("CodePool.class", b"\xca\xfe\xba\xbe broken")
+        _pool, stats = DV.BVMDevirtualizer.scan_jar_code_pool_ex(poison)
+        check("pool scan reports the parse error",
+              len(stats["errors"]) == 1 and stats["classes_seen"] == 1, str(stats))
+        check("legacy scan API still returns a dict",
+              isinstance(DV.BVMDevirtualizer.scan_jar_code_pool(poison), dict))
+
+        (root / "rec").mkdir()
+        _spec, _n, _skip, unreadable = RC.build_spec(jar, root / "rec")
+        check("build_spec counts unreadable classes", unreadable == 1, str(unreadable))
+
+        (root / "nat").mkdir()
+        tri = NS.triage(jar, root / "nat")
+        check("native triage counts unreadable classes",
+              tri.unreadable_classes == 1, str(tri.unreadable_classes))
+        nat_md = root / "nat" / "report.md"
+        NS.write_report(tri, "mixed.jar", nat_md)
+        check("native report says so", "unreadable" in nat_md.read_text(encoding="utf-8"))
+
+        broken_jar = root / "not_a_zip.jar"
+        broken_jar.write_bytes(b"not a zip at all")
+        g_bad = MM.IntermediaryGrounding(broken_jar)
+        check("broken intermediary jar keeps the reason",
+              bool(g_bad.error) and not g_bad.is_available(), str(g_bad.error))
+        g_ok = MM.IntermediaryGrounding(SAMPLE)
+        check("healthy intermediary jar has no error",
+              g_ok.error is None and g_ok.is_available(), str(g_ok.error))
+
+
+def test_tool_hardening() -> None:
+    """P2: hung javac / missing java must produce a message, not a traceback."""
+    print("tools: javac timeouts, missing java, replay prep warnings")
+    import contextlib
+    import io
+    from unittest import mock
+    from jdec import pool as PL
+    from jdec import recover as RC
+    from jdec import stubs as SB
+
+    if JAVAC is None:
+        print("  (skipped: javac timeout assertions need a JDK)")
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            timeout_exc = subprocess.TimeoutExpired(cmd="javac", timeout=300)
+
+            with mock.patch("subprocess.run", side_effect=timeout_exc):
+                try:
+                    SB.build_stubs_jar(root / "stubs.jar")
+                    stubs_msg = ""
+                except RuntimeError as exc:
+                    stubs_msg = str(exc)
+            check("stub build reports a javac timeout",
+                  "timed out" in stubs_msg, stubs_msg)
+
+            spec = root / "spec.tsv"
+            spec.write_text("", encoding="utf-8")
+            with mock.patch("subprocess.run", side_effect=timeout_exc):
+                try:
+                    PL.harvest(spec, root / "harvest.tsv", root / "work",
+                               allow_exec=True, with_stubs=False)
+                    pool_msg = ""
+                except RuntimeError as exc:
+                    pool_msg = str(exc)
+            check("pool harvest reports a javac timeout",
+                  "timed out" in pool_msg, pool_msg)
+
+            buf = io.StringIO()
+            with mock.patch("subprocess.run", side_effect=timeout_exc), \
+                    contextlib.redirect_stdout(buf):
+                rc = RC.recover(SAMPLE, root / "rec1", allow_exec=True,
+                                with_stubs=False)
+            check("recover returns 1 on a javac timeout", rc == 1, str(rc))
+            check("recover prints the timeout", "timed out" in buf.getvalue(),
+                  buf.getvalue()[-200:])
+
+    if JAVAC is None:
+        print("  (skipped: missing-java assertion needs a JDK)")
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            buf = io.StringIO()
+            with mock.patch("jdec.engines.find_java", return_value=None), \
+                    contextlib.redirect_stdout(buf):
+                rc = RC.recover(SAMPLE, root / "rec2", allow_exec=True,
+                                with_stubs=False)
+            check("missing java is an error, not a FileNotFoundError", rc == 1, str(rc))
+            check("missing java message is readable",
+                  "java not found" in buf.getvalue(), buf.getvalue()[-200:])
+
+    # prep warnings need no JDK: ensure_stubs_jar is patched to raise
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        buf = io.StringIO()
+        with mock.patch("jdec.stubs.ensure_stubs_jar",
+                        side_effect=RuntimeError("boom-stubs")), \
+                contextlib.redirect_stdout(buf):
+            rc = RC.recover(SAMPLE, root / "rec3", with_stubs=True)
+        out = buf.getvalue()
+        check("replay prep failure is surfaced", "boom-stubs" in out, out[-200:])
+        check("safety gate still returns 3", rc == 3, str(rc))
+
+
+def test_cli_exit_codes() -> None:
+    """0/1/2 must be visible from the CLI, not just inside the library."""
+    print("cli: unusable engines and empty runs use the documented codes")
+    import contextlib
+    import io
+    from types import SimpleNamespace
+    from unittest import mock
+    from jdec import cli as CL
+    from jdec import engines as ENM
+
+    with tempfile.TemporaryDirectory() as td:
+        buf = io.StringIO()
+        with mock.patch.object(ENM, "ensure_engines", return_value=[]), \
+                mock.patch.object(ENM.Engine, "available", return_value=False), \
+                contextlib.redirect_stdout(buf):
+            rc = CL.cmd_engines(SimpleNamespace(engines_dir=td, with_ghidra=False))
+        check("engines returns 1 when a jar is unusable", rc == 1, str(rc))
+        check("engines names the problem", "unusable" in buf.getvalue(),
+              buf.getvalue()[-200:])
+
+        buf = io.StringIO()
+        with mock.patch.object(ENM, "ensure_engines", return_value=[]), \
+                mock.patch.object(ENM.Engine, "available", return_value=False), \
+                contextlib.redirect_stdout(buf):
+            rc = CL.main(["decompile", str(SAMPLE), "-o", str(Path(td) / "out")])
+        check("decompile returns 2 when no engine is usable", rc == 2, str(rc))
+
+
+def test_polish() -> None:
+    """Batch 5: byte-exact pool view, modified UTF-8 stubs, cache fingerprint."""
+    print("polish: ops_pool byte view, stub mUTF-8, cache fingerprint")
+    from jdec import ops_pool as OP
+    from jdec import stubs as SB
+
+    check("pool strings decode to characters", OP._ldc_text(b"\xc2\xb1\xc3\xa9") == "\u00b1\u00e9",
+          repr(OP._ldc_text(b"\xc2\xb1\xc3\xa9")))
+    check("ISO-8859-1 payload re-encodes to the intended bytes",
+          OP._ldc_text(b"\xc2\xb1\xc3\xa9").encode("latin-1") == b"\xb1\xe9")
+    check("NUL survives (C0 80)", OP._ldc_text(b"\xc0\x80") == "\x00")
+
+    name = "com/example/\U0001F600"
+    data = SB.build_stub_class_bytes(name)
+    check("stub class uses modified UTF-8", CF.encode_mutf8(name) in data)
+    check("stub class does not use plain UTF-8", name.encode("utf-8") not in data)
+    cf = CF.parse(data)
+    check("stub class name decodes exactly",
+          cf.utf8_text(cf.cp[cf.this_class][1][0]) == name,
+          cf.utf8_text(cf.cp[cf.this_class][1][0]))
+
+    fp1 = SB._sources_fingerprint({"a": "1"})
+    fp2 = SB._sources_fingerprint({"a": "2"})
+    check("fingerprint follows the sources", fp1 != fp2, fp1)
+    check("fingerprint is stable", fp1 == SB._sources_fingerprint({"a": "1"}))
+    check("real stub sources produce a fingerprint",
+          len(SB._sources_fingerprint(SB.STUB_SOURCES)) == 64)
+
+    check("valid IPv4 is tagged", "ip" in ST.classify("192.168.1.10"),
+          str(ST.classify("192.168.1.10")))
+    check("out-of-range octet is not an address",
+          "ip" not in ST.classify("999.1.1.1") and "ip" not in ST.classify("256.0.0.1"),
+          f"{ST.classify('999.1.1.1')} {ST.classify('256.0.0.1')}")
+    check("four-part version still tags (no over-tightening)",
+          "ip" in ST.classify("1.20.4.1"), str(ST.classify("1.20.4.1")))
+
+
+def test_ir_roundtrip() -> None:
+    """The stage-02 gate: a class and its methods must rebuild byte-for-byte."""
+    print("ir: parse -> re-assemble is byte-exact (the precondition for a type IR)")
+    import struct
+    from jdec import bytecode as BC
+    from jdec import ir as IR
+
+    # 1. Every operand shape the decoder models, including the ones that used
+    #    to be thrown away (switch payloads, wide operands, trailing bytes).
+    cases = {
+        "bipush -1": b"\x10\xff",
+        "sipush -1": b"\x11\xff\xff",
+        "ldc": b"\x12\x07",
+        "iinc -1": b"\x84\x02\xff",
+        "wide iinc": b"\xc4\x84\x00\x02\xff\x40",
+        "wide iload": b"\xc4\x15\x01\x02",
+        "ifnonnull": b"\xc7\x00\x03\xb1",
+        "goto_w": b"\xc8\x00\x00\x00\x05\xb1",
+        "multianewarray": b"\xc5\x00\x07\x02",
+        "invokeinterface": b"\xb9\x00\x07\x02\x00",
+        "invokedynamic": b"\xba\x00\x07\x00\x00",
+    }
+    for name, raw in cases.items():
+        insns = BC.decode(raw)
+        check(f"encode round-trips {name}", BC.encode(insns) == raw,
+              BC.encode(insns).hex())
+
+    # 2. Switch padding is positional: exercise all four alignments.
+    for k in range(4):
+        pad = (4 - ((k + 1) % 4)) % 4
+        sw = (b"\x00" * k + b"\xaa" + b"\x00" * pad
+              + struct.pack(">iii", 0, 0, 1) + struct.pack(">ii", 0, 0))
+        check(f"tableswitch round-trips at pc%4={k}",
+              BC.encode(BC.decode(sw)) == sw, BC.encode(BC.decode(sw)).hex())
+        lk = (b"\x00" * k + b"\xab" + b"\x00" * pad
+              + struct.pack(">ii", 0, 1) + struct.pack(">ii", 7, 0))
+        check(f"lookupswitch round-trips at pc%4={k}",
+              BC.encode(BC.decode(lk)) == lk, BC.encode(BC.decode(lk)).hex())
+
+    # 3. Offsets are recomputed, not copied: inserting an instruction between a
+    #    branch and its target must move the offset and keep the target.
+    orig = bytes([0x03, 0x99, 0x00, 0x04, 0x04, 0xac])   # iconst_0; ifeq -> 5
+    insns = BC.decode(orig)
+    nop = BC.Insn(pc=-1, op=0x00, length=1)
+    moved = [insns[0], insns[1], nop, insns[2], insns[3]]
+    out = BC.encode(moved)
+    check("relocated branch offset is recomputed (+4 -> +5)",
+          out == bytes([0x03, 0x99, 0x00, 0x05, 0x00, 0x04, 0xac]), out.hex())
+    check("relocated branch still targets the return",
+          BC.decode(out)[1].jump_targets() == [6],
+          str([i.jump_targets() for i in BC.decode(out)]))
+
+    # 4. Refusals: a removed target, a switch that lost its low key, a `wide`
+    #    without operands. Silently emitting the old offset is the failure mode
+    #    this whole module exists to prevent.
+    try:
+        BC.encode(insns[:2])          # the branch target (pc 5) is gone
+        lost_target = False
+    except BC.BytecodeError:
+        lost_target = True
+    check("encode refuses a branch whose target was removed", lost_target)
+
+    sw_insn = BC.decode(bytes([0xaa]) + b"\x00" * 3
+                        + struct.pack(">iiii", 0, 0, 0, 0))[0]
+    sw_insn.switch_low = None
+    try:
+        BC.encode([sw_insn])
+        missing_low = False
+    except BC.BytecodeError:
+        missing_low = True
+    check("encode refuses a tableswitch without its low key", missing_low)
+
+    wide_insn = BC.Insn(pc=0, op=0xC4, arg=0x15, length=4)
+    try:
+        BC.encode([wide_insn])
+        no_raw = False
+    except BC.BytecodeError:
+        no_raw = True
+    check("encode refuses a wide with no operand bytes", no_raw)
+
+    # 5. The corpus: every fixture class, every method.
+    rep = IR.audit_jar(SAMPLE)
+    check("audit covers the whole fixture jar", rep.classes >= 10, str(rep.classes))
+    check("audit found methods to check", rep.methods >= 20, str(rep.methods))
+    check("every class rebuilds byte-identically", not rep.class_mismatch,
+          str(rep.class_mismatch))
+    check("every method rebuilds byte-identically",
+          not rep.mismatches, "; ".join(m.describe() for m in rep.mismatches[:3]))
+    check("the truncated fixture is counted, not crashed on",
+          rep.classes_unreadable == 1, str(rep.classes_unreadable))
+    check("audit passes overall", rep.ok)
+
+    # 6. A file that is not a class is unreadable, not an exception.
+    bad = IR.AuditReport(target="x")
+    IR.audit_class_bytes(b"\xca\xfe\xba\xbe junk", "x/Bad", bad)
+    check("corrupt class counts as unreadable", bad.classes_unreadable == 1
+          and bad.classes == 0)
+    check("nothing checked is not a pass", not bad.ok)
+
+    # 7. CLI: 0 on a clean jar, and the summary names both levels.
+    import contextlib
+    import io
+    from jdec import cli as CL
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = CL.main(["ircheck", str(SAMPLE)])
+    text = buf.getvalue()
+    check("ircheck exits 0 on a clean jar", rc == 0, str(rc))
+    check("ircheck reports both levels", "class     :" in text and "method    :" in text,
+          text[-300:])
+    check("ircheck says PASS", "result    : PASS" in text, text[-200:])
+
+
+def test_toolchain_single_entry() -> None:
+    """javac is spawned from exactly one place, with the same guardrails."""
+    print("toolchain: one entry point for the JDK")
+    import io
+    from unittest import mock
+    from jdec import engines as EN
+    from jdec import toolchain as TC
+
+    check("path_sep is the JVM's separator", TC.path_sep() == EN.cp_sep(),
+          TC.path_sep())
+
+    # explicit override is authoritative: a named-but-missing compiler must not
+    # silently fall back to whatever else is on PATH
+    missing = str(Path(tempfile.gettempdir()) / "definitely-not-javac")
+    check("an explicit missing javac resolves to empty",
+          TC.find_javac(missing) == "", TC.find_javac(missing))
+
+    with mock.patch("jdec.engines.find_javac", return_value=None):
+        try:
+            TC.require_javac("testing")
+            raised = False
+        except TC.ToolchainError as exc:
+            raised = "javac not found" in str(exc) and "testing" in str(exc)
+        check("require_javac raises an actionable error", raised)
+
+    # every invocation carries text mode, error replacement and a timeout
+    captured: dict = {}
+
+    class _Fake:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured.update(kw)
+        return _Fake()
+
+    with mock.patch("subprocess.run", side_effect=fake_run):
+        TC.run_javac(["-version"], exe=sys.executable)
+    check("run_javac sets text mode", captured.get("text") is True, str(captured))
+    check("run_javac sets errors=replace", captured.get("errors") == "replace",
+          str(captured.get("errors")))
+    check("run_javac sets a timeout", captured.get("timeout") == TC.JAVAC_TIMEOUT,
+          str(captured.get("timeout")))
+
+    with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("javac", 300)):
+        try:
+            TC.run_javac(["-version"], exe=sys.executable)
+            timed_out = ""
+        except TC.ToolchainError as exc:
+            timed_out = str(exc)
+    check("a hung javac becomes a ToolchainError", "timed out" in timed_out, timed_out)
+
+    # the rule itself: no module outside toolchain.py may spawn a javac
+    offenders = []
+    for p in sorted((ROOT / "jdec").glob("*.py")):
+        if p.name == "toolchain.py":
+            continue
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            if "subprocess.run(" in ln and "javac" in ln:
+                offenders.append(f"{p.name}: {ln.strip()}")
+    check("javac is spawned only from toolchain.py", not offenders,
+          "; ".join(offenders))
+
+
+def test_verify_gate() -> None:
+    """The JVM gate must reject broken bytecode — proven, not assumed."""
+    print("verify: -Xverify:all gate, positive and negative controls")
+    import re
+    import struct
+    from jdec import verify as VF
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: the verification gate needs a JDK)")
+        return
+
+    # 1. positive control: an untouched jar must pass
+    rep = VF.verify(MIXIN)
+    check("untouched jar passes the gate", rep.ok and rep.invalid == [],
+          rep.summary())
+    check("the gate actually judged every class", rep.verified == rep.checked,
+          f"{rep.verified}/{rep.checked}")
+
+    # 2. negative control: flip one `return` to `ireturn` in a fixture class.
+    #    Without this, a driver that only *loads* classes reports PASS on
+    #    everything (that bug shipped twice while building this module).
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        broken = root / "broken.jar"
+        victim = "demo/mixin/ClientEntry"
+        with zipfile.ZipFile(MIXIN) as zin:
+            data = zin.read(victim + ".class")
+            cf = CF.parse(data)
+            target = None
+            for m in cf.methods:
+                if (cf.utf8(m.name_index) == "<init>"
+                        and cf.utf8(m.descriptor_index) == "()V"):
+                    target = m
+                    break
+            check("fixture has a constructor to corrupt", target is not None)
+            ci = BC.method_code(cf, target)
+            blob = bytearray(target.attrs_blob)
+            cnt = struct.unpack_from(">H", blob, 0)[0]
+            o = 2
+            patched = False
+            for _ in range(cnt):
+                ni, ln = struct.unpack_from(">HI", blob, o)
+                start = o + 6
+                if cf.utf8(ni) == "Code":
+                    code_len = struct.unpack_from(">I", blob, start + 4)[0]
+                    code_at = start + 8
+                    blob[code_at + code_len - 1] = 0xAC      # return -> ireturn
+                    patched = True
+                    break
+                o = start + ln
+            check("constructor code was found and corrupted", patched)
+            target.attrs_blob = bytes(blob)
+            with zipfile.ZipFile(broken, "w") as zout:
+                for info in zin.infolist():
+                    if info.filename == victim + ".class":
+                        zout.writestr(info, cf.serialize())
+                    else:
+                        zout.writestr(info, zin.read(info.filename))
+
+        bad = VF.verify(broken, classpath=[MIXIN])
+        check("a class whose constructor ends in ireturn is rejected",
+              [i.cls for i in bad.invalid] == [victim], bad.summary())
+        check("the rejection is a VerifyError",
+              bad.invalid and "VerifyError" in bad.invalid[0].detail,
+              bad.invalid[0].detail if bad.invalid else "")
+        check("a rejected jar is not a pass", not bad.ok)
+
+        # 3. the rollback policy: a rewrite never ships a class that fails
+        res = VF.verify_or_keep(MIXIN, broken)
+        check("the broken class was reverted", res.reverted == [victim],
+              str(res.reverted))
+        after = VF.verify(broken, classpath=[MIXIN])
+        check("after the rollback the output verifies", not after.invalid,
+              after.summary())
+        check("nothing is left invalid", not res.still_invalid, str(res.still_invalid))
+
+    # 4. a truncated class is rejected too (ClassFormatError, not VerifyError)
+    trunc = VF.verify(SAMPLE)
+    check("a truncated class is reported invalid",
+          any("Truncated" in i.cls for i in trunc.invalid), trunc.summary())
+
+    # 5. static guard: the driver must force linking. `forName(..., false)` and
+    #    `resolveClass` both silently skip verification on JDK 21. Comments are
+    #    stripped first — the driver's own docstring names the rejected APIs.
+    src = VF.DRIVER_JAVA
+    src_code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src_code = re.sub(r"//[^\n]*", "", src_code)
+    check("driver forces linking via reflection",
+          "getDeclaredMethods" in src_code and "resolveClass" not in src_code,
+          "the driver must not go back to resolveClass/forName")
+
+    # 6. exit codes
+    import contextlib
+    import io
+    from jdec import cli as CL
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc_ok = CL.main(["verify", str(MIXIN)])
+    with contextlib.redirect_stdout(buf):
+        rc_bad = CL.main(["verify", str(SAMPLE)])
+    check("verify exits 0 on a clean jar", rc_ok == 0, str(rc_ok))
+    check("verify exits 1 when the verifier rejects a class", rc_bad == 1, str(rc_bad))
+
+
+def test_deflat_output_loads() -> None:
+    """Both deflat modes must ship loadable classes, with different trade-offs."""
+    print("deflat: default keeps frames, --strip-frames keeps rewrites straight-line")
+    from jdec import deflat as DF
+    from jdec import verify as VF
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: needs a JDK)")
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        keep = Path(td) / "keep.jar"
+        strip = Path(td) / "strip.jar"
+        stats_keep = DF.deflat_jar(SAMPLE, keep)
+        stats_strip = DF.deflat_jar(SAMPLE, strip, strip_frames=True,
+                                    verify_output=False)
+        check("deflat reports its per-method rollbacks",
+              "methods_reverted" in stats_keep, str(stats_keep))
+        check("at least one method was rewritten",
+              stats_keep["methods_unflattened"] > 0, str(stats_keep["methods_unflattened"]))
+
+        # Default mode: frames are kept, so nothing needs to be reverted for
+        # frame reasons and the output must load.
+        rep = VF.verify(keep, classpath=[SAMPLE])
+        new_bad = {i.cls for i in rep.invalid} - {"demo/broken/Truncated"}
+        check("default mode introduces no invalid class", not new_bad,
+              str(sorted(new_bad)[:3]))
+        check("the deliberately truncated fixture stays the only failure",
+              {i.cls for i in rep.invalid} <= {"demo/broken/Truncated"},
+              rep.summary())
+
+        # strip_frames mode: no shipped rewrite may still need a frame.
+        branched = []
+        with zipfile.ZipFile(SAMPLE) as zin, zipfile.ZipFile(strip) as zout:
+            for name in zin.namelist():
+                if not name.endswith(".class") or name == BROKEN_SAMPLE:
+                    continue
+                try:
+                    before = CF.parse(zin.read(name))
+                    after = CF.parse(zout.read(name))
+                except Exception:
+                    continue
+                for m_before, m_after in zip(before.methods, after.methods):
+                    if m_before.attrs_blob == m_after.attrs_blob:
+                        continue
+                    ci = BC.method_code(after, m_after)
+                    if ci and ci.insns and (ci.branch_targets or ci.handlers):
+                        branched.append(f"{name}.{after.utf8(m_after.name_index)}")
+        check("with --strip-frames no rewrite still needs a stack map frame",
+              not branched, "; ".join(branched[:3]))
+        check("--strip-frames actually reverts the branchy methods",
+              stats_strip["methods_reverted"] > 0, str(stats_strip))
+
+
+def test_behaviour_is_preserved() -> None:
+    """Differential check: a rewrite must return the same answers."""
+    print("behave: same cases, original vs rewritten, plus a negative control")
+    from jdec import behave as BH
+    from jdec import deflat as DF
+
+    if JAVAC is None or EN.find_java() is None:
+        print("  (skipped: needs a JDK)")
+        return
+
+    cases = BH.parse_spec(
+        "# comment lines and blanks are ignored\n"
+        "\n"
+        "demo/legacy/OldStyle|pick|java.lang.String|hello\n"
+        "demo/legacy/OldStyle|pick|java.lang.String|\n"
+        "demo/legacy/OldStyle|pick|java.lang.String|MOJANG\n")
+    check("spec parser reads three cases", len(cases) == 3, str(len(cases)))
+    check("spec parser keeps empty arguments", cases[1].arg_values == ("",),
+          str(cases[1].arg_values))
+    try:
+        BH.parse_spec("onlyonetoken\n")
+        bad_spec = False
+    except ValueError:
+        bad_spec = True
+    check("spec parser rejects a malformed line", bad_spec)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        out = root / "deflated.jar"
+        stats = DF.deflat_jar(SAMPLE, out)
+        check("the fixture actually has a method deflat rewrites",
+              stats["methods_unflattened"] > 0,
+              "a vacuous comparison would prove nothing")
+
+        rep = BH.compare(SAMPLE, out, cases)
+        check("the rewritten jar answers all cases", rep.compared == 3, str(rep.compared))
+        check("behaviour is identical after the rewrite", rep.ok,
+              "; ".join(o.describe() for o in rep.diffs))
+        check("the answers are real values, not errors",
+              all(o.left.startswith("OK:") for o in rep.outcomes),
+              str([o.left for o in rep.outcomes]))
+
+        # Negative control: change the constant the method returns and confirm
+        # the harness notices. Without this the comparison is a rubber stamp.
+        with zipfile.ZipFile(SAMPLE) as zin:
+            blob = zin.read("demo/legacy/OldStyle.class")
+        cf = CF.parse(blob)
+        hits = 0
+        for i, e in enumerate(cf.cp):
+            if e and e[0] == CF.C_UTF8 and e[1] == b"?":
+                cf.cp[i] = (CF.C_UTF8, b"!")
+                hits += 1
+        check("found the returned constant to corrupt", hits > 0, str(hits))
+        tampered = root / "tampered.jar"
+        with zipfile.ZipFile(SAMPLE) as zin, zipfile.ZipFile(tampered, "w") as zout:
+            for info in zin.infolist():
+                if info.filename == "demo/legacy/OldStyle.class":
+                    zout.writestr(info, cf.serialize())
+                else:
+                    zout.writestr(info, zin.read(info.filename))
+        bad = BH.compare(SAMPLE, tampered, cases)
+        check("a changed return value is reported as a difference", not bad.ok,
+              str([o.describe() for o in bad.outcomes]))
+        check("the difference shows both values",
+              any("OK:s:?" in d.left and "OK:s:!" in d.right for d in bad.diffs),
+              str([(d.left, d.right) for d in bad.diffs]))
+
+    # Safety gate: no --execute, no execution.
+    import contextlib
+    import io
+    spec_path = Path(tempfile.gettempdir()) / "jdec_behave_spec.txt"
+    spec_path.write_text("demo/legacy/OldStyle|pick|java.lang.String|hello\n",
+                         encoding="utf-8")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = CL.main(["behave", str(SAMPLE), str(SAMPLE), "--spec", str(spec_path)])
+    check("behave refuses to run without --execute", rc == 3, str(rc))
+    check("the refusal explains why", "executes their code" in buf.getvalue(),
+          buf.getvalue()[-200:])
 
 
 def test_weak_engine_is_rescued() -> None:
@@ -1084,7 +2025,7 @@ def test_recover_spec_generation_and_quarantine() -> None:
 
     with tempfile.TemporaryDirectory() as td:
         out_d = Path(td)
-        spec_path, n_sites, n_skip = RC.build_spec(SAMPLE, out_d)
+        spec_path, n_sites, n_skip, n_unreadable = RC.build_spec(SAMPLE, out_d)
         check("build_spec produced spec file", spec_path.is_file())
         check("build_spec found callsites", n_sites >= 10, f"n_sites={n_sites}")
         lines = spec_path.read_text(encoding="utf-8").splitlines()
@@ -1153,9 +2094,8 @@ def test_scorecard_smoke() -> None:
 def test_pool_roundtrip() -> None:
     print("pool: scan -> harvest (real JVM replay) -> apply, end to end")
     import base64
-    import shutil as _sh
-    if not (_sh.which("javac") and _sh.which("java")):
-        print("skipping: javac/java not on PATH")
+    if not (JAVAC and JAVA):
+        print("skipping: no javac/java found (set JAVA_HOME or PATH)")
         return
     from jdec import pool as PL  # noqa: F401 - 触发模块加载即模板校验
     from jdec.cli import main as cli_main
@@ -1192,7 +2132,7 @@ def test_pool_roundtrip() -> None:
         # 2. 编译合成源作为 replay classpath，真 JVM 收割
         cls_dir = d / "classes"
         cls_dir.mkdir()
-        r = subprocess.run(["javac", "-d", str(cls_dir),
+        r = subprocess.run([JAVAC, "-d", str(cls_dir),
                             str(src / "pkg" / "Sample.java"),
                             str(src / "pkg" / "User.java")],
                            capture_output=True, text=True, errors="replace")
@@ -1396,8 +2336,8 @@ def test_procyon_bridge_is_built() -> None:
     if len(jars) < 2 or not (src / "ProcyonBridge.java").is_file():
         print("  (skipped: procyon artifacts not present; run `python jdec.py engines`)")
         return
-    if _shutil.which("javac") is None:
-        print("  (skipped: javac not on PATH)")
+    if JAVAC is None:
+        print("  (skipped: no javac; set JAVA_HOME or PATH)")
         return
     with tempfile.TemporaryDirectory(prefix="jdec_test_bridge_") as td:
         tmp = Path(td) / "engines"
@@ -1419,9 +2359,9 @@ def test_procyon_bridge_is_built() -> None:
 def test_ops_pool() -> None:
     print("opspool: PhantomShield string-pool static decrypt (DES via bundled _des)")
     gen = Path(__file__).resolve().parent / "gen_ops_fixture.py"
-    javac = shutil.which("javac")
+    javac = JAVAC
     if javac is None:
-        print("skipping ops pool test: javac not on PATH")
+        print("skipping ops pool test: no javac (set JAVA_HOME or PATH)")
         return
     from jdec import ops_pool as OP
     OP  # noqa
@@ -1436,8 +2376,11 @@ def test_ops_pool() -> None:
                            capture_output=True, text=True, errors="replace")
         check("fixture compiled", r.returncode == 0, r.stderr[-200:])
         jar = tdp / "ops_fixture.jar"
-        subprocess.run(["jar", "cf", jar.name, "OpsPoolFixture.class"],
-                       cwd=tdp, capture_output=True)
+        # zipfile, not the `jar` tool: the test only needs an archive, and a
+        # bare tool name would fail whenever the JDK is reachable only through
+        # JAVA_HOME (no PATH entry)
+        with zipfile.ZipFile(jar, "w") as zf:
+            zf.write(tdp / "OpsPoolFixture.class", "OpsPoolFixture.class")
         results = OP.scan_jar(str(jar))
         ok = any(s == ["alpha-secret-ONE", "bravo-secret-TWO",
                        "charlie-secret-THREE"] for _c, s, _e in results)
@@ -1465,9 +2408,9 @@ def test_clinit_sim() -> None:
     print("clinit_sim: symbolic evaluation of a javac-compiled table builder")
     from jdec import classfile as CFM
     from jdec import clinit_sim as CS
-    javac = shutil.which("javac")
+    javac = JAVAC
     if javac is None:
-        print("  (skipped: javac not on PATH)")
+        print("  (skipped: no javac; set JAVA_HOME or PATH)")
         return
     src = """public class ClinitSimFixture {
     static int[] ONE_D;
@@ -1797,21 +2740,24 @@ def test_advanced_roadmap_features() -> None:
     # 2. Fake MC Stubs jar generation
     tmp_stubs = Path(tempfile.mkdtemp(prefix="jdec_test_stubs_"))
     try:
-        sjar = stubs.ensure_stubs_jar(cache_dir=tmp_stubs)
-        check("stubs jar generated", sjar.is_file())
-        with zipfile.ZipFile(sjar) as z:
-            names = z.namelist()
-        check("stubs has Minecraft", "net/minecraft/client/Minecraft.class" in names)
-        check("stubs has Launch", "net/minecraft/launchwrapper/Launch.class" in names)
-        check("stubs has SharedConstants", "net/minecraft/SharedConstants.class" in names)
-        check("stubs has BuiltInRegistries", "net/minecraft/core/registries/BuiltInRegistries.class" in names)
+        if JAVAC is None:
+            print("  (skipped: stub compilation needs javac; set JAVA_HOME or PATH)")
+        else:
+            sjar = stubs.ensure_stubs_jar(cache_dir=tmp_stubs)
+            check("stubs jar generated", sjar.is_file())
+            with zipfile.ZipFile(sjar) as z:
+                names = z.namelist()
+            check("stubs has Minecraft", "net/minecraft/client/Minecraft.class" in names)
+            check("stubs has Launch", "net/minecraft/launchwrapper/Launch.class" in names)
+            check("stubs has SharedConstants", "net/minecraft/SharedConstants.class" in names)
+            check("stubs has BuiltInRegistries", "net/minecraft/core/registries/BuiltInRegistries.class" in names)
 
-        # 2.5 Javac compiler detection
-        from jdec import engines as EN
-        jc = EN.find_javac()
-        if jc is not None:
-            check("engines.find_javac found valid executable", Path(jc).is_file(), str(jc))
-            check("stubs._find_javac resolves javac", stubs._find_javac("javac") is not None)
+            # 2.5 Javac compiler detection
+            from jdec import engines as EN
+            jc = EN.find_javac()
+            if jc is not None:
+                check("engines.find_javac found valid executable", Path(jc).is_file(), str(jc))
+                check("stubs._find_javac resolves javac", stubs._find_javac("javac") is not None)
     finally:
         shutil.rmtree(tmp_stubs, ignore_errors=True)
 
@@ -1957,6 +2903,10 @@ def test_web_workbench_features() -> None:
             encoding="utf-8"
         )
 
+        # case-twin class: the on-disk stem is percent-encoded
+        (work_dir / "src" / "demo" / "obf" / "%41.java").write_text(
+            "package demo.obf;\n\npublic class A {}\n", encoding="utf-8")
+
         cfr_dir = work_dir / "engines" / "cfr" / "demo" / "obf"
         cfr_dir.mkdir(parents=True, exist_ok=True)
         (cfr_dir / "a.java").write_text(
@@ -2010,11 +2960,19 @@ def test_web_workbench_features() -> None:
                 check("workbench HTML has interactive tabs", "Engine Diff" in html_body and "AI Semantic Rename" in html_body)
                 check("workbench HTML has clean benign tag", '<option value="benign">benign</option>' in html_body)
                 check("workbench HTML has zero emojis", not bool(re.search(r'[\U00010000-\U0010ffff\u2600-\u27bf\u2300-\u23ff\u2b50-\u2b55\u200d\ufe0f]', html_body)))
+                check("workbench renders the decoded tree label",
+                      "currentData.names[cls] || cls" in html_body)
 
             # 2. Test GET /api/tree
             with urllib.request.urlopen(f"{base_url}/api/tree") as res:
                 tree_data = json.loads(res.read().decode("utf-8"))
                 check("tree contains demo/obf/a", "demo/obf/a" in tree_data.get("classes", []))
+                check("tree keeps the on-disk stem as the key",
+                      "demo/obf/%41" in tree_data.get("classes", []),
+                      str(tree_data.get("classes")))
+                check("tree sends a decoded display name",
+                      tree_data.get("names", {}).get("demo/obf/%41") == "demo/obf/A",
+                      str(tree_data.get("names")))
 
             # 3. Test GET /api/source
             with urllib.request.urlopen(f"{base_url}/api/source?class=demo/obf/a") as res:
@@ -2261,10 +3219,16 @@ def test_decompiler_trap_pruning() -> None:
                     cdata = zout.read(n)
                     cf = CF.parse(cdata)
                     check(f"deflat class {n} parses cleanly", cf.name is not None)
-            # Test StackMapTable stripping explicitly on OldStyle
+            # StackMapTable handling: a *reverted* method keeps its original
+            # frames on purpose, so "the output has no frames" is no longer the
+            # property to assert. Idempotence and not breaking the class are.
             old_data = zout.read("demo/legacy/OldStyle.class")
             old_cf = CF.parse(old_data)
-            check("_strip_stackmaps is idempotent and safe", DF._strip_stackmaps(old_cf) == 0)
+            first_strip = DF._strip_stackmaps(old_cf)
+            check("_strip_stackmaps is idempotent",
+                  DF._strip_stackmaps(old_cf) == 0, f"first pass stripped {first_strip}")
+            check("_strip_stackmaps leaves a parseable class",
+                  CF.parse(old_cf.serialize()).name == old_cf.name)
 
     # 8. Regression test: pipeline with no_natives=True (verifies UnboundLocalError fix)
     from jdec import pipeline as PL_MOD
@@ -2381,67 +3345,70 @@ def test_project_export_and_recompilability() -> None:
         check("export extracted resources to src/main/resources", stats["resources_copied"] >= 1)
         check("export generated build.gradle", (exp_dir / "build.gradle").is_file())
 
-    # 6. Deep javac compile self-healing loop: 5 simultaneous error types
-    with tempfile.TemporaryDirectory() as td:
-        c_proj = Path(td) / "compile_project"
-        PJ.generate_gradle_scaffold(c_proj, "CompileVerify")
-        src_root = c_proj / "src" / "main" / "java" / "test"
-        src_root.mkdir(parents=True, exist_ok=True)
+    if JAVAC is None:
+        print("  (skipped: compile self-healing and CLI project need javac; set JAVA_HOME or PATH)")
+    else:
+        # 6. Deep javac compile self-healing loop: 5 simultaneous error types
+        with tempfile.TemporaryDirectory() as td:
+            c_proj = Path(td) / "compile_project"
+            PJ.generate_gradle_scaffold(c_proj, "CompileVerify")
+            src_root = c_proj / "src" / "main" / "java" / "test"
+            src_root.mkdir(parents=True, exist_ok=True)
 
-        # Inject:
-        # 1. Duplicate method declaration
-        # 2. Ambiguous null overload
-        # 3. Unreachable statement
-        # 4. Missing return statement
-        # 5. Missing external library class import
-        buggy_java = src_root / "Buggy.java"
-        buggy_java.write_text("\n".join([
-            "package test;",
-            "import ext.unknown.Helper;",
-            "public class Buggy {",
-            "    public void run() {",
-            "        System.out.println(1);",
-            "    }",
-            "    public void run() {",
-            "        System.out.println(2);",
-            "    }",
-            "    public static void pick(String s) {}",
-            "    public static void pick(Integer i) {}",
-            "    public int compute(int x) {",
-            "        if (x > 0) return 10;",
-            "    }",
-            "    public void deadCode() {",
-            "        return;",
-            "        System.out.println(999);",
-            "    }",
-            "    public static void main(String[] args) {",
-            "        pick(null);",
-            "        Helper h = null;",
-            "    }",
-            "}",
-        ]), encoding="utf-8")
+            # Inject:
+            # 1. Duplicate method declaration
+            # 2. Ambiguous null overload
+            # 3. Unreachable statement
+            # 4. Missing return statement
+            # 5. Missing external library class import
+            buggy_java = src_root / "Buggy.java"
+            buggy_java.write_text("\n".join([
+                "package test;",
+                "import ext.unknown.Helper;",
+                "public class Buggy {",
+                "    public void run() {",
+                "        System.out.println(1);",
+                "    }",
+                "    public void run() {",
+                "        System.out.println(2);",
+                "    }",
+                "    public static void pick(String s) {}",
+                "    public static void pick(Integer i) {}",
+                "    public int compute(int x) {",
+                "        if (x > 0) return 10;",
+                "    }",
+                "    public void deadCode() {",
+                "        return;",
+                "        System.out.println(999);",
+                "    }",
+                "    public static void main(String[] args) {",
+                "        pick(null);",
+                "        Helper h = null;",
+                "    }",
+                "}",
+            ]), encoding="utf-8")
 
-        rep = PJ.verify_compilation(c_proj, max_repair_passes=4)
-        check("deep self-healing loop repaired multiple simultaneous error types", rep.repaired_count >= 4, f"repaired={rep.repaired_count}")
-        check("deep self-healing loop achieved 100% clean compilation", rep.success is True, rep.summary())
-        check("deep self-healing loop compiled all files cleanly", rep.compiled_files == rep.total_files and rep.total_files >= 1)
+            rep = PJ.verify_compilation(c_proj, max_repair_passes=4)
+            check("deep self-healing loop repaired multiple simultaneous error types", rep.repaired_count >= 4, f"repaired={rep.repaired_count}")
+            check("deep self-healing loop achieved 100% clean compilation", rep.success is True, rep.summary())
+            check("deep self-healing loop compiled all files cleanly", rep.compiled_files == rep.total_files and rep.total_files >= 1)
 
-    # 7. CLI project subcommand smoke test
-    with tempfile.TemporaryDirectory() as td:
-        cli_out = Path(td) / "cli_sample_project"
-        cli_args = SimpleNamespace(
-            input=str(SAMPLE),
-            output=str(cli_out),
-            src=None,
-            mc_version="1.20.4",
-            no_stubs=False,
-            compile=False,
-            engines_dir=str(ROOT / "engines"),
-        )
-        res = CL.cmd_project(cli_args)
-        check("cmd_project returned 0", res == 0)
-        check("cmd_project created output project", (cli_out / "build.gradle").is_file())
-        check("cmd_project bundled libs", (cli_out / "libs" / "mc_stubs.jar").is_file())
+        # 7. CLI project subcommand smoke test
+        with tempfile.TemporaryDirectory() as td:
+            cli_out = Path(td) / "cli_sample_project"
+            cli_args = SimpleNamespace(
+                input=str(SAMPLE),
+                output=str(cli_out),
+                src=None,
+                mc_version="1.20.4",
+                no_stubs=False,
+                compile=False,
+                engines_dir=str(ROOT / "engines"),
+            )
+            res = CL.cmd_project(cli_args)
+            check("cmd_project returned 0", res == 0)
+            check("cmd_project created output project", (cli_out / "build.gradle").is_file())
+            check("cmd_project bundled libs", (cli_out / "libs" / "mc_stubs.jar").is_file())
 
     # 7. Decompiler unbox cascade normalization and typed self-healing
     unbox_raw = "int x = v instanceof Boolean ? (Boolean)v : (v instanceof Character ? (char)((Number)v).intValue() : ((Number)v).intValue()));"
@@ -2484,6 +3451,9 @@ def test_remap_rewrites_call_sites() -> None:
 def test_remapped_class_is_valid_bytecode() -> None:
     """The real proof: javap must still be able to read what we produced."""
     print("mappings: remapped bytecode still loads (verified by javap)")
+    if JAVAP is None:
+        print("  (skipped: no javap; set JAVA_HOME or PATH)")
+        return
     m = MP.load_mapping(MC_MAP)
     with zipfile.ZipFile(MC_JAR) as z:
         data = z.read("env.class")
@@ -2492,7 +3462,7 @@ def test_remapped_class_is_valid_bytecode() -> None:
     tmp = Path(tempfile.mkdtemp())
     p = tmp / "Channel.class"
     p.write_bytes(cf.serialize())
-    r = subprocess.run(["javap", "-p", str(p)],
+    r = subprocess.run([JAVAP, "-p", str(p)],
                        capture_output=True, text=True, errors="replace")
     check("javap accepts the remapped class", r.returncode == 0, r.stderr[:200])
     check("javap shows the deobfuscated field names", "LOGGER" in r.stdout,
@@ -2728,6 +3698,25 @@ def test_bvm_and_native_extensions() -> None:
     check("BVMTranslator translated exception handler", len(res_eh.handlers) == 1)
     check("BVMTranslator handler start_pc is 0", res_eh.handlers[0].start_pc == 0)
     check("BVMTranslator handler handler_pc points to POP", res_eh.bytecode[res_eh.handlers[0].handler_pc] == 0x57)
+
+    # 5b. end_pc is exclusive and may equal the code length (no instruction
+    # starts there); it must still cover the final instruction
+    vm_meth_eh_end = BVM.BVMMethod(
+        code_id=104,
+        name="safeDivEnd",
+        desc="()I",
+        code=eh_code,
+        constants=["java/lang/ArithmeticException"],
+        exception_handlers=[0, 7, 4, 0],
+        max_locals=1,
+        max_stack=2
+    )
+    res_eh_end = BVM.BVMTranslator.translate_method(vm_meth_eh_end, cf_host)
+    check("handler end_pc == code length covers the final instruction",
+          len(res_eh_end.handlers) == 1
+          and res_eh_end.handlers[0].end_pc == len(res_eh_end.bytecode),
+          str([(h.start_pc, h.end_pc) for h in res_eh_end.handlers])
+          + f" len={len(res_eh_end.bytecode)}")
 
     # 6. Devirtualizer class file injection
     cp_helper = BVM.ConstantPoolHelper(cf_host)
@@ -3329,6 +4318,9 @@ def test_conservative_prune() -> None:
     classes used to be pruned as 'dead'."""
     print("reach: pruning keeps unknown dependencies (indy handles, reflection)")
     check("javac available for prune fixture", build_fixtures.ensure_sample_jar() is not None)
+    if JAVAC is None:
+        print("  (skipped: no javac; set JAVA_HOME or PATH)")
+        return
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         (d / "src" / "a").mkdir(parents=True)
@@ -3349,7 +4341,7 @@ def test_conservative_prune() -> None:
         for rel, txt in sources.items():
             (d / "src" / rel).write_text(txt, encoding="utf-8")
         cls = d / "cls"
-        subprocess.run(["javac", "-d", str(cls)]
+        subprocess.run([JAVAC, "-d", str(cls)]
                        + [str(d / "src" / r) for r in sources],
                        check=True, capture_output=True)
         jar = d / "fixture.jar"
@@ -3386,7 +4378,7 @@ def test_conservative_prune() -> None:
             (d / "a" / f"{n}.java").write_text(
                 f"package a;\npublic class {n} {{}}\n", encoding="utf-8")
         cls = d / "cls"
-        subprocess.run(["javac", "-d", str(cls), str(d / "a" / "Reflected.java"),
+        subprocess.run([JAVAC, "-d", str(cls), str(d / "a" / "Reflected.java"),
                         str(d / "a" / "Dead.java")], check=True, capture_output=True)
         noep = d / "noep.jar"
         with zipfile.ZipFile(noep, "w", zipfile.ZIP_DEFLATED) as z:
@@ -3600,9 +4592,9 @@ def test_sakura_architecture_improvements() -> None:
     check("empty grounding returns None for stub", empty_grounding.generate_grounded_stub("Foo") is None)
 
     # 4b. Grounded stubs for enum / interface must compile
-    javac = shutil.which("javac")
+    javac = JAVAC
     if javac is None:
-        print("  (skipped: javac not on PATH)")
+        print("  (skipped: no javac; set JAVA_HOME or PATH)")
     else:
         with tempfile.TemporaryDirectory(prefix="jdec_test_ground_compile_") as td:
             tdp = Path(td)
@@ -3764,9 +4756,9 @@ def test_grounding_real_mc_sample() -> None:
     from jdec import classfile as CF
     from jdec import mcmod as MM
 
-    javac = shutil.which("javac")
+    javac = JAVAC
     if javac is None:
-        print("  (skipped: javac not on PATH)")
+        print("  (skipped: no javac; set JAVA_HOME or PATH)")
         return
     with zipfile.ZipFile(MC_JAR) as z:
         jar_classes = {n[:-6] for n in z.namelist()
@@ -3900,8 +4892,10 @@ def test_bridge_prune_and_clean_idempotence() -> None:
 def main() -> int:
     with_mc = "--with-mc" in sys.argv
     if not SAMPLE.exists() and build_fixtures.ensure_sample_jar(quiet=False) is None:
-        print("missing tests/sample.jar and could not build it "
-              "(check that javac is on PATH, or run tests/build_fixtures.py)")
+        print("missing tests/sample.jar and could not build it: no working javac\n"
+              "  -> set JAVA_HOME to a JDK (e.g. JAVA_HOME=D:\\java21) or put javac\n"
+              "     on PATH, then re-run. sample.jar is the prerequisite of every\n"
+              "     other case, so the suite cannot degrade to a partial run.")
         return 2
     _prepare_engines()
     # every fixture must exist before the first test that touches one: several
@@ -3917,6 +4911,21 @@ def main() -> int:
     test_end_to_end_sample()
     test_case_colliding_class_names()
     test_iso_buckets()
+    test_safe_rel_covers_package_segments()
+    test_web_report_rel_reverse_lookup()
+    test_pipeline_summary_target_is_resolvable()
+    test_bytecode_and_string_quality()
+    test_safety_and_byte_fidelity()
+    test_binary_semantics()
+    test_degradation_accounting()
+    test_tool_hardening()
+    test_polish()
+    test_cli_exit_codes()
+    test_ir_roundtrip()
+    test_toolchain_single_entry()
+    test_verify_gate()
+    test_deflat_output_loads()
+    test_behaviour_is_preserved()
     test_weak_engine_is_rescued()
     test_yarn_compose()
     test_official_srg_compose()
@@ -3981,8 +4990,14 @@ def main() -> int:
         test_flow_fingerprints()
         test_native_reporting()
     if with_mc:
-        if not (MC_JAR.exists() and MC_MAP.exists()):
-            print("missing MC fixtures under tests/mc/")
+        missing = [p for p in (MC_JAR, MC_MAP) if not p.exists()]
+        if missing:
+            # the core suite already ran: print its numbers before exiting, or
+            # the "missing fixtures" path looks like a total failure
+            print("missing MC fixtures: " + ", ".join(str(p) for p in missing))
+            print(f"  put them under {MC_JAR.parent} (gitignored) and re-run, "
+                  f"or drop --with-mc for the core suite")
+            print(f"\n{_passed} passed, {_failed} failed (core suite only)")
             return 2
         test_mc_roundtrip()
         test_mojang_mapping_direction()

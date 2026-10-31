@@ -22,7 +22,6 @@ import re
 from dataclasses import dataclass, field
 
 from . import bytecode as BC
-from . import classfile as CF
 
 # owner:member:descriptor followed by 1-6 spaces
 INDY_ENCODED_REF = re.compile(

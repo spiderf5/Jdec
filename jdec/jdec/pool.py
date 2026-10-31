@@ -21,10 +21,8 @@ key 表 + seed 派生滚动 key——逐类常数全不同，静态移植不现�
 from __future__ import annotations
 
 import base64
-import os
 import re
 import shutil
-import subprocess
 from collections import defaultdict
 from pathlib import Path
 
@@ -127,11 +125,15 @@ def _overload_ok(acc, fq: str, meth: str, lit_idx: str, lit_seed: str) -> str:
 
 
 def _read(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="surrogateescape", newline="")
+    # open(), not Path.read_text(newline=...): that keyword only exists on
+    # Python 3.13+, while this package supports 3.9+ (CI runs 3.10-3.12).
+    with open(p, "r", encoding="utf-8", errors="surrogateescape", newline="") as f:
+        return f.read()
 
 
 def _write(p: Path, s: str) -> None:
-    p.write_text(s, encoding="utf-8", errors="surrogateescape", newline="")
+    with open(p, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
+        f.write(s)
 
 
 def _fqcn_of(f: Path, txt: str) -> str:
@@ -275,20 +277,19 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
     work_dir.mkdir(parents=True, exist_ok=True)
     src = work_dir / "PoolDriver.java"
     src.write_text(DRIVER_JAVA, encoding="utf-8")
-    from . import stubs as SB
-    javac_cmd = SB._find_javac("javac")
-    r = subprocess.run([javac_cmd, "-d", str(work_dir), str(src)],
-                       capture_output=True, text=True, errors="replace")
+    from . import toolchain as TC
+    r = TC.run_javac(["-d", str(work_dir), str(src)],
+                     purpose="compiling the pool driver")
     if r.returncode != 0:
         raise RuntimeError("javac failed: " + (r.stderr or r.stdout or "")[-2000:])
 
     if java == "java":
-        from . import engines as EN
-        java = EN.find_java() or java
+        java = TC.require_java("running the pool driver")
 
-    sep = ";" if os.name == "nt" else ":"
+    sep = TC.path_sep()
     agent_jvm_arg = ""
     native_jvm_arg = ""
+    prep_warnings: list[str] = []
     if with_stubs:
         try:
             from . import stubs
@@ -297,8 +298,8 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
             agent_jar = stubs.ensure_mock_agent_jar()
             if agent_jar.is_file():
                 agent_jvm_arg = "-javaagent:" + norm_classpath(str(agent_jar)) + _LF
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            prep_warnings.append(f"stubs: {type(exc).__name__}: {exc}")
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
         cp = cp + (sep if cp and not cp.endswith(sep) else "") + extra.strip()
@@ -315,8 +316,11 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
                 native_scan.extract_libs(cp_p, natives_dir)
         if any(natives_dir.glob("*")):
             native_jvm_arg = "-Djava.library.path=" + norm_classpath(str(natives_dir)) + _LF
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        prep_warnings.append(f"natives: {type(exc).__name__}: {exc}")
+
+    for warning in prep_warnings:
+        print(f"WARNING  : replay prep: {warning}")
 
     argsfile = work_dir / "java_args.txt"
     argsfile.write_text(
@@ -356,7 +360,7 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
     return {
         "ok": ok, "err": err, "timed_out": timed_out, "returncode": rc,
         "buckets": buckets, "triage": triage_path, "log": log_path,
-        "harvest": out_tsv,
+        "harvest": out_tsv, "warnings": prep_warnings,
     }
 
 
@@ -379,7 +383,24 @@ def _check_lit(lit: str, plain: str) -> None:
 
 def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
           from_frida: Path | None = None) -> dict:
-    """回填明文进源码副本（out_dir），替换 + verify + 失败归因。"""
+    """回填明文进源码副本（out_dir），替换 + verify + 失败归因。
+
+    输出目录会被整体重建，所以先拒绝任何会吃掉输入的写法：`-o src`、
+    `-o ..`、`-o .`（CWD）以及把输出放进 src 里面。没有这层护栏时
+    `pool apply -i src -o src` 会先删掉源码树再复制，源码不可恢复。
+    """
+    src_p = Path(src_dir).resolve()
+    out_p = Path(out_dir).resolve()
+    if out_p == src_p or out_p in src_p.parents or out_p == Path.cwd().resolve():
+        raise ValueError(
+            f"refusing to write into the source tree: output {out_p} is the "
+            f"input directory, its parent, or the current directory; pass a "
+            f"fresh directory such as {src_p.parent / (src_p.name + '_pool')}")
+    if src_p in out_p.parents:
+        raise ValueError(
+            f"refusing to write inside the source tree: output {out_p} is "
+            f"under input {src_p}")
+
     plain: dict[tuple, str] = {}
     fail_lines: list[str] = []
     if harvest_path and Path(harvest_path).is_file():

@@ -19,7 +19,7 @@ from . import native_scan as NS
 from . import pool as PL
 from . import scorecard as SC
 from . import strings as ST
-from .decompile import decompile, write_report
+from .decompile import EngineUnavailable, decompile, decompile_exit_code, write_report
 from .probe import profile_jar
 from .recover import recover as do_recover
 from .recover import rewrite_sources as do_rewrite_sources
@@ -55,6 +55,120 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ircheck(args: argparse.Namespace) -> int:
+    """Gate for the IR layer: parse -> re-assemble -> compare bytes."""
+    from . import ir as IR
+
+    p = Path(args.input)
+    if not p.exists():
+        print(f"no such file: {p}")
+        return 2
+    try:
+        rep = IR.audit_path(p)
+    except (zipfile.BadZipFile, OSError) as exc:
+        print(f"cannot read {p}: {exc}")
+        return 2
+    print(rep.summary())
+    limit = args.limit or 10
+    shown = 0
+    for name in rep.class_mismatch[:limit]:
+        print(f"  class  {name}")
+        shown += 1
+    for mm in rep.mismatches[:max(0, limit - shown)]:
+        print(f"  method {mm.describe()}")
+    extra = (len(rep.class_mismatch) + len(rep.mismatches)) - limit
+    if extra > 0:
+        print(f"  ... and {extra} more (--limit to see more, --json for all)")
+    if rep.undecodable:
+        print(f"  note: {len(rep.undecodable)} method(s) not covered, "
+              f"first: {rep.undecodable[0]}")
+    if args.json:
+        rep.write_json(Path(args.json))
+        print(f"json      : {args.json}")
+    if rep.classes == 0:
+        print("exit 2: nothing was checked")
+        return 2
+    return 0 if rep.ok else 1
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """JVM gate: does every class load under -Xverify:all?"""
+    from . import verify as VF
+
+    p = Path(args.input)
+    if not p.exists():
+        print(f"no such file: {p}")
+        return 2
+    try:
+        rep = VF.verify(p, classpath=args.cp or (), limit=args.limit)
+    except Exception as exc:  # noqa: BLE001 - reported, not retried
+        print(str(exc))
+        return 2
+    print(rep.summary())
+    limit = args.show or 10
+    for group in (rep.invalid, rep.unresolved, rep.errors):
+        for issue in group[:limit]:
+            print(f"  {issue.describe()}")
+        if len(group) > limit:
+            print(f"  ... and {len(group) - limit} more")
+    if rep.driver_output.strip() and not rep.verified:
+        print(f"  driver: {rep.driver_output.strip()[-400:]}")
+    if args.json:
+        rep.write_json(Path(args.json))
+        print(f"json      : {args.json}")
+    if not rep.checked:
+        print("exit 2: no class was checked")
+        return 2
+    if rep.invalid:
+        return 1
+    if rep.unresolved and not args.allow_unresolved:
+        # the gate could not judge these: not a pass
+        print(f"note: {len(rep.unresolved)} class(es) were never judged "
+              f"(missing dependencies); pass --allow-unresolved to accept that")
+        return 1
+    if rep.errors:
+        return 1
+    return 0
+
+
+def cmd_behave(args: argparse.Namespace) -> int:
+    """Differential behaviour: same cases, two jars, same answers."""
+    from . import behave as BH
+
+    orig, rewritten = Path(args.original), Path(args.rewritten)
+    for p in (orig, rewritten):
+        if not p.exists():
+            print(f"no such file: {p}")
+            return 2
+    if not args.execute:
+        print("refusing to run: this invokes methods from the target jars, which "
+              "executes their code (static initialisers included). "
+              "Pass --execute to allow it.")
+        return 3
+    try:
+        cases = BH.parse_spec(Path(args.spec).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read spec: {exc}")
+        return 2
+    if not cases:
+        print("spec contains no cases")
+        return 2
+    try:
+        rep = BH.compare(orig, rewritten, cases)
+    except Exception as exc:  # noqa: BLE001 - reported, not retried
+        print(str(exc))
+        return 2
+    print(rep.summary())
+    for d in rep.diffs[:args.show]:
+        print(f"  DIFF {d.describe()}")
+    if len(rep.diffs) > args.show:
+        print(f"  ... and {len(rep.diffs) - args.show} more")
+    if args.json:
+        rep.write_json(Path(args.json))
+        print(f"json      : {args.json}")
+    return 0 if rep.ok else 1
+
+
 def cmd_engines(args: argparse.Namespace) -> int:
     d = Path(args.engines_dir)
     if getattr(args, "with_ghidra", False):
@@ -69,14 +183,22 @@ def cmd_engines(args: argparse.Namespace) -> int:
             print(f"Ghidra is already present at: {gh}")
     missing = EN.ensure_engines(d)
     print(f"engines dir: {d}")
+    unavailable = []
     for key, eng in EN.ENGINES.items():
         ok = eng.available(d)
         print(f"  {eng.label:<24} {'available' if ok else 'MISSING'}")
+        if not ok:
+            unavailable.append(eng.label)
     gh = GE.find_ghidra(engines_dir=d)
     gh_status = f"available ({gh.name})" if gh else "MISSING (pass --with-ghidra to download)"
     print(f"  {'Ghidra Headless':<24} {gh_status}")
     if missing:
         print(f"could not fetch: {', '.join(missing)}")
+    if unavailable:
+        # A failed ProcyonBridge compile lands here (no javac): the jar is
+        # there but the engine is not usable, so this must not report success.
+        print(f"unusable: {', '.join(unavailable)} "
+              "(Procyon needs javac to build its bridge)")
         return 1
     return 0
 
@@ -94,6 +216,12 @@ def cmd_decompile(args: argparse.Namespace) -> int:
     if not raw.exists():
         print(f"no such file: {raw}")
         return 2
+    # Fail before downloading anything: without a JVM every engine returns
+    # "java not found", every class ends up failed, and the run used to exit 0.
+    if EN.find_java() is None:
+        print("no Java runtime found: set JAVA_HOME to a JDK (e.g. D:\\java21) "
+              "or put java on PATH")
+        return 2
     engines_dir = Path(args.engines_dir)
     missing = EN.ensure_engines(engines_dir, quiet=True)
     usable = [k for k in EN.ENGINES if EN.ENGINES[k].available(engines_dir)]
@@ -102,8 +230,10 @@ def cmd_decompile(args: argparse.Namespace) -> int:
         EN.ensure_engines(engines_dir)
         usable = [k for k in EN.ENGINES if EN.ENGINES[k].available(engines_dir)]
     if not usable:
+        # same bucket as "nothing recovered": the environment cannot run, which
+        # the README documents as exit 2
         print("no decompiler engines available, aborting")
-        return 1
+        return 2
     if missing:
         print(f"note: unavailable engines: {', '.join(missing)}")
 
@@ -170,7 +300,18 @@ def cmd_decompile(args: argparse.Namespace) -> int:
         print(f"elapsed   : {rep.elapsed:.1f}s")
         print(f"source    : {out_dir / 'src'}")
         print(f"report    : {out_dir / 'report.md'}")
-        return 0
+        # Same 0/1/2 vocabulary as the pipeline: a run that recovered nothing
+        # must not look like a success to a script or a CI step.
+        code = decompile_exit_code(rep)
+        if code == 2:
+            print("exit 2: nothing was recovered")
+        elif code == 1:
+            print(f"exit 1: {rep.failed + rep.missing} class(es) failed, "
+                  f"{rep.partial} partial")
+        return code
+    except EngineUnavailable as exc:
+        print(str(exc))
+        return 2
     finally:
         if tmp and not args.keep_work:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -540,14 +681,37 @@ def cmd_deflat(args: argparse.Namespace) -> int:
         print(f"no such file: {p}")
         return 2
     out = Path(args.output) if args.output else p.with_name(p.stem + "_deflat" + p.suffix)
-    stats = deflat.deflat_jar(p, out)
-    print(f"deflat    : {stats['methods_unflattened']} method(s) unflattened across {stats['classes']} class(es)")
+    stats = deflat.deflat_jar(p, out, verify_output=not args.no_verify,
+                              strip_frames=args.strip_frames)
+    v = stats.get("verify")
+    print(f"deflat    : {stats['methods_unflattened']} method(s) rewritten across "
+          f"{stats['classes']} class(es)"
+          + (f" ({stats['methods_reverted']} kept original: body still has "
+             f"branch targets)" if stats.get("methods_reverted") else ""))
     print(f"output    : {out}")
+    if v:
+        if v.get("skipped"):
+            print(f"verify    : skipped ({v['skipped']})")
+        else:
+            line = f"verify    : {v['verified']} class(es) pass -Xverify:all"
+            if v.get("reverted"):
+                line += f", {len(v['reverted'])} reverted (their rewrite did not load)"
+            if v.get("still_invalid"):
+                line += f", {len(v['still_invalid'])} were already invalid in the input"
+            if v.get("unresolved"):
+                line += f", {v['unresolved']} not judged (missing deps)"
+            print(line)
     if stats["methods_unflattened"]:
-        print("note      : unflattened methods carry no StackMapTable (stale "
-              "frames are stripped on purpose); such classes may fail JVM "
-              "verification on Java 7+. Decompilers (CFR/Vineflower) recompute "
-              "the frames, so jdec output is unaffected.")
+        if args.strip_frames:
+            print("note      : frames stripped on purpose (decompiler input). A "
+                  "rewritten method that still has branches is reverted, because "
+                  "the split verifier needs a frame at every branch target.")
+        else:
+            print("note      : StackMapTables kept. These rewrites are "
+                  "length-preserving, so the original frames stay at the right "
+                  "offsets; the verifier above confirms it.")
+    if v and v.get("reverted"):
+        return 1
     return 0
 
 
@@ -693,6 +857,9 @@ def cmd_reach(args: argparse.Namespace) -> int:
                 print(f"  hold-back reasons: bootstrap/indy={keep_counts['bsm']}, "
                       f"method-handle targets={keep_counts['handle']}, "
                       f"reflection-by-name={keep_counts['reflect']}")
+            if keep_counts.get("unreadable"):
+                print(f"  unreadable      : {keep_counts['unreadable']} class(es) "
+                      f"kept as-is (parse failure is not proof of being unused)")
             print("  WARNING: this is a 'suspected unused classes' cut, NOT a "
                   "verified slim jar - lambda/reflection/behaviour equivalence "
                   "is not guaranteed. Prefer the reachability report for decisions.")
@@ -806,6 +973,48 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("probe", help="fingerprint a jar without decompiling")
     sp.add_argument("input")
     sp.set_defaults(func=cmd_probe)
+
+    si = sub.add_parser(
+        "ircheck",
+        help="byte-exactness gate: parse -> re-assemble -> compare (IR precondition)")
+    si.add_argument("input", help="jar, .class file, or a directory of classes")
+    si.add_argument("--json", default=None, help="write the full report as JSON")
+    si.add_argument("--limit", type=int, default=10,
+                    help="show at most N mismatches (default 10)")
+    si.set_defaults(func=cmd_ircheck)
+
+    sv = sub.add_parser(
+        "verify",
+        help="JVM gate: load every class under -Xverify:all "
+             "(proves a rewrite did not break the frames)")
+    sv.add_argument("input", help="jar or directory of .class files")
+    sv.add_argument("--cp", action="append", default=[],
+                    help="extra classpath entry (repeatable); pass the original "
+                         "jar when verifying a rewritten one")
+    sv.add_argument("--limit", type=int, default=0,
+                    help="only check the first N classes")
+    sv.add_argument("--show", type=int, default=10,
+                    help="show at most N problems per bucket")
+    sv.add_argument("--json", default=None, help="write the full report as JSON")
+    sv.add_argument("--allow-unresolved", action="store_true",
+                    help="classes whose dependencies are missing were not judged; "
+                         "without this flag they make the run fail")
+    sv.set_defaults(func=cmd_verify)
+
+    sb = sub.add_parser(
+        "behave",
+        help="differential behaviour: run the same cases against two jars "
+             "and compare (executes target code; needs --execute)")
+    sb.add_argument("original", help="the jar you started from")
+    sb.add_argument("rewritten", help="the jar a rewrite produced")
+    sb.add_argument("--spec", required=True,
+                    help="cases file, one per line: class|method|argTypes|argValues "
+                         "(types: int,long,boolean,double,float,short,byte,char,FQCN)")
+    sb.add_argument("--execute", action="store_true",
+                    help="required: this runs methods from the target jars")
+    sb.add_argument("--show", type=int, default=10)
+    sb.add_argument("--json", default=None)
+    sb.set_defaults(func=cmd_behave)
 
     se = sub.add_parser("engines", help="download / check decompiler engines")
     se.add_argument("--with-ghidra", action="store_true",
@@ -1042,6 +1251,13 @@ def build_parser() -> argparse.ArgumentParser:
     sdef.add_argument("input", help="target jar to de-flatten")
     sdef.add_argument("-o", "--output", default=None,
                       help="output jar path (default: <input>_deflat.jar)")
+    sdef.add_argument("--no-verify", action="store_true",
+                      help="skip the -Xverify:all gate (the output is then not "
+                           "guaranteed to load)")
+    sdef.add_argument("--strip-frames", action="store_true",
+                      help="strip the (stale-looking) StackMapTables instead of "
+                           "keeping them; better for feeding a decompiler, worse "
+                           "for running the jar")
     sdef.set_defaults(func=cmd_deflat)
 
     def _add_devirt_args(parser):

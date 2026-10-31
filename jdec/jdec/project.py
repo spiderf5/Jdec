@@ -23,8 +23,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import struct
-import subprocess
 import tempfile
 import urllib.parse
 import zipfile
@@ -34,6 +32,7 @@ from pathlib import Path
 from . import classfile as CF
 from . import mcmod as MM
 from . import probe as PB
+from . import toolchain as TC
 from . import stubs as SB
 
 # Java reserved words that cannot be used as variable/parameter names in valid source
@@ -1042,7 +1041,10 @@ def export_project(
             stem = fname[:-5] if fname.endswith(".java") else fname
             orig_cls = stem
             renamed_cls = None
-            pkg = ".".join(parts[:-1])
+            # decoded, because queued renames are keyed by the real class name
+            # (`pkg.A.X`), not by the percent-encoded directory the collision
+            # pass had to invent
+            pkg = ".".join(urllib.parse.unquote(p) for p in parts[:-1])
 
             if stem.lower() in WINDOWS_RESERVED_NAMES:
                 renamed_cls = f"_{stem}"
@@ -1215,9 +1217,17 @@ def verify_compilation(
     """Run an automated javac compile loop, diagnosing and auto-repairing compile errors."""
     java_src_root = project_dir / "src" / "main" / "java"
     libs_dir = project_dir / "libs"
-    javac_resolved = SB._find_javac(javac_bin)
+    try:
+        TC.require_javac("verifying the exported project")
+    except TC.ToolchainError as exc:
+        return CompilationReport(
+            success=False, total_files=0, compiled_files=0,
+            javac_output=str(exc))
 
     grounding = MM.IntermediaryGrounding(intermediary_jar) if intermediary_jar else None
+    if grounding is not None and grounding.error:
+        print(f"WARNING  : intermediary grounding unavailable ({grounding.error}); "
+              f"stubs fall back to untyped shapes")
 
     java_files = list(java_src_root.rglob("*.java")) if java_src_root.is_dir() else []
     if not java_files:
@@ -1237,18 +1247,24 @@ def verify_compilation(
         try:
             # Build classpath from libs/*.jar
             cp_jars = list(libs_dir.glob("*.jar")) if libs_dir.is_dir() else []
-            sep = ";" if os.name == "nt" else ":"
+            sep = TC.path_sep()
             cp_arg = sep.join(str(j) for j in cp_jars)
 
-            cmd = [javac_resolved, "-J-Duser.language=en", "-encoding", "UTF-8", "-d", str(tmp_classes)]
+            args = ["-J-Duser.language=en", "-encoding", "UTF-8", "-d", str(tmp_classes)]
             if cp_arg:
-                cmd.extend(["-cp", cp_arg])
+                args.extend(["-cp", cp_arg])
             # Use argfile for sources to prevent Windows command line 32KB overflow
             sources_file = tmp_classes / "sources.txt"
             sources_file.write_text("\n".join(f'"{f.resolve().as_posix()}"' for f in java_files), encoding="utf-8")
-            cmd.append(f"@{sources_file}")
+            args.append(f"@{sources_file}")
 
-            proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+            try:
+                proc = TC.run_javac(args, exe=javac_bin,
+                                    purpose="verifying the exported project")
+            except TC.ToolchainError as exc:
+                return CompilationReport(
+                    success=False, total_files=len(java_files), compiled_files=0,
+                    repaired_count=total_repaired, javac_output=str(exc))
             output = (proc.stderr or "") + (proc.stdout or "")
 
             if proc.returncode == 0:

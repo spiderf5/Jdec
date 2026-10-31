@@ -15,21 +15,13 @@ from __future__ import annotations
 
 import datetime
 import difflib
-import html
 import json
-import os
-import re
-import socketserver
 import sys
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import webbrowser
 
-from . import probe as PB
-from . import analyze as AZ
-from . import strings as ST
-from . import native_scan as NS
 from . import engines as EN
 from . import rename as RN
 from . import callgraph as CG
@@ -265,6 +257,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <script>
     let currentData = {
       classes: [],
+      names: {},
       selected: null,
       currentView: 'decompiled',
       annotations: {},
@@ -289,6 +282,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const data = await resTree.json();
         currentData.annotations = (await resAnn.json()) || {};
         currentData.classes = data.classes || [];
+        currentData.names = data.names || {};
         document.getElementById('target-summary').innerText = (data.target || 'target') + ' (' + currentData.classes.length + ' classes)';
         filterAndRenderTree();
         if (currentData.classes.length > 0) {
@@ -330,7 +324,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         const label = document.createElement('span');
         label.className = 'tree-label';
-        label.innerText = cls;
+        // show the decoded name (`pkg/A`), keep the on-disk stem as the key
+        label.innerText = currentData.names[cls] || cls;
         el.appendChild(label);
 
         const ann = currentData.annotations[cls];
@@ -664,6 +659,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+def _report_classes(data: dict) -> dict:
+    """Per-class map out of report.json, under the key the writer uses.
+
+    `decompile.write_report` stores it as `"classes"`; every reader here asked
+    for `"outcomes"` and therefore always got {} - which silently disabled the
+    rel reverse-lookup for percent-encoded twin classes and made the diff view
+    re-decompile classes whose winning engine actually matched. Accept both so
+    old report.json files keep working.
+    """
+    if not isinstance(data, dict):
+        return {}
+    return data.get("classes") or data.get("outcomes") or {}
+
+
 def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     """Retrieve Java source code for a class produced by a specific decompiler engine."""
     if not cls:
@@ -674,7 +683,7 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     if rep_json.is_file():
         try:
             r_data = json.loads(rep_json.read_text(encoding="utf-8"))
-            outcomes = r_data.get("outcomes", {})
+            outcomes = _report_classes(r_data)
             if cls in outcomes and outcomes[cls].get("rel"):
                 rel_name = outcomes[cls]["rel"]
         except Exception:
@@ -725,7 +734,7 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     if rep_json.is_file():
         try:
             r_data = json.loads(rep_json.read_text(encoding="utf-8"))
-            outcomes = r_data.get("outcomes", {})
+            outcomes = _report_classes(r_data)
             if cls in outcomes and (outcomes[cls].get("engine") or "").lower() == eng_key:
                 if target_path.is_file():
                     return target_path.read_text(encoding="utf-8", errors="replace")
@@ -924,7 +933,16 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
                     for f in src_dir.rglob("*.java"):
                         rel = f.relative_to(src_dir).as_posix()
                         classes.append(rel.replace(".java", ""))
-            self.send_json({"target": self.work_dir.name, "classes": sorted(classes)})
+            # src/ stems are percent-encoded for case twins; send a display
+            # name alongside so the tree reads `pkg/A` while requests keep the
+            # exact stem the file system (and report.json rel) uses
+            names = {}
+            for rel in classes:
+                if "%" in rel:
+                    names[rel] = "/".join(
+                        urllib.parse.unquote(seg) for seg in rel.split("/"))
+            self.send_json({"target": self.work_dir.name,
+                            "classes": sorted(classes), "names": names})
             return
 
         if path == "/api/annotations":
@@ -946,7 +964,7 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
             if rep_json.is_file():
                 try:
                     r_data = json.loads(rep_json.read_text(encoding="utf-8"))
-                    outcomes = r_data.get("outcomes", {})
+                    outcomes = _report_classes(r_data)
                     if cls in outcomes and outcomes[cls].get("rel"):
                         rel_name = outcomes[cls]["rel"]
                 except Exception:
@@ -1003,7 +1021,7 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
             if rep_json.is_file():
                 try:
                     r_data = json.loads(rep_json.read_text(encoding="utf-8"))
-                    outcomes = r_data.get("outcomes", {})
+                    outcomes = _report_classes(r_data)
                     if cls in outcomes and outcomes[cls].get("rel"):
                         rel_name = outcomes[cls]["rel"]
                 except Exception:
@@ -1106,7 +1124,7 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
             if rep_json.is_file():
                 try:
                     r_data = json.loads(rep_json.read_text(encoding="utf-8"))
-                    outcomes = r_data.get("outcomes", {})
+                    outcomes = _report_classes(r_data)
                     if cls in outcomes:
                         co = outcomes[cls]
                         info["engine"] = co.get("engine")

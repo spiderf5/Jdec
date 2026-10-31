@@ -17,7 +17,7 @@ import zipfile
 from . import bytecode as BC
 from . import cfg as CFG
 from . import classfile as CF
-from .bytecode import Insn, Handler
+from .bytecode import Handler
 
 # ---------------------------------------------------------------------------
 # Opcs specification table: maps Opcs name -> (jvm_opcode, operand_format)
@@ -537,7 +537,10 @@ class ConstantPoolHelper:
             else:
                 return self.add_long(val)
         elif isinstance(val, float):
-            return self.add_double(val)
+            # a float constant is CONSTANT_Float and one slot; add_double here
+            # emitted CONSTANT_Double, so every `ldc` of a float grew the
+            # operand stack by 2 and FADD/FSTORE met a double at verification
+            return self.add_float(val)
         elif isinstance(val, dict):
             # Complex reference representation
             t = val.get("type")
@@ -695,6 +698,21 @@ def _value_slots(desc: str) -> int:
     return 2 if desc[:1] in ("J", "D") else 1
 
 
+def _norm_internal(name: object) -> str:
+    """Normalise a class reference from the virtual pool to an internal name.
+
+    The dumped pools mix `java.lang.Exception`, `Ljava/lang/Exception;` and
+    already-internal `java/lang/Exception`. Array descriptors keep their `[`
+    prefix (the element type inside still carries `L...;`).
+    """
+    s = str(name).replace(".", "/")
+    if s.startswith("["):
+        return s
+    if s.startswith("L") and s.endswith(";"):
+        return s[1:-1]
+    return s
+
+
 def _const_is_two_word(val: Any) -> bool:
     """Mirror ConstantPoolHelper.add_constant's routing: is this LDC 2 slots?"""
     if isinstance(val, dict):
@@ -704,7 +722,9 @@ def _const_is_two_word(val: Any) -> bool:
     if isinstance(val, int):
         return not (-2**31 <= val < 2**31)
     if isinstance(val, float):
-        return True
+        # CONSTANT_Float is one slot (add_constant routes it to add_float now);
+        # only long/double occupy two
+        return False
     return False
 
 
@@ -911,25 +931,18 @@ class VMTranslator:
             elif fmt == "type":
                 c_idx = operands[0]
                 c_val = vm_method.constants[c_idx] if c_idx < len(vm_method.constants) else "java/lang/Object"
-                cls_str = str(c_val).replace(".", "/")
-                if cls_str.startswith("L") and cls_str.endswith(";") and not cls_str.startswith("["):
-                    cls_str = cls_str[1:-1]
-                cpi = cp_helper.add_class(cls_str)
+                cpi = cp_helper.add_class(_norm_internal(c_val))
                 buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF])
             elif fmt == "field":
                 o_idx, n_idx, d_idx = operands[0], operands[1], operands[2]
-                owner = str(vm_method.constants[o_idx]).replace(".", "/")
-                if owner.startswith("L") and owner.endswith(";") and not owner.startswith("["):
-                    owner = owner[1:-1]
+                owner = _norm_internal(vm_method.constants[o_idx])
                 name = str(vm_method.constants[n_idx])
                 desc = str(vm_method.constants[d_idx])
                 cpi = cp_helper.add_fieldref(owner, name, desc)
                 buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF])
             elif fmt == "method":
                 o_idx, n_idx, d_idx, itf = operands[0], operands[1], operands[2], operands[3]
-                owner = str(vm_method.constants[o_idx]).replace(".", "/")
-                if owner.startswith("L") and owner.endswith(";") and not owner.startswith("["):
-                    owner = owner[1:-1]
+                owner = _norm_internal(vm_method.constants[o_idx])
                 name = str(vm_method.constants[n_idx])
                 desc = str(vm_method.constants[d_idx])
                 if op == 0xB9:  # INVOKEINTERFACE
@@ -947,7 +960,7 @@ class VMTranslator:
                 buf.extend([0xBA, (cpi >> 8) & 0xFF, cpi & 0xFF, 0x00, 0x00])
             elif fmt == "multi_array":
                 t_idx, dims = operands[0], operands[1]
-                owner = str(vm_method.constants[t_idx]).replace(".", "/")
+                owner = _norm_internal(vm_method.constants[t_idx])
                 cpi = cp_helper.add_class(owner)
                 buf.extend([op, (cpi >> 8) & 0xFF, cpi & 0xFF, dims & 0xFF])
             elif fmt == "jump":
@@ -1062,16 +1075,22 @@ class VMTranslator:
             if i + 3 < len(eh):
                 v_start, v_end, v_handler, c_type = eh[i], eh[i + 1], eh[i + 2], eh[i + 3]
                 s_idx = v_pc_to_idx.get(v_start, 0)
-                e_idx = v_pc_to_idx.get(v_end, len(instructions) - 1)
+                # end_pc is exclusive and may equal the virtual code length,
+                # where no instruction starts. Defaulting to "last instruction"
+                # dropped the final instruction from the protected range.
+                e_idx = v_pc_to_idx.get(v_end)
                 h_idx = v_pc_to_idx.get(v_handler, 0)
 
                 s_bc = bc_starts[s_idx] if s_idx < len(bc_starts) else 0
-                e_bc = bc_starts[e_idx] if e_idx < len(bc_starts) else len(assembled_raw)
+                e_bc = (len(assembled_raw) if e_idx is None
+                        else bc_starts[e_idx] if e_idx < len(bc_starts)
+                        else len(assembled_raw))
                 h_bc = bc_starts[h_idx] if h_idx < len(bc_starts) else 0
 
                 catch_cpi = 0
                 if 0 <= c_type < len(vm_method.constants) and vm_method.constants[c_type]:
-                    catch_cpi = cp_helper.add_class(str(vm_method.constants[c_type]))
+                    catch_cpi = cp_helper.add_class(
+                        _norm_internal(vm_method.constants[c_type]))
 
                 handlers.append(Handler(start_pc=s_bc, end_pc=e_bc, handler_pc=h_bc, catch_type=catch_cpi))
 
@@ -1207,14 +1226,15 @@ class Devirtualizer:
     def devirtualize_class_file(
         cls,
         cf: CF.ClassFile,
-        code_pool: dict[int, VMMethod]
+        code_pool: dict[int, VMMethod],
+        errors: list[str] | None = None,
     ) -> tuple[CF.ClassFile, int]:
         """Devirtualize methods in a ClassFile matching codeId from code_pool."""
         devirtualized_count = 0
 
         for method in cf.methods:
             # Check if method calls VM.execute or matches by codeId
-            code_id = cls.extract_code_id(cf, method)
+            code_id = cls.extract_code_id(cf, method, errors)
             if code_id is None:
                 continue
 
@@ -1238,8 +1258,13 @@ class Devirtualizer:
         return cf, devirtualized_count
 
     @classmethod
-    def extract_code_id(cls, cf: CF.ClassFile, method: CF.Member) -> int | None:
-        """Inspect method bytecode to extract the VM execution codeId."""
+    def extract_code_id(cls, cf: CF.ClassFile, method: CF.Member,
+                        errors: list[str] | None = None) -> int | None:
+        """Inspect method bytecode to extract the VM execution codeId.
+
+        `errors` (optional) receives malformed-attribute failures; without it a
+        broken method is indistinguishable from "this method is not a VM call".
+        """
         if not method.attrs_blob or len(method.attrs_blob) < 8:
             return None
 
@@ -1285,24 +1310,36 @@ class Devirtualizer:
                                         return pushed_int
 
                 o += attr_len
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            if errors is not None:
+                errors.append(f"method name_index={method.name_index}: {exc}")
             return None
 
         return None
 
     @classmethod
-    def scan_jar_code_pool(cls, input_jar: Path) -> dict[int, VMMethod]:
-        """Auto-scan JAR for CodePool static initialization tables."""
+    def scan_jar_code_pool_ex(
+        cls, input_jar: Path
+    ) -> tuple[dict[int, VMMethod], dict]:
+        """Scan for CodePool tables and report what could not be read.
+
+        A pool scan that fails and a jar that simply has no pool used to look
+        identical (both returned {}), so `devirtualize` reported success with
+        0 classes.
+        """
         from . import clinit_sim as CS
         pool: dict[int, VMMethod] = {}
+        stats: dict = {"classes_seen": 0, "classes_parsed": 0, "errors": []}
         try:
             with zipfile.ZipFile(input_jar, "r") as zin:
                 for item in zin.infolist():
                     if not item.filename.endswith(".class"):
                         continue
                     if "CodePool" in item.filename or "Program" in item.filename:
+                        stats["classes_seen"] += 1
                         try:
                             cf = CF.parse(zin.read(item.filename))
+                            stats["classes_parsed"] += 1
                             fields, _ = CS.collect_fields(cf)
                             op_streams = None
                             consts = []
@@ -1320,10 +1357,16 @@ class Devirtualizer:
                                 for idx, row in enumerate(op_streams):
                                     c_list = consts[idx] if idx < len(consts) and isinstance(consts[idx], list) else []
                                     pool[idx] = VMMethod(code_id=idx, code=row, constants=c_list)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+                        except Exception as exc:  # noqa: BLE001
+                            stats["errors"].append(f"{item.filename}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            stats["errors"].append(f"{input_jar.name}: {exc}")
+        return pool, stats
+
+    @classmethod
+    def scan_jar_code_pool(cls, input_jar: Path) -> dict[int, VMMethod]:
+        """Auto-scan JAR for CodePool static initialization tables."""
+        pool, _stats = cls.scan_jar_code_pool_ex(input_jar)
         return pool
 
     @classmethod
@@ -1336,15 +1379,24 @@ class Devirtualizer:
         """Devirtualize an entire JAR archive using provided code_pool."""
         output_jar.parent.mkdir(parents=True, exist_ok=True)
         working_pool = dict(code_pool)
+        scan_stats = None
         if not working_pool:
-            scanned = cls.scan_jar_code_pool(input_jar)
+            scanned, scan_stats = cls.scan_jar_code_pool_ex(input_jar)
             if scanned:
                 working_pool.update(scanned)
+            elif scan_stats["classes_seen"] or scan_stats["errors"]:
+                print(f"devirt: code-pool scan found 0 tables in "
+                      f"{scan_stats['classes_seen']} candidate class(es)"
+                      + (f", {len(scan_stats['errors'])} error(s)"
+                         if scan_stats["errors"] else ""))
+                for line in scan_stats["errors"][:5]:
+                    print(f"  ! {line}")
 
         total_classes = 0
         devirtualized_classes = 0
         total_methods = 0
         failed: list[str] = []
+        code_id_errors: list[str] = []
 
         with zipfile.ZipFile(input_jar, "r") as zin, zipfile.ZipFile(output_jar, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
@@ -1353,7 +1405,8 @@ class Devirtualizer:
                     total_classes += 1
                     try:
                         cf = CF.parse(data)
-                        cf, count = cls.devirtualize_class_file(cf, working_pool)
+                        cf, count = cls.devirtualize_class_file(
+                            cf, working_pool, errors=code_id_errors)
                         if count > 0:
                             devirtualized_classes += 1
                             total_methods += count
@@ -1362,6 +1415,9 @@ class Devirtualizer:
                         failed.append(f"{item.filename}: {exc}")
                 zout.writestr(item, data)
 
+        if code_id_errors:
+            print(f"devirt: {len(code_id_errors)} method(s) had malformed Code "
+                  f"attributes (codeId unknown): {code_id_errors[0]}")
         if failed:
             limit = 20
             print(f"devirt: {len(failed)}/{total_classes} class(es) failed to "
@@ -1376,6 +1432,8 @@ class Devirtualizer:
             "devirtualized_classes": devirtualized_classes,
             "devirtualized_methods": total_methods,
             "failed_classes": failed,
+            "code_id_errors": code_id_errors,
+            "scan": scan_stats,
             "output": output_jar
         }
 

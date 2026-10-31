@@ -970,6 +970,9 @@ class IntermediaryGrounding:
         self.jar_path = Path(intermediary_jar) if intermediary_jar else None
         self._classes: dict[str, CF.ClassFile] = {}
         self._namelist: set[str] = set()
+        # why grounding is unavailable, if it is: callers used to fall back to
+        # ungrounded stubs with no way to tell an empty index from a broken jar
+        self.error: str | None = None
         if self.jar_path and self.jar_path.is_file():
             self._load_index()
 
@@ -980,8 +983,8 @@ class IntermediaryGrounding:
                     if name.endswith(".class") and not name.startswith("META-INF/"):
                         cls_name = name[:-6].replace("\\", "/")
                         self._namelist.add(cls_name)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"{type(exc).__name__}: {exc}"
 
     def is_available(self) -> bool:
         return bool(self._namelist)

@@ -48,7 +48,9 @@ jdec 的价值在引擎之外：**调度、验证、反混淆**。
 
 ## 安装
 
-需要 JDK 9+（已在 Zulu 21 上验证）。引擎 jar 自动从 Maven Central 下载：
+需要 JDK 9+（已在 Zulu 21 上验证）。java/javac 按 **`JAVA_HOME` → `PATH` → 常见安装目录**
+的顺序查找——只配 `JAVA_HOME` 不配 `PATH` 也能用（`java` 装在 `D:\java21` 这类非标准
+位置时推荐这种方式）。引擎 jar 自动从 Maven Central 下载：
 
 ```bash
 python jdec.py engines
@@ -94,6 +96,79 @@ python jdec.py decompile client.jar -o out
 | `-e cfr,vineflower`                                   | 指定引擎顺序                                   |
 | `--clean-work`                                        | 结束后删除中间产物目录（可能有上千个文件，所以默认不删）             |
 
+### 改写底座门禁：`ircheck`
+
+`ircheck` 不解包、不反编译。它把每个类解析成指令再重新汇编回去，与输入逐字节
+比对——这是类型 IR 的前置条件：如果连“原样重建”都做不到，任何基于 IR 的改写
+都会在看不见的地方损坏类文件。
+
+```bash
+python jdec.py ircheck client.jar                 # 0 = 全部字节相等
+python jdec.py ircheck client.jar --json ir.json --limit 50
+```
+
+退出码：**0** 全部相等，**1** 有差异，**2** 没有任何可检查的类。Code 属性无法
+解码的方法单独记 `undecodable`——“没检查到”和“检查过没问题”是两件事，不合并。
+
+实测（2026-10-29）：4207 个类 / 33149 个方法，含 192 个不同 opcode
+（tableswitch / lookupswitch / wide / multianewarray / invokeinterface /
+invokedynamic），全部字节相等，耗时约 2.5s。
+
+### JVM 门禁：`verify`
+
+`ircheck` 证明"能原样重建"，`verify` 证明"改完之后 JVM 愿意加载"。它启动一次
+JVM，把每个类加载并**链接**（用 `getDeclaredMethods()` 触发 link，不执行
+`<clinit>`，所以不会跑目标里的代码），逐类给三种结论：
+
+| 结论 | 含义 |
+|---|---|
+| verified | 通过 `-Xverify:all` |
+| INVALID | 验证器拒绝（`VerifyError` / `ClassFormatError`）——改写弄坏了它 |
+| unresolved | 依赖不在 classpath，**没有判定过**，不算通过 |
+
+```bash
+python jdec.py verify rewritten.jar --cp original.jar
+python jdec.py verify rewritten.jar --cp original.jar --allow-unresolved
+```
+
+退出码：0 全部通过 / 1 有类被拒绝或有类没判定 / 2 没有任何类可检查。
+
+`deflat` 默认带这道门禁。两种模式：
+
+| 模式 | 做法 | 代价 |
+|---|---|---|
+| 默认（保帧） | 改写是等长的，原 StackMapTable 仍在正确偏移上；仍被验证器拒绝的类换回原字节 | HMCL 上 17/3740 个类回滚 |
+| `--strip-frames` | 剥掉帧（对反编译器更友好），并把"改写后仍有分支目标"的方法回滚 | 412/1435 处改写失效，但 0 个类回滚 |
+
+实测（2026-10-29，HotSpot 21）：HMCL 3740 类，**1435 处改写全部生效、17 个类回滚**，
+产物校验结果与输入逐项一致（2697 通过 / 1043 缺依赖 / 0 拒绝）。OptiFine 467 类：
+71 处改写、0 回滚、252 通过 / 215 缺依赖 / 0 拒绝。
+
+### 行为对拍：`behave`
+
+`verify` 只证明"能加载"，不证明"算得一样"。`behave` 用同一组用例分别调用原始 jar
+与改写后的 jar，比对返回值或抛出的异常：
+
+```bash
+python jdec.py behave original.jar rewritten.jar --spec cases.txt --execute
+```
+
+```
+# class|method|argTypes|argValues
+demo/legacy/OldStyle|pick|java.lang.String|hello
+demo/legacy/OldStyle|pick|java.lang.String|
+```
+
+- 静态方法和实例方法都支持（实例方法会用无参构造器创建一个对象）
+- 参数类型：`int` / `long` / `boolean` / `double` / `float` / `short` / `byte` /
+  `char` / 全限定类名（目前只支持 String 这类可直接构造的）
+- 会**执行目标代码**（`Class.forName(..., true)` 会跑 `<clinit>`，字符串解密器就在
+  这一步），所以必须显式 `--execute`，否则退出码 3
+
+退出码：0 全部一致 / 1 有差异 / 2 没有可比用例 / 3 未授权执行。
+
+它是**回归工具，不是等价性证明**：覆盖多少完全取决于你写的用例。
+
 输出：
 
 ```
@@ -103,6 +178,11 @@ out/
   report.json  机器可读，含每个类的状态、分数与输出路径 rel
                （冲突类的 rel 经百分号编码，不等于类名，外部工具从这里反查）
 ```
+
+退出码：**0** 全部还原干净，**1** 有失败或部分还原，**2** 一个类都没还原出来
+（或没有可用引擎 / 找不到 java）。找不到 java 时会在下载引擎之前就直接报错退出，
+不会先下载再逐类失败。`auto` 的 0/1/2 看的是**阶段状态**（任一阶段 failed → 2），
+与 `decompile` 的"还原了多少类"不是同一把尺子，两者不要互相套用。
 
 深挖与进阶分析命令（字符串/控制流/native 保护撞墙时用）：
 
@@ -458,8 +538,10 @@ python jdec/tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 jde
 
 **真实样本外置**：工具树里不放真实混淆样本。`--with-mc` 里的 ZKM 归因测试
 会依次在 `JDEC_SAMPLE_DIR` 环境变量、jdec 上一级目录、`D:/MC/samples/` 找
-指定的真实 ZKM 27 样本 jar（文件名见 `jdec/tests/run_tests.py`）；都不在则该项
-跳过（其余 115 项照常），放回去即恢复。
+指定的真实 ZKM 27 样本 jar（文件名见 `jdec/tests/run_tests.py`）；单个 ZKM 用例
+缺样本会跳过。但 `tests/mc/client_1.20.4.jar` 与 `mojang_1.20.4.txt` 缺失时，
+`--with-mc` 会**先跑完核心套件并打印汇总**，再以退出码 2 说明缺哪两个文件——
+它不会静默地"只少跑几项"。
 
 关键断言：parse→serialize 字节级一致（否则重映射会静默损坏每个类）、  
 重映射后的类仍能被 javap 读取、调用点随声明一起改名、  
@@ -479,7 +561,9 @@ python jdec/tests/build_fixtures.py     # 重新编译 fixture jar
 javac 能诚实地编出来；`Guarded` 是普通 try/catch，测试会**故意把它的异常处理器  
 改成向后跳**——javac 不生成这种形状，要验证检测器只能自己造证据。
 
-跑测试时 jar 不存在会自动构建；构建不了（没 javac）就跳过这几项而不是判失败。
+跑测试时 jar 不存在会自动构建（javac 按 `JAVA_HOME` → `PATH` → 常见安装目录查找）；
+连 `sample.jar` 都构建不出来时整个套件会**直接中止并说明原因**——它是其余用例的前置，
+不是可以跳过的单项（mixin / flow / collide 那三个才是能跳过的）。
 
 ## 边界
 

@@ -26,7 +26,6 @@ from . import annotations as AN
 from . import bytecode as BC
 from . import classfile as CF
 from . import indy as INDY
-from . import mappings as MP
 from . import mcmod as MM
 from . import obf as OB
 from .probe import profile_jar, JarProfile

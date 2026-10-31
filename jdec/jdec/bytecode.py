@@ -11,7 +11,11 @@ is structure - exception handlers that jump backwards, gotos that jump into the
 middle of a protected range, decryption loops in <clinit>. None of that is
 visible from names or from the constant pool; it needs the instructions.
 
-Read-only, like everything else on the parsing side.
+The parsing side stays read-only. `encode()` is the inverse of `decode()` and
+exists for exactly one reason: a rewrite pass may only be trusted once it can
+reproduce the input byte-for-byte before it changes anything. It re-lays out
+every instruction and recomputes branch offsets from the new positions, so it
+is a real assembler and not a memcpy of the original bytes.
 """
 
 from __future__ import annotations
@@ -113,9 +117,24 @@ _OP_LEN = _build_lengths()
 class Insn:
     pc: int
     op: int
-    arg: int | None = None      # constant pool index, or signed branch offset
+    arg: int | None = None      # constant pool index, signed branch offset, or
+                                # (for `wide`) the wrapped sub-opcode
+    arg2: int | None = None     # second immediate: iinc's increment,
+                                # invokeinterface's count byte,
+                                # multianewarray's dimensions,
+                                # invokedynamic's trailing u2
     length: int = 1
     targets: list[int] = field(default_factory=list)   # absolute pcs for switches
+    # switch payloads keep the parts `targets` cannot express: tableswitch
+    # needs its low key, lookupswitch its match keys, both their padding bytes
+    switch_low: int | None = None
+    switch_keys: list[int] = field(default_factory=list)
+    pad: bytes = b""
+    # `wide` wraps a sub-opcode and then re-states that opcode's operands at
+    # u2 width. Keeping them verbatim is honest: nothing in this package
+    # interprets a wide instruction, and inventing two more fields for an
+    # opcode that compilers stopped emitting in Java 6 would be worse.
+    raw: bytes = b""
 
     @property
     def is_branch(self) -> bool:
@@ -164,7 +183,10 @@ def decode(code: bytes) -> list[Insn]:
                 raise BytecodeError(f"truncated wide at {pc}")
             sub = code[o + 1]
             length = 6 if sub == 0x84 else 4        # iinc takes an extra u2
-            out.append(Insn(pc=pc, op=op, arg=sub, length=length))
+            if o + length > n:
+                raise BytecodeError(f"truncated wide at {pc}")
+            out.append(Insn(pc=pc, op=op, arg=sub, length=length,
+                            raw=code[o + 2:o + length]))
 
         elif op in (OP_TABLESWITCH, OP_LOOKUPSWITCH):
             pad = (4 - ((pc + 1) % 4)) % 4
@@ -173,6 +195,7 @@ def decode(code: bytes) -> list[Insn]:
                 raise BytecodeError(f"truncated switch at {pc}")
             default = struct.unpack_from(">i", code, p)[0]
             targets = [pc + default]
+            extra: dict = {}
             if op == OP_TABLESWITCH:
                 low = struct.unpack_from(">i", code, p + 4)[0]
                 high = struct.unpack_from(">i", code, p + 8)[0]
@@ -184,38 +207,182 @@ def decode(code: bytes) -> list[Insn]:
                     off = struct.unpack_from(">i", code, q + 4 * i)[0]
                     targets.append(pc + off)
                 length = (q + 4 * count) - o
+                extra["switch_low"] = low
             else:
                 npairs = struct.unpack_from(">i", code, p + 4)[0]
                 q = p + 8
                 if npairs < 0 or q + 8 * npairs > n:
                     raise BytecodeError(f"bad lookupswitch at {pc}")
+                keys = []
                 for i in range(npairs):
+                    key = struct.unpack_from(">i", code, q + 8 * i)[0]
                     off = struct.unpack_from(">i", code, q + 8 * i + 4)[0]
+                    keys.append(key)
                     targets.append(pc + off)
                 length = (q + 8 * npairs) - o
-            out.append(Insn(pc=pc, op=op, length=length, targets=targets))
+                extra["switch_keys"] = keys
+            out.append(Insn(pc=pc, op=op, length=length, targets=targets,
+                            pad=code[o + 1:p], **extra))
 
         elif length == 2 and op in (OP_LDC,):
             out.append(Insn(pc=pc, op=op, arg=code[o + 1], length=length))
         elif length == 2:
             out.append(Insn(pc=pc, op=op, arg=code[o + 1], length=length))
         elif length == 3:
-            if op in _BRANCH_OPS and op not in (OP_GOTO_W, OP_JSR_W):
+            if op == 0x84:  # iinc: two immediates (index, signed delta)
+                out.append(Insn(pc=pc, op=op, arg=code[o + 1],
+                                arg2=struct.unpack_from(">b", code, o + 2)[0],
+                                length=length))
+            elif op in _BRANCH_OPS and op not in (OP_GOTO_W, OP_JSR_W):
                 arg = struct.unpack_from(">h", code, o + 1)[0]
+                out.append(Insn(pc=pc, op=op, arg=arg, length=length))
             else:
                 arg = struct.unpack_from(">H", code, o + 1)[0]
-            out.append(Insn(pc=pc, op=op, arg=arg, length=length))
+                out.append(Insn(pc=pc, op=op, arg=arg, length=length))
         elif length == 5 and op in (OP_GOTO_W, OP_JSR_W):
             arg = struct.unpack_from(">i", code, o + 1)[0]
             out.append(Insn(pc=pc, op=op, arg=arg, length=length))
-        elif length == 5:
+        elif length == 5 and op == 0xB9:      # invokeinterface: index, count, 0
             out.append(Insn(pc=pc, op=op,
                             arg=struct.unpack_from(">H", code, o + 1)[0],
+                            arg2=code[o + 3], length=length))
+        elif length == 5:                     # invokedynamic: index, two zero bytes
+            out.append(Insn(pc=pc, op=op,
+                            arg=struct.unpack_from(">H", code, o + 1)[0],
+                            arg2=struct.unpack_from(">H", code, o + 3)[0],
                             length=length))
+        elif length == 4:                     # multianewarray: index, dimensions
+            out.append(Insn(pc=pc, op=op,
+                            arg=struct.unpack_from(">H", code, o + 1)[0],
+                            arg2=code[o + 3], length=length))
         else:
             out.append(Insn(pc=pc, op=op, length=length))
         o += length
     return out
+
+
+# --------------------------------------------------------------------------
+# Re-assembly
+# --------------------------------------------------------------------------
+
+def _switch_pad(pc: int) -> int:
+    return (4 - ((pc + 1) % 4)) % 4
+
+
+def _insn_size(insn: Insn, pc: int) -> int:
+    op = insn.op
+    if op == OP_TABLESWITCH:
+        return 1 + _switch_pad(pc) + 12 + 4 * max(0, len(insn.targets) - 1)
+    if op == OP_LOOKUPSWITCH:
+        return 1 + _switch_pad(pc) + 8 + 8 * len(insn.switch_keys)
+    if op == OP_WIDE:
+        if not insn.raw:
+            raise BytecodeError(
+                "cannot encode `wide` without Insn.raw (its operands are not "
+                "modelled); decode() fills it in")
+        return 2 + len(insn.raw)
+    n = _OP_LEN.get(op)
+    if n is None:
+        raise BytecodeError(f"cannot encode unknown opcode 0x{op:02x}")
+    return n
+
+
+def encode(insns: list[Insn], pc_map: dict[int, int] | None = None) -> bytes:
+    """Re-assemble instructions, recomputing every branch offset.
+
+    `pc_map` maps an original pc to the pc it will occupy in the output. With
+    no map the instructions are laid out from 0 in the order given, which is
+    the round-trip case: `encode(decode(code)) == code`. Pass a map explicitly
+    after inserting or deleting instructions.
+
+    Raises BytecodeError when a branch or switch targets a pc that is not an
+    instruction boundary in the map. Quietly emitting the old offset there is
+    how a rewrite pass produces a class that fails verification.
+    """
+    if not insns:
+        return b""
+    positions: list[int] = []
+    cursor = 0
+    for ins in insns:
+        if ins.op in (OP_TABLESWITCH, OP_LOOKUPSWITCH):
+            if not ins.targets:
+                raise BytecodeError(f"switch at {ins.pc} has no targets")
+            if ins.op == OP_TABLESWITCH and ins.switch_low is None:
+                raise BytecodeError(f"tableswitch at {ins.pc} lost its low key")
+            if (ins.op == OP_LOOKUPSWITCH
+                    and len(ins.switch_keys) != len(ins.targets) - 1):
+                raise BytecodeError(
+                    f"lookupswitch at {ins.pc}: {len(ins.switch_keys)} key(s) "
+                    f"for {len(ins.targets) - 1} case(s)")
+        positions.append(cursor)
+        cursor += _insn_size(ins, cursor)
+
+    if pc_map is None:
+        pc_map = {}
+        for ins, new_pc in zip(insns, positions):
+            pc_map.setdefault(ins.pc, new_pc)
+
+    def rel(target: int, new_pc: int) -> int:
+        try:
+            return pc_map[target] - new_pc
+        except KeyError:
+            raise BytecodeError(
+                f"branch target {target} is not an instruction boundary "
+                "(it was removed, or it lands inside another instruction)"
+            ) from None
+
+    out = bytearray()
+    for ins, new_pc in zip(insns, positions):
+        op = ins.op
+        out.append(op)
+        if op in _BRANCH_OPS:
+            off = rel(ins.pc + (ins.arg or 0), new_pc)
+            if op in (OP_GOTO_W, OP_JSR_W):
+                out += struct.pack(">i", off)
+            else:
+                if not -0x8000 <= off <= 0x7FFF:
+                    raise BytecodeError(
+                        f"branch at {new_pc} overflows s16 ({off}); widen it to "
+                        "goto_w before encoding")
+                out += struct.pack(">h", off)
+        elif op in (OP_TABLESWITCH, OP_LOOKUPSWITCH):
+            pad = _switch_pad(new_pc)
+            out += ins.pad if len(ins.pad) == pad else b"\x00" * pad
+            out += struct.pack(">i", rel(ins.targets[0], new_pc))
+            if op == OP_TABLESWITCH:
+                low = ins.switch_low
+                count = len(ins.targets) - 1
+                out += struct.pack(">ii", low, low + count - 1)
+                for t in ins.targets[1:]:
+                    out += struct.pack(">i", rel(t, new_pc))
+            else:
+                out += struct.pack(">i", len(ins.switch_keys))
+                for key, t in zip(ins.switch_keys, ins.targets[1:]):
+                    out += struct.pack(">ii", key, rel(t, new_pc))
+        elif op == OP_WIDE:
+            # the sub-opcode lives in `arg`, its re-stated operands in `raw`
+            out += struct.pack(">B", (ins.arg or 0) & 0xFF) + ins.raw
+        else:
+            n = _insn_size(ins, new_pc)
+            if n == 2:
+                out += struct.pack(">B", (ins.arg or 0) & 0xFF)
+            elif n == 3:
+                if op == 0x84:      # iinc: index, signed delta
+                    out += struct.pack(">Bb", (ins.arg or 0) & 0xFF,
+                                       ins.arg2 or 0)
+                else:
+                    out += struct.pack(">H", (ins.arg or 0) & 0xFFFF)
+            elif n == 4:            # multianewarray: index, dimensions
+                out += struct.pack(">HB", (ins.arg or 0) & 0xFFFF,
+                                   (ins.arg2 or 0) & 0xFF)
+            elif n == 5 and op == 0xB9:   # invokeinterface: index, count, zero
+                out += struct.pack(">HBB", (ins.arg or 0) & 0xFFFF,
+                                   (ins.arg2 or 0) & 0xFF, 0)
+            elif n == 5:            # invokedynamic: index, two zero bytes
+                out += struct.pack(">HH", (ins.arg or 0) & 0xFFFF,
+                                   (ins.arg2 or 0) & 0xFFFF)
+            # n == 1: the opcode is the whole instruction
+    return bytes(out)
 
 
 # --------------------------------------------------------------------------

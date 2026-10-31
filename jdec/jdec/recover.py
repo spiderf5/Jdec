@@ -188,6 +188,7 @@ def _bsm_static_args(entry: BM.BsmEntry):
 
 def build_spec(jar: Path, out_dir: Path, limit: int = 0):
     classes = []
+    n_unreadable = 0
     with zipfile.ZipFile(jar) as zf:
         seen = set()
         for info in zf.infolist():
@@ -196,6 +197,9 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
             try:
                 cf = BM.CF.parse(zf.read(info))
             except Exception:
+                # "0 sites" and "the class could not be read" are different
+                # answers; the caller reports the second one now
+                n_unreadable += 1
                 continue
             if cf.name in seen:
                 continue
@@ -263,7 +267,7 @@ def build_spec(jar: Path, out_dir: Path, limit: int = 0):
             n_sites += 1
     spec_path = out_dir / "recover_spec.tsv"
     spec_path.write_text("\n".join(spec) + "\n", encoding="utf-8")
-    return spec_path, n_sites, n_skip
+    return spec_path, n_sites, n_skip, n_unreadable
 
 
 def code_mask(txt: str) -> list[bool]:
@@ -428,19 +432,9 @@ def decode_plain_field(raw: str) -> str:
     return "".join(out)
 
 
-def norm_classpath(cp: str) -> str:
-    """归一化给 java 看的 classpath：反斜杠→正斜杠，MSYS 盘符 →D: 风格。
-
-    java @argfile 把反斜杠当转义符；MSYS 风格路径 java 也不认——
-    全部归一成 Windows 正斜杠形式（/d/x -> D:/x）。
-    仅在 Windows 上生效；POSIX 上传入的 classpath 本就是 java 认的
-    形式，任何改写（如把开头的 /a/b 改成 a:/b）都只会损坏它。
-    """
-    if os.name != "nt":
-        return cp
-    cp = cp.replace(chr(92), "/")
-    return re.sub(r"(^|;)/([A-Za-z0-9_])/",
-                  chr(92) + r"1" + chr(92) + r"2:/", cp)
+# Re-exported: `pool` imports this name from here, and moving it silently
+# would be a compatibility break for anything outside this package.
+from .toolchain import norm_classpath  # noqa: E402,F401
 
 
 class ReplayNotAllowed(RuntimeError):
@@ -569,7 +563,12 @@ def rewrite_sources(src_dir: Path, tsv_path: Path | None = None,
     n_files = replaced = missed = residual = 0
     lits_written: list[str] = []
     for path in sorted(src_dir.rglob("*.java")):
-        txt = path.read_text(encoding="utf-8", errors="ignore")
+        # surrogateescape keeps undecodable bytes alive and newline="" keeps
+        # the file's own line endings: errors="ignore" silently dropped bytes
+        # and write_text() flipped every LF to CRLF on Windows
+        with open(path, "r", encoding="utf-8", errors="surrogateescape",
+                  newline="") as f:
+            txt = f.read()
         if not pat.search(txt):
             continue
         n_files += 1
@@ -602,7 +601,9 @@ def rewrite_sources(src_dir: Path, tsv_path: Path | None = None,
                         if new_mask[m.start()]
                         and (m.group(2), m.group(3)) not in plain_map)
         if new != txt:
-            path.write_text(new, encoding="utf-8")
+            with open(path, "w", encoding="utf-8", errors="surrogateescape",
+                      newline="") as f:
+                f.write(new)
     # 可执行断言（编码卫生）：本次写入的字面量必须无裸控制字节——
     # 裸字节会让下游 grep/diff 判 binary 静默漏统计（实测 6902→3221）
     for lit in lits_written:
@@ -632,6 +633,7 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
     sep = ";" if os.name == "nt" else ":"
     agent_jvm_arg = ""
     native_jvm_arg = ""
+    prep_warnings: list[str] = []
     if with_stubs:
         try:
             from . import stubs
@@ -640,8 +642,10 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             agent_jar = stubs.ensure_mock_agent_jar()
             if agent_jar.is_file():
                 agent_jvm_arg = f"-javaagent:{norm_classpath(str(agent_jar))}\n"
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # silently continuing here used to turn "stubs never loaded" into
+            # "the target needs a real game instance" in the failure report
+            prep_warnings.append(f"stubs: {type(exc).__name__}: {exc}")
 
     # 提取目标 Native 库并挂载 -Djava.library.path
     try:
@@ -650,15 +654,20 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         found_libs = native_scan.extract_libs(jar, natives_dir)
         if found_libs or any(natives_dir.glob("*")):
             native_jvm_arg = f"-Djava.library.path={norm_classpath(str(natives_dir))}\n"
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        prep_warnings.append(f"natives: {type(exc).__name__}: {exc}")
+
+    for warning in prep_warnings:
+        print(f"WARNING  : replay prep: {warning}")
 
     if cp_file:
         extra = Path(cp_file).read_text(encoding="utf-8")
         cp = cp + (sep if cp and not cp.endswith(sep) else "") + extra.strip()
-    spec_path, n_sites, n_skip = build_spec(jar, out_dir, limit=limit)
+    spec_path, n_sites, n_skip, n_unreadable = build_spec(jar, out_dir, limit=limit)
     print(f"spec      : {n_sites} sites ({n_skip} skipped: args not statically "
           f"recoverable) -> {spec_path.name}")
+    if n_unreadable:
+        print(f"            ! {n_unreadable} class(es) unreadable and skipped")
 
     if not allow_exec:
         print("NOTICE    : dynamic replay EXECUTES code from the target jar "
@@ -669,17 +678,23 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
 
     src = out_dir / "RecoverDriver.java"
     src.write_text(DRIVER_JAVA, encoding="utf-8")
-    from . import stubs as SB
-    javac_cmd = SB._find_javac("javac")
-    r = subprocess.run([javac_cmd, "-d", str(out_dir), str(src)],
-                       capture_output=True, text=True, errors="replace")
+    from . import toolchain as TC
+    try:
+        r = TC.run_javac(["-d", str(out_dir), str(src)],
+                         purpose="compiling the replay driver")
+    except TC.ToolchainError as exc:
+        print(str(exc))
+        return 1
     if r.returncode != 0:
         print("javac failed:\n" + str(r.stderr or r.stdout or "")[-2000:])
         return 1
 
     if java == "java":
-        from . import engines as EN
-        java = EN.find_java() or java
+        try:
+            java = TC.require_java("running the replay driver")
+        except TC.ToolchainError as exc:
+            print(str(exc))
+            return 1
 
     classpath = sep.join([str(out_dir), cp, str(jar)]) if cp else \
         sep.join([str(out_dir), str(jar)])

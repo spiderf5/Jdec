@@ -76,6 +76,19 @@ def _class_name(cf):
     return None
 
 
+def _ldc_text(raw: bytes) -> str:
+    """Exact modified-UTF-8 decode of a constant-pool string.
+
+    These pools hold `new String(bytes, ISO_8859_1)`, so one *character* per
+    payload byte: decoding must recover the characters (later re-encoded with
+    latin-1), not a byte view. Plain utf-8 decoding was nearly right but
+    silently replaced unpaired surrogates and C0 80 with U+FFFD, which then
+    fails the latin-1 encode and turns a real pool into "not OPS".
+    """
+    from .classfile import decode_mutf8
+    return decode_mutf8(raw)
+
+
 def _brute_ldc_strings(code: bytes, cf) -> list[bytes]:
     """Probe every 0x12/0x13 byte as an LDC String constant; keep valid ones
     in bytecode order. False probes resolve to garbage/cp-miss and are
@@ -100,12 +113,7 @@ def _brute_ldc_strings(code: bytes, cf) -> list[bytes]:
             if e and e[0] == 8:
                 u = cf.cp[e[1][0]]
                 if u and u[0] == 1:
-                    # constant pool stores modified-UTF8; decode to the
-                    # char sequence (byte-oriented callers latin-1 encode)
-                    # modified-UTF8: NUL is stored as C0 80 (invalid in
-                    # standard UTF-8) — restore it before decoding
-                    raw = u[1].replace(b"\xc0\x80", b"\x00")
-                    out.append(raw.decode("utf-8", "replace"))
+                    out.append(_ldc_text(u[1]))
         i += step
     return out
 

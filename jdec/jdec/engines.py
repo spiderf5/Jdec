@@ -214,10 +214,11 @@ def ensure_procyon_bridge(engines_dir: Path, quiet: bool = False) -> bool:
         "procyon-core-0.6.0.jar", "procyon-compilertools-0.6.0.jar")
         if (engines_dir / j).is_file()]
     cp = cp_sep().join(str(engines_dir / j) for j in jars)
+    from . import toolchain as TC
     try:
-        r = subprocess.run([javac, "-nowarn", "-cp", cp, "-d", str(out_dir), str(src)],
-                           capture_output=True, text=True, errors="replace", timeout=300)
-    except Exception as exc:  # noqa: BLE001
+        r = TC.run_javac(["-nowarn", "-cp", cp, "-d", str(out_dir), str(src)],
+                         exe=javac, purpose="building the Procyon bridge")
+    except TC.ToolchainError as exc:
         if not quiet:
             print(f"  ! ProcyonBridge build failed: {exc}")
         return False
@@ -364,7 +365,7 @@ def run_engine(
     try:
         proc = subprocess.run(
             cmd, capture_output=True, timeout=timeout,
-            cwd=str(engines_dir), errors="replace",
+            cwd=str(engines_dir), text=True, errors="replace",
         )
         out, err, rc = proc.stdout, proc.stderr, proc.returncode
     except subprocess.TimeoutExpired:

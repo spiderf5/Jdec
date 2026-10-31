@@ -21,7 +21,6 @@ import concurrent.futures as cf
 import json
 import os
 import shutil
-import sys
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -31,6 +30,11 @@ from . import classfile as CF
 from . import engines as EN
 from .probe import profile_jar, JarProfile
 from .score import evaluate, better, Quality
+
+
+class EngineUnavailable(RuntimeError):
+    """No usable decompiler engine. A plain exception so callers can account
+    for the failure instead of the interpreter exiting under them."""
 
 
 @dataclass
@@ -157,20 +161,50 @@ def _case_collisions(names: list[str]) -> dict[str, list[str]]:
     return {k: sorted(v) for k, v in groups.items() if len(v) > 1}
 
 
+def _escape_segment(seg: str) -> str:
+    """Percent-encode anything a case-folding filesystem could merge.
+
+    Encoding only the simple name was not enough: `pkg/A/x` and `pkg/a/x` are
+    two classes whose *package* differs by case, so both still landed on one
+    `pkg/a/x.java` (the whole file, one class silently lost, both credited).
+    Every segment is escaped now.
+
+    ASCII uppercase uses `%41`, the documented form. A cased non-ASCII
+    character is escaped byte-wise (`Ä` -> `%C3%84`) for the same reason: a
+    case-folding filesystem merges it with its lowercase twin, and `%` can
+    never occur in a Java identifier, so `urllib.parse.unquote` still reverses
+    the path exactly.
+    """
+    out = []
+    for c in seg:
+        if c.isascii() and c.isupper():
+            out.append("%%%02X" % ord(c))
+        elif not c.isascii() and c.lower() != c:
+            out.extend("%%%02X" % b for b in c.encode("utf-8"))
+        else:
+            out.append(c)
+    return "".join(out)
+
+
 def _safe_rel(name: str) -> str:
     """A relative .java path for `name` that no case-insensitive FS can merge.
 
-    Uppercase letters are percent-encoded, which is unambiguous because `%`
-    cannot occur in a Java identifier. Only applied to classes that really do
-    collide, so the common output tree keeps its natural names.
+    Only applied to classes that really do collide, so the common output tree
+    keeps its natural names.
     """
-    parts = name.split("/")
-    out = []
-    for seg in parts[:-1]:
-        out.append(seg)
-    simple = parts[-1]
-    out.append("".join("%%%02X" % ord(c) if c.isupper() else c for c in simple))
-    return "/".join(out) + ".java"
+    return "/".join(_escape_segment(s) for s in name.split("/")) + ".java"
+
+
+def _out_rel(name: str, produced_stem: str, collisions: set[str]) -> str:
+    """Where a class's source belongs, given the stem the engine produced.
+
+    Engines inline nested classes into the outer file. Writing that file under
+    `A$B.java` duplicated the outer source and created a path whose name
+    disagrees with the class it contains, so an inlined nested class keeps the
+    outer file's path.
+    """
+    owner = name if produced_stem == name else produced_stem
+    return _safe_rel(owner) if owner in collisions else owner + ".java"
 
 
 def _iso_buckets(collisions: dict[str, list[str]]) -> list[list[str]]:
@@ -188,10 +222,6 @@ def _iso_buckets(collisions: dict[str, list[str]]) -> list[list[str]]:
         for i, name in enumerate(sorted(grp)):
             buckets[i].append(name)
     return [sorted(b) for b in buckets]
-
-
-def _produced_set(out_dir: Path) -> set[str]:
-    return {p.relative_to(out_dir).as_posix()[:-5] for p in out_dir.rglob("*.java")}
 
 
 def _is_produced(name: str, produced: set[str]) -> bool:
@@ -270,8 +300,11 @@ def decompile(
     order = list(engine_order or _default_engine_order(prof))
     order = [e for e in order if e in EN.ENGINES and EN.ENGINES[e].available(engines_dir)]
     if not order:
-        raise SystemExit("no decompiler engine available "
-                         "(run: python jdec.py engines)")
+        # A normal exception, not SystemExit: the pipeline has to be able to
+        # record this as a failed stage and still write its summary. Exiting
+        # the interpreter from library code skipped both.
+        raise EngineUnavailable("no decompiler engine available "
+                                "(run: python jdec.py engines)")
     lead = order[0]
     print(f"  engine order: {', '.join(order)}")
 
@@ -504,7 +537,10 @@ def decompile(
             if prev_truth is not None and o.rel and (src_dir / o.rel).exists():
                 prev_q = _quality_of(src_dir / o.rel, prev_truth)
             if o.status != "ok" or (prev_q is not None and better(q, prev_q)):
-                rel = _safe_rel(name) if name in colliding else (name + ".java")
+                # path.stem is what the engine actually wrote; when it inlined
+                # this nested class into its outer file, `name + ".java"`
+                # copied the whole outer source a second time under `A$B.java`
+                rel = _out_rel(name, path.stem, colliding)
                 dest = src_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, dest)
@@ -608,6 +644,21 @@ def _empty_report(input_path: Path, src_dir: Path, prof, order: list[str],
         outcomes={n: ClassOutcome(name=n, status="broken") for n in broken},
         notes=["no readable classes in input"],
     )
+
+
+def decompile_exit_code(rep: Report) -> int:
+    """0 = everything recovered, 1 = partial, 2 = nothing came out.
+
+    Same vocabulary as the pipeline. `decompile` used to return 0 no matter
+    what, so a run that produced an empty src/ looked like a success to any
+    script that only checks the exit status.
+    """
+    unresolved = rep.failed + rep.missing
+    if rep.total and unresolved >= rep.total:
+        return 2
+    if unresolved or rep.partial:
+        return 1
+    return 0
 
 
 def _quality_of(path: Path, cf) -> Quality | None:

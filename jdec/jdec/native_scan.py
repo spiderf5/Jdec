@@ -39,6 +39,9 @@ class Triage:
     libs: list[NativeLib]
     # java-side native declarations from the jar: (class, method)
     native_decl: list[tuple[str, str]] = field(default_factory=list)
+    # classes whose bytes could not be parsed: "0 native methods" is not the
+    # same answer as "we could not look"
+    unreadable_classes: int = 0
 
     def matched_static(self) -> set[str]:
         """JNI-exported symbol names that correspond to declared methods."""
@@ -108,17 +111,26 @@ def parse_pe_exports(data: bytes) -> list[str]:
         exp = _rva_to_offset(sections, export_rva)
         if exp is None:
             return []
-        (n_funcs, n_names, addr_names_rva) = struct.unpack_from("<III", data, exp + 20)[0:3]
+        # IMAGE_EXPORT_DIRECTORY: +20 NumberOfFunctions, +24 NumberOfNames,
+        # +28 AddressOfFunctions, +32 AddressOfNames. Reading three u4 from +20
+        # and calling the third "names" pointed at the *function* table, so
+        # every "export name" was machine code and JNI matching never hit.
+        (_n_funcs, n_names, _addr_funcs, addr_names_rva) = \
+            struct.unpack_from("<IIII", data, exp + 20)[0:4]
         names_off = _rva_to_offset(sections, addr_names_rva)
         if names_off is None:
             return []
         out = []
         for i in range(n_names):
             nrva = struct.unpack_from("<I", data, names_off + i * 4)[0]
+            if nrva == 0:
+                continue
             noff = _rva_to_offset(sections, nrva)
             if noff is None:
                 continue
-            end = data.find(b"\x00", noff)
+            end = data.find(b"\x00", noff, min(noff + 256, len(data)))
+            if end < 0:
+                continue
             out.append(data[noff:end].decode("ascii", "replace"))
         return out
     except (struct.error, IndexError):
@@ -670,6 +682,7 @@ def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
                 try:
                     cf = CF.parse(zf.read(info))
                 except Exception:
+                    tri.unreadable_classes += 1
                     continue
                 for m in cf.methods:
                     if m.access_flags & 0x0100:
@@ -721,6 +734,9 @@ def write_report(tri: Triage, jar_name: str, out: Path, decompiled_info: dict | 
               f"(in {len({c for c, _ in tri.native_decl})} classes)",
               f"- statically exported JNI symbols matched: {len(static)}",
               f"- dynamic-registration suspects (no Java_ export): {len(dynamic_only)}"]
+    if tri.unreadable_classes:
+        lines += [f"- **unreadable classes**: {tri.unreadable_classes} "
+                  f"(native declarations inside them are unknown)"]
     if dyn_matched:
         lines += [f"- dynamically registered JNI methods resolved: {len(dyn_matched)}"]
     lines += [""]

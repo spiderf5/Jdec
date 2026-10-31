@@ -297,7 +297,6 @@ def _decl_counts(stripped: str) -> dict[str, int]:
 def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Quality:
     floor = min_name_len if min_name_len is not None else _member_name_floor(cf)
     stripped = _strip_noise(src)
-    idents = set(_IDENT_RE.findall(stripped))
     decls = _decl_counts(stripped)
 
     # javac synthesises these for records/enums; their absence from the source
@@ -326,10 +325,14 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
 
     # constructors appear under the class's own simple name; when a nested
     # class is printed as `static class c` (name lost) or folded into its
-    # outer type, any segment of A$B$C showing up counts as recovered
+    # outer type, any segment of A$B$C showing up *as a declaration* counts.
+    # A bare `p in idents` test was useless on obfuscated input: with names
+    # like `a`, any identifier anywhere in the file made it pass.
     has_init = any(n == "<init>" for n, _ in cf.method_sigs())
     segments = [p for p in cf.name.rsplit("/", 1)[-1].split("$") if len(p) >= floor]
-    ctor_ok = (not has_init) or any(p in idents for p in segments)
+    ctor_ok = (not has_init) or bool(segments) and bool(re.search(
+        r"\b(?:class|interface|enum|record)\s+(?:" +
+        "|".join(re.escape(p) for p in segments) + r")\b", stripped))
 
     total = sum(method_cands.values()) + sum(field_cands.values())
     matched = sum(min(k, decls.get(n, 0)) for n, k in method_cands.items())

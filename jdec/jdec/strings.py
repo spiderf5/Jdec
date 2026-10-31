@@ -23,14 +23,24 @@ from . import classfile as CF
 # literals worth a second look in a game client
 _SUSPICIOUS = (
     (re.compile(r"https?://", re.I), "url"),
-    (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "ip"),
+    # octets are bounded: 999.1.1.1 is a version-looking string, not an address
+    (re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+                r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"), "ip"),
     (re.compile(r"\.exe\b|\.dll\b|\.jar\b", re.I), "binary"),
-    (re.compile(r"\\Users\\|/home/|%APPDATA%|\.minecraft", re.I), "path"),
-    (re.compile(r"hwid|machine.?id|hardware|serial|uuid", re.I), "machine-id"),
-    (re.compile(r"token|license|licence|serial|auth|password|passwd|secret", re.I),
+    # both separators: Java sources happily write "C:/Users/..." and that used
+    # to slip past a backslash-only pattern. The lookbehind keeps the scheme
+    # in "https://" from being read as a drive letter ("s:/").
+    (re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\Users\\|/home/|/root/|%APPDATA%|\.minecraft",
+                re.I), "path"),
+    (re.compile(r"hwid|machine.?id|hardware|\buuid\b", re.I), "machine-id"),
+    # word boundaries: "authlib"/"Authorization" are library/header names, not
+    # credentials, and they are everywhere in a Minecraft jar
+    (re.compile(r"\b(?:serial|token|license|licence|auth|password|passwd|secret)\b", re.I),
      "credential"),
-    (re.compile(r"Runtime|getRuntime|ProcessBuilder|cmd\.exe|powershell", re.I),
-     "exec"),
+    # "Runtime" alone matched java/lang/RuntimeException, which is one of the
+    # most common constants in any jar - require an actual exec-shaped use
+    (re.compile(r"getRuntime\s*\(|\bProcessBuilder\b|\bcmd\.exe\b|/bin/(?:ba)?sh\b|powershell",
+                re.I), "exec"),
     (re.compile(r"ClassLoader|defineClass|Unsafe", re.I), "class-loading"),
     (re.compile(r"discord(?:app)?[.]com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+", re.I), "webhook"),
     (re.compile(r"api[.]telegram[.]org/bot[0-9]+:[A-Za-z0-9_-]+", re.I), "telegram"),
@@ -42,9 +52,16 @@ _SUSPICIOUS = (
 
 
 def classify(s: str) -> list[str]:
-    """Which of the interesting categories a literal falls into."""
+    """Which of the interesting categories a literal falls into.
+
+    A label appears once even when two patterns match it: a 48-char base64 blob
+    hits both blob patterns, and a duplicated label made the pipeline's
+    `sum(tag_counts)` count one literal twice.
+    """
     out: list[str] = []
     for rx, label in _SUSPICIOUS:
+        if label in out:
+            continue
         if rx.search(s):
             out.append(label)
     return out
