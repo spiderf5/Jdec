@@ -6513,6 +6513,32 @@ def test_bvm_extract_code_id_descriptor_gate() -> None:
     check("(I...) execute still yields codeId", got_ok == 88, f"got={got_ok}")
 
 
+def test_web_class_tags() -> None:
+    """The class tree gets failed/partial/native badges from report.json."""
+    print("web: class tree tags carry quality, native count and engine")
+    from jdec import web as WB
+    tags = WB._class_tags({"classes": {
+        "a/Broken": {"status": "failed", "rel": "a/Broken.java",
+                     "engine": "cfr", "score": 0.0},
+        "a/Part": {"status": "partial", "rel": "a/Part.java",
+                   "engine": "vineflower", "score": 52.5},
+        "a/Native": {"status": "ok", "rel": "a/Native.java",
+                     "native_methods": 2},
+        "a/Clean": {"status": "ok", "rel": "a/Clean.java",
+                    "engine": "cfr"},
+        "a/NoRel": {"status": "failed"},
+    }})
+    check("failed class is tagged", tags.get("a/Broken", {}).get("status") == "failed")
+    check("partial keeps its winning engine",
+          tags.get("a/Part", {}).get("engine") == "vineflower")
+    check("native class is tagged even when status is ok",
+          tags.get("a/Native", {}).get("native") == 2)
+    check("clean class pays no badge payload", "a/Clean" not in tags)
+    check("missing rel falls back to the class name",
+          tags.get("a/NoRel", {}).get("status") == "failed")
+    check("empty report has no tags", WB._class_tags({}) == {})
+
+
 def test_web_source_path_containment() -> None:
     """Engine labels and report rels are joined into paths: keep them inside."""
     print("web: source lookup refuses engine labels and rels that escape")
@@ -7329,6 +7355,7 @@ def main() -> int:
     test_web_callgraph_error_semantics()
     test_web_workbench_features()
     test_web_source_path_containment()
+    test_web_class_tags()
     test_callgraph_and_reachability()
     test_conservative_prune()
     test_decompiler_trap_pruning()

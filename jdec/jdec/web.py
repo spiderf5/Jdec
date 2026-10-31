@@ -61,7 +61,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .sidebar { width: 320px; background: var(--bg-side); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
   .search-box { padding: 10px; border-bottom: 1px solid var(--border); }
   .search-box input { width: 100%; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; color: var(--text-main); outline: none; font-size: 0.85rem; }
-  .filter-pills { display: flex; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.1); }
+  .filter-pills { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.1); }
   .pill { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; color: var(--text-muted); font-size: 0.75rem; padding: 2px 8px; cursor: pointer; }
   .pill:hover { color: var(--text-main); }
   .pill.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
@@ -76,6 +76,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .tag-core { background: rgba(129,161,193,0.25); color: #81a1c1; border: 1px solid #81a1c1; }
   .tag-net { background: rgba(180,142,173,0.25); color: #b48ead; border: 1px solid #b48ead; }
   .tag-hook { background: rgba(143,188,187,0.25); color: #8fbcbb; border: 1px solid #8fbcbb; }
+.tag-failed { background: rgba(191,97,106,0.25); color: #bf616a; border: 1px solid #bf616a; }
+.tag-partial { background: rgba(235,203,139,0.25); color: #ebcb8b; border: 1px solid #ebcb8b; }
+.tag-native { background: rgba(180,142,173,0.25); color: #b48ead; border: 1px solid #b48ead; }
+.tag-engine { background: rgba(129,161,193,0.18); color: #81a1c1; border: 1px solid #81a1c1; }
   .tag-benign { background: rgba(163,190,140,0.25); color: #a3be8c; border: 1px solid #a3be8c; }
   .main-pane { flex: 1; display: flex; flex-direction: column; background: var(--bg-dark); overflow: hidden; }
   .tabs-bar { background: var(--bg-side); border-bottom: 1px solid var(--border); display: flex; gap: 2px; padding: 0 10px; }
@@ -139,6 +143,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <button class="pill active" id="pill-all" onclick="setTreeFilter('all')">All</button>
         <button class="pill" id="pill-tagged" onclick="setTreeFilter('tagged')">Tagged</button>
         <button class="pill" id="pill-suspect" onclick="setTreeFilter('suspect')">Suspects</button>
+        <button class="pill" id="pill-failed" onclick="setTreeFilter('failed')">Failed</button>
+        <button class="pill" id="pill-partial" onclick="setTreeFilter('partial')">Partial</button>
+        <button class="pill" id="pill-native" onclick="setTreeFilter('native')">Native</button>
       </div>
       <div class="tree-list" id="class-tree"></div>
     </div>
@@ -261,6 +268,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       selected: null,
       currentView: 'decompiled',
       annotations: {},
+      tags: {},
       treeFilter: 'all'
     };
 
@@ -283,6 +291,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         currentData.annotations = (await resAnn.json()) || {};
         currentData.classes = data.classes || [];
         currentData.names = data.names || {};
+        currentData.tags = data.tags || {};
         document.getElementById('target-summary').innerText = (data.target || 'target') + ' (' + currentData.classes.length + ' classes)';
         filterAndRenderTree();
         if (currentData.classes.length > 0) {
@@ -311,6 +320,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           const ann = currentData.annotations[c];
           return ann && (ann.tag === 'suspect' || ann.tag === 'threat');
         });
+      } else if (currentData.treeFilter === 'failed') {
+        list = list.filter(c => (currentData.tags[c] || {}).status === 'failed');
+      } else if (currentData.treeFilter === 'partial') {
+        list = list.filter(c => (currentData.tags[c] || {}).status === 'partial');
+      } else if (currentData.treeFilter === 'native') {
+        list = list.filter(c => Boolean((currentData.tags[c] || {}).native));
       }
       renderTree(list);
     }
@@ -327,6 +342,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // show the decoded name (`pkg/A`), keep the on-disk stem as the key
         label.innerText = currentData.names[cls] || cls;
         el.appendChild(label);
+
+        const auto = currentData.tags[cls];
+        if (auto) {
+          const addBadge = (label, clsName, title) => {
+            const b = document.createElement('span');
+            b.className = 'tag-badge ' + clsName;
+            b.innerText = label;
+            if (title) b.title = title;
+            el.appendChild(b);
+          };
+          if (auto.status === 'failed') addBadge('failed', 'tag-failed', 'decompilation failed');
+          else if (auto.status === 'partial') addBadge('partial', 'tag-partial',
+            'some members missing' + (auto.score != null ? ' (score ' + auto.score + ')' : ''));
+          if (auto.native) addBadge('native', 'tag-native', auto.native + ' native method(s)');
+          if (auto.engine) {
+            const EN = { cfr: 'CFR', vineflower: 'VF', procyon: 'Procyon' };
+            addBadge(EN[auto.engine] || auto.engine, 'tag-engine', 'winning engine: ' + auto.engine);
+          }
+        }
 
         const ann = currentData.annotations[cls];
         if (ann && ann.tag && TAG_MAP[ann.tag]) {
@@ -673,6 +707,38 @@ def _report_classes(data: dict) -> dict:
     return data.get("classes") or data.get("outcomes") or {}
 
 
+def _class_tags(data: dict) -> dict:
+    """Badge data for the class tree: quality status, native count, engine.
+
+    Only classes that need a badge are included; a clean class costs no
+    payload. Keys are the tree keys (`rel` minus `.java` when report.json
+    carries one, otherwise the internal class name).
+    """
+    tags = {}
+    for cls, info in _report_classes(data).items():
+        if not isinstance(info, dict):
+            continue
+        status = info.get("status")
+        native = info.get("native_methods") or 0
+        if status not in ("failed", "partial") and not native:
+            continue
+        rel = info.get("rel") or (cls + ".java")
+        key = rel[:-5] if isinstance(rel, str) and rel.endswith(".java") else rel
+        item = {}
+        if status in ("failed", "partial"):
+            item["status"] = status
+        if native:
+            item["native"] = int(native)
+        engine = info.get("engine")
+        if engine and status in ("failed", "partial"):
+            item["engine"] = str(engine)
+        score = info.get("score")
+        if isinstance(score, (int, float)):
+            item["score"] = round(float(score), 1)
+        tags[str(key)] = item
+    return tags
+
+
 def _engine_key(engine: str) -> str | None:
     """Map a UI engine label to a known engine key, or None.
 
@@ -956,8 +1022,17 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
                 if "%" in rel:
                     names[rel] = "/".join(
                         urllib.parse.unquote(seg) for seg in rel.split("/"))
+            tags = {}
+            rep_json = self.work_dir / "report.json"
+            if rep_json.is_file():
+                try:
+                    tags = _class_tags(json.loads(
+                        rep_json.read_text(encoding="utf-8")))
+                except Exception:
+                    tags = {}
             self.send_json({"target": self.work_dir.name,
-                            "classes": sorted(classes), "names": names})
+                            "classes": sorted(classes), "names": names,
+                            "tags": tags})
             return
 
         if path == "/api/annotations":
