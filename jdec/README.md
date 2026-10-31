@@ -554,17 +554,15 @@ python jdec.py deflat input.jar -o input_deflat.jar
 python jdec.py web out/
 ```
 
-- **零依赖 Web 逆向工作台**：单命令启动内置本地 Web 服务（纯标准库实现，无 node/pip 依赖），暗色专业研判界面：
-  - **类目录树与即时过滤**：支持包名/类名模糊检索，以及 `All / Tagged / Suspects` 快速标签筛选。
-  - **多引擎统一差异比对 (`Engine Diff`)**：支持在 Final (Winner)、CFR、Vineflower、Procyon 之间任意切换并排比对源码，自动生成 unified diff，精准高亮增加/删除差异行及区块变更统计。
-  - **交互式研判笔记与标记 (`Audit & Notes`)**：
-    - 支持为类添加研判标签：`benign` (正常/绿色)、`suspect` (存疑/黄色)、`threat` (威胁/红色)、`core` (核心/蓝色)、`net` (通信/紫色)、`hook` (挂钩/青色)。
-    - 侧边栏与类信息栏实时呈现高对比度彩色标签；提供富文本研判备忘录录入，支持 `Ctrl+S` 快捷保存，数据持久化存储于 `audit_notes.json`。
-  - **一键式 AI 语义重命名助手 (`AI Semantic Rename Prompt`)**：
-    - 一键提取当前类的 Mixin 注解、敏感字符串特征、参数签名及源码片段，生成结构化大模型 Prompt 弹窗；
-    - 支持一键复制至剪贴板，提示词直接引导 LLM 输出标准 ProGuard / TSV 格式的语义重命名规则。
-  - **Mixin Hook 目标注入点快速定位**：直接查看 `@Inject` / `@Overwrite` 的原版目标与参数。
-  - **威胁字符串与本地 C 伪代码内嵌查看**：无缝浏览 `strings.tsv` 恶意特征及 JNI 逆向报告。
+- **零依赖 Web 逆向工作台**：单命令启动内置本地服务（纯标准库，无 node/pip 依赖），三栏可拖拽研判界面：
+  - **虚拟化类目录树**：7k+ 类无卡顿；包名/类名模糊检索；`All / Failed / Partial / Native / Tagged` 过滤与计数；树行直接标出 failed / partial / native / 胜出引擎。
+  - **源码视图**：行号 + Java 语法高亮、Copy / Wrap；成员 Outline（类/方法/字段）点击跳行。
+  - **多引擎差异 (`Engine Diff`)**：Final (Winner)、CFR、Vineflower、Procyon 任意两两 unified diff，高亮增删并统计。
+  - **字节码视图 (`Bytecode`)**：对 `report.json` 记录的输入 jar 运行 `javap -p -c`，类名校验；自解压 exe 自动归一化。
+  - **检查器**：Overview（status / engine / score / 类字符串）、Members、Callgraph（可达性、callers/callees、入口路径）、Notes（`benign` / `suspect` / `threat` / `core` / `net` / `hook` 标签与笔记，持久化 `audit_notes.json`，`Ctrl+S` 保存）。
+  - **命令与导航**：`Ctrl+K` 类名命令面板、`#c=<class>&v=<view>` 深链、`1-4` 切视图、`F1` 快捷键；类栏/检查器宽度本地记忆。
+  - **AI 语义重命名**：提取 Mixin 注解、敏感字符串、参数签名和源码片段，生成可复制的 ProGuard 提示词。
+  - **审计仓**：Triage Report / Native Triage / Threat Strings 三栏并排；支持一键导出 IDE 工程。
 
 ```bash
 python jdec.py rename out/src/ -o llm_mappings.txt --prompt-out prompt.json
