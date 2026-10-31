@@ -2628,6 +2628,12 @@ def test_sandbox_isolation() -> None:
         rep3 = BH.compare(prefixed, SAMPLE, [pick_case], sandbox=True)
         check("a prefixed (exe) input is normalized for the sandbox",
               rep3.compared == 1, rep3.summary())
+        first = SBX.plain_jar(prefixed, root / "p1")
+        second = SBX.plain_jar(prefixed, root / "p2")
+        check("the repacked plain jar is cached across calls",
+              first == second and first.is_file(), f"{first} / {second}")
+        check("an ordinary jar is returned unchanged",
+              SBX.plain_jar(SAMPLE, root / "p3") == SAMPLE)
 
         # negative control: the same call writes when the sandbox is off
         rep2 = BH.compare(jar, jar, [case], sandbox=False)

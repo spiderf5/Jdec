@@ -144,7 +144,10 @@ public final class SandboxManager extends SecurityManager {
 '''
 
 
-def plain_jar(path: Path, dest_dir: Path) -> Path:
+_PLAIN_JARS: dict[tuple, Path] = {}
+
+
+def plain_jar(path: Path, dest_dir: Path | None = None) -> Path:
     """Return a jar URLClassLoader can open under the sandbox.
 
     A self-extracting installer starts with a native stub, so the file is a
@@ -159,13 +162,26 @@ def plain_jar(path: Path, dest_dir: Path) -> Path:
         return path
     if magic == b"PK\x03\x04":
         return path
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    out = dest_dir / (path.stem + ".jar")
-    with zipfile.ZipFile(path) as zin, \
-            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
-        for info in zin.infolist():
-            zout.writestr(info.filename, zin.read(info.filename))
+    try:
+        st = path.stat()
+    except OSError:
+        return path
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    hit = _PLAIN_JARS.get(key)
+    if hit is not None and hit.is_file():
+        return hit
+    digest = hashlib.sha1(str(key).encode("utf-8")).hexdigest()[:12]
+    cache = Path(tempfile.gettempdir()) / "jdec_plain_jars"
+    cache.mkdir(parents=True, exist_ok=True)
+    out = cache / f"{path.stem}-{digest}.jar"
+    if not out.is_file():
+        # stored, not deflated: the entries are class files and a temp copy
+        # is thrown away; recompressing 10+ MB on every compare() is waste
+        with zipfile.ZipFile(path) as zin, \
+                zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zout:
+            for info in zin.infolist():
+                zout.writestr(info.filename, zin.read(info.filename))
+    _PLAIN_JARS[key] = out
     return out
 
 
