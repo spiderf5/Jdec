@@ -747,7 +747,7 @@ def cmd_natives(args: argparse.Namespace) -> int:
     print(f"libs      : {len(tri.libs)} extracted -> {out_dir}")
     for lib in tri.libs:
         extra = f"  ({lib.error})" if lib.error else ""
-        print(f"  {lib.name}  {lib.size / 1048576:.1f} MB  {lib.format}"
+        print(f"  {lib.rel or lib.name}  {lib.size / 1048576:.1f} MB  {lib.format}"
               f"  exports={len(lib.exports)} jni={len(lib.jni_exports)}{extra}")
     print(f"declared  : {len(tri.native_decl)} native methods "
           f"in {len({c for c, _ in tri.native_decl})} classes (java side)")

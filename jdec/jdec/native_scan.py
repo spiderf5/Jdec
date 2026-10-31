@@ -12,6 +12,7 @@ Mach-O 库只提取不解析，报告里说明。
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 import zipfile
@@ -19,6 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 NATIVE_EXTS = (".dll", ".so", ".dylib", ".jnilib")
+
+# Characters Windows refuses in a path component; none of them are legal in a
+# library filename anyway, so replacing them cannot collide with a real entry.
+_UNSAFE_SEG = re.compile(r'[<>:"|?*\x00-\x1f]')
 
 
 @dataclass
@@ -32,6 +37,10 @@ class NativeLib:
     reverse_jni: list[dict] = field(default_factory=list)      # FindClass, GetMethodID, GetFieldID calls
     strings: list[str] = field(default_factory=list)
     error: str | None = None
+    # path actually used on disk (relative to the triage output directory);
+    # differs from `name` when the jar ships the same basename for several
+    # architectures, or when the entry lives in a subdirectory
+    rel: str = ""
 
 
 @dataclass
@@ -436,14 +445,47 @@ def detect_format(data: bytes) -> str:
     return "unknown"
 
 
-def extract_libs(jar: Path, out_dir: Path) -> list[tuple[str, bytes]]:
+def _safe_member_name(name: str) -> str:
+    """Turn a jar entry name into a relative path that is safe to write.
+
+    Keeps the directory structure so two libraries that share a basename
+    (`win/x64/lwjgl.dll` vs `win/x86/lwjgl.dll`) stay distinguishable, strips
+    traversal/absolute segments, and replaces characters Windows rejects.
+    """
+    segments = []
+    for seg in name.replace("\\", "/").split("/"):
+        if seg in ("", ".", ".."):
+            continue
+        segments.append(_UNSAFE_SEG.sub("_", seg))
+    return "/".join(segments) or Path(name).name
+
+
+def extract_libs(jar: Path, out_dir: Path) -> list[tuple[str, bytes, str]]:
+    """Extract native libraries, returning (jar entry, bytes, on-disk rel).
+
+    The on-disk name is de-duplicated case-insensitively: a jar that ships the
+    same basename for several architectures used to overwrite all but the last
+    file, so the report described one library and the extraction kept another.
+    """
     with zipfile.ZipFile(jar) as zf:
         found = [(n, zf.read(n)) for n in zf.namelist()
                  if n.lower().endswith(NATIVE_EXTS)]
     out_dir.mkdir(parents=True, exist_ok=True)
+    used: set[str] = set()
+    out: list[tuple[str, bytes, str]] = []
     for name, data in found:
-        (out_dir / Path(name).name).write_bytes(data)
-    return found
+        rel = _safe_member_name(name)
+        stem, suffix = os.path.splitext(rel)
+        candidate, n = rel, 2
+        while candidate.lower() in used:
+            candidate = f"{stem}~{n}{suffix}"
+            n += 1
+        used.add(candidate.lower())
+        dest = out_dir / candidate
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        out.append((name, data, candidate))
+    return out
 
 
 def scan_reverse_jni_c(c_text: str, func_name: str = "") -> list[dict]:
@@ -658,9 +700,9 @@ def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
 
     libs = extract_libs(jar, out_dir)
     tri = Triage(libs=[])
-    for name, data in libs:
+    for name, data, rel in libs:
         lib = NativeLib(name=Path(name).name, size=len(data),
-                        format=detect_format(data))
+                        format=detect_format(data), rel=rel)
         if lib.format == "PE":
             lib.exports = parse_pe_exports(data)
             lib.jni_exports = [s for s in lib.exports
@@ -697,7 +739,10 @@ def decompile_libs(tri: Triage, out_dir: Path, ghidra_home: Path,
 
     results: dict[str, dict] = {}
     for lib in tri.libs:
-        lib_path = out_dir / lib.name
+        # `rel` is where extract_libs actually wrote it; two libs can share a
+        # basename (x86/x64 builds), in which case `name` alone picks the wrong
+        # file or none at all.
+        lib_path = out_dir / (lib.rel or lib.name)
         if not lib_path.is_file():
             continue
         lib_out = out_dir / (lib_path.stem + "_decompiled")
@@ -747,7 +792,8 @@ def write_report(tri: Triage, jar_name: str, out: Path, decompiled_info: dict | 
         lines += [f"- **Ghidra GUI Script**: generated `{ghidra_script.name}` (run in Ghidra Script Manager to label functions)", ""]
 
     for lib in tri.libs:
-        lines += [f"## {lib.name} ({lib.size / 1048576:.1f} MB, {lib.format})", ""]
+        shown = lib.rel or lib.name
+        lines += [f"## {shown} ({lib.size / 1048576:.1f} MB, {lib.format})", ""]
         if lib.error:
             lines += [f"- {lib.error}", ""]
         lines += [f"- exports: {len(lib.exports)} total, "
