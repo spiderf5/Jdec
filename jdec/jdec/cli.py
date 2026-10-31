@@ -1345,7 +1345,14 @@ def _do_project_export(args: argparse.Namespace, raw: Path, out_dir: Path,
     )
     print(f"  java sources   : {stats['java_files']} file(s) ({stats['files_repaired']} repaired for recompilation)")
     print(f"  resources      : {stats['resources_copied']} file(s) extracted")
+    if stats.get("resources_skipped"):
+        print(f"  resources      : {stats['resources_skipped']} unsafe entr(y/ies) skipped")
+    if stats.get("resource_failures"):
+        print(f"  resources      : {stats['resource_failures']} entr(y/ies) failed to extract")
     print(f"  stubs bundled  : {stats['stubs_bundled']} mock library(ies)")
+    if stats.get("stubs_sources_only"):
+        print("  stubs bundled  : sources only (javac unavailable) - "
+              "vanilla symbols will not resolve")
     print("  scaffold       : build.gradle, settings.gradle, gradle.properties, README.md")
 
     if getattr(args, "compile", False):

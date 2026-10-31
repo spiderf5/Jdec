@@ -1012,17 +1012,23 @@ def export_project(
             pass
 
     # 2. Bundle runtime mocks and singletons into libs/
+    stats["stubs_sources_only"] = 0
     if with_stubs:
         stubs_jar = target_libs / "mc_stubs.jar"
         try:
             SB.build_stubs_jar(stubs_jar)
             stats["stubs_bundled"] += 1
-        except Exception:
-            # Fallback: package stub sources directly into mock jar
+        except Exception as exc:
+            # A jar full of .java files is NOT a classpath entry: javac needs
+            # .class. Keep the sources for inspection, but never report them as
+            # a bundled stub library - otherwise "stubs bundled: 1" hides the
+            # reason every vanilla symbol fails to resolve.
+            print(f"  ! stubs could not be compiled ({type(exc).__name__}: {exc}); "
+                  f"writing sources only - vanilla symbols will not resolve")
             with zipfile.ZipFile(stubs_jar, "w", zipfile.ZIP_DEFLATED) as zst:
                 for p, code in SB.STUB_SOURCES.items():
                     zst.writestr(p, code)
-            stats["stubs_bundled"] += 1
+            stats["stubs_sources_only"] = 1
 
     # 3. Copy and clean Java source files
     if src_dir and src_dir.is_dir():
@@ -1151,18 +1157,43 @@ def export_project(
             stats["java_files"] += 1
 
     # 4. Extract resources from source jar
+    #
+    # Entry names come from the analysed jar, which is exactly the untrusted
+    # input this tool exists for: `../../x` in a hostile sample must not be able
+    # to write outside the exported project. Every destination is resolved and
+    # containment-checked before the write; the rest are counted, never silent.
+    stats["resources_skipped"] = 0
+    stats["resource_failures"] = 0
     if source_jar.is_file() and source_jar.suffix.lower() == ".jar":
         try:
             with zipfile.ZipFile(source_jar) as z_in:
+                res_root = target_res.resolve()
                 for info in z_in.infolist():
                     name = info.filename
-                    if not name.endswith(".class") and not name.endswith("/"):
-                        out_res_file = target_res / name
-                        out_res_file.parent.mkdir(parents=True, exist_ok=True)
-                        out_res_file.write_bytes(z_in.read(name))
+                    if name.endswith(".class") or name.endswith("/"):
+                        continue
+                    try:
+                        dest = (target_res / name).resolve()
+                    except (OSError, ValueError):
+                        stats["resources_skipped"] += 1
+                        continue
+                    if not dest.is_relative_to(res_root):
+                        stats["resources_skipped"] += 1
+                        continue
+                    try:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(z_in.read(name))
                         stats["resources_copied"] += 1
-        except Exception:
-            pass
+                    except (OSError, zipfile.BadZipFile) as exc:
+                        stats["resource_failures"] += 1
+                        if stats["resource_failures"] == 1:
+                            print(f"  ! resource {name}: {exc}")
+        except (OSError, zipfile.BadZipFile) as exc:
+            stats["resource_failures"] += 1
+            print(f"  ! resources could not be extracted: {exc}")
+        if stats["resources_skipped"]:
+            print(f"  ! skipped {stats['resources_skipped']} unsafe jar "
+                  f"entr(y/ies) escaping src/main/resources")
 
     # 5. Generate Gradle Scaffold
     proj_name = source_jar.stem + "_project"
@@ -1234,10 +1265,12 @@ def verify_compilation(
         return CompilationReport(success=False, total_files=0, compiled_files=0, javac_output="No .java files found")
 
     total_repaired = 0
+    repair_io_failures = 0
     issues: list[CompilationIssue] = []
     output = ""
 
     for pass_num in range(max_repair_passes):
+        failures_at_pass_start = repair_io_failures
         # stubs synthesised in an earlier pass are now on disk: normalise them
         # before compiling, and re-check hiding invariants introduced by them
         if java_src_root.is_dir():
@@ -1391,8 +1424,12 @@ def verify_compilation(
                                             pass_repairs += 1
                         if modified:
                             file_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # A repair that cannot be applied must not look applied:
+                        # count it and say so once instead of a silent pass.
+                        repair_io_failures += 1
+                        if repair_io_failures == 1:
+                            print(f"  ! repair skipped {file_path.name}: {exc}")
 
             # Repair 9: Missing package / class symbol auto-synthesis (cross-package imports & same-package symbols)
             for file_path in list(files_to_repatch.keys()):
@@ -1469,10 +1506,15 @@ def verify_compilation(
                                 if stub_file not in java_files:
                                     java_files.append(stub_file)
                                 pass_repairs += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        repair_io_failures += 1
+                        if repair_io_failures == 1:
+                            print(f"  ! stub synthesis skipped {file_path.name}: {exc}")
 
             total_repaired += pass_repairs
+            if repair_io_failures > failures_at_pass_start:
+                print(f"  ! {repair_io_failures - failures_at_pass_start} repair(s) "
+                      f"could not be applied in pass {pass_num + 1}")
             if pass_repairs == 0:
                 # No automatic repairs could be applied; break loop
                 shutil.rmtree(tmp_classes, ignore_errors=True)
