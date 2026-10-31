@@ -3049,6 +3049,24 @@ def test_coverage_accounting() -> None:
     check("an identical throw is counted apart", cov["throw"] == 1, str(cov))
     check("the method with both is counted once",
           sum(1 for m in cov["missing"] if m[1] == "m") == 0, str(cov["missing"]))
+    OC = BH.CaseOutcome
+    ev = CS.evidence_sets([
+        OC(BH.Case("a/A", "v"), "OK:1", "OK:1", "same"),
+        OC(BH.Case("a/B", "t"),
+           "THROW:java.lang.IllegalStateException:x",
+           "THROW:java.lang.IllegalStateException:x", "same"),
+        OC(BH.Case("a/C", "d"),
+           "THROW:java.lang.SecurityException:sandbox: write denied",
+           "THROW:java.lang.SecurityException:sandbox: write denied", "same"),
+    ])
+    check("a returned value is value evidence",
+          ("a/A", "v") in ev["value"])
+    check("a real exception is throw evidence",
+          ("a/B", "t") in ev["throw"])
+    check("a sandbox denial is not throw evidence",
+          ("a/C", "d") in ev["denied"] and ("a/C", "d") not in ev["throw"])
+    check("denied-only is not in the no-denial set",
+          ("a/C", "d") not in (ev["value"] | ev["throw"]))
     from jdec.interp import diff as ID
     irow = ("a/A", "m", "()I")
     ithrow = ID.InterpReport(rows=[ID.MethodDiff(irow, "same", "", 1, "throw")])
@@ -3057,6 +3075,15 @@ def test_coverage_accounting() -> None:
     ivalue = ID.InterpReport(rows=[ID.MethodDiff(irow, "same", "", 1, "value")])
     check("an interpreter value is classified as a value",
           ID.outcomes(ivalue)[0].evidence == "value")
+    check("NaN equals NaN for the differential comparison",
+          ID._same_value(float("nan"), float("nan"), {}))
+    check("NaN still differs from a number",
+          not ID._same_value(float("nan"), 1.0, {}))
+    check("helpful-NPE detail is not a difference",
+          BH._normalize_throw(
+              "THROW:java.lang.NullPointerException:x because \"\"") ==
+          BH._normalize_throw(
+              "THROW:java.lang.NullPointerException:x because \"this\" is null"))
     reasons = {name: why for _cls, name, why in cov["missing"]}
     check("the filter's reason is carried through",
           reasons.get("o") == "touches java/nio/file/Files", str(reasons))
@@ -3176,12 +3203,12 @@ def test_behave_semantics() -> None:
             check("a met union gate keeps exit 0", rc == 0,
                   f"rc={rc}: {text[-200:]}")
             check("the union line names both numbers",
-                  "union     :" in text and "either engine" in text,
+                  "union        :" in text and "either engine" in text,
                   text[-400:])
             rc, text = run_union(101)
             check("an impossible union gate exits 5", rc == 5, f"rc={rc}")
             check("the union gate line prints the threshold",
-                  "union gate:" in text and "threshold 101%" in text,
+                  "union gate  :" in text and "threshold 101%" in text,
                   text[-300:])
 
 

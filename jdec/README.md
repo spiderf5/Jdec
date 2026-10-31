@@ -680,6 +680,36 @@ javac 能诚实地编出来；`Guarded` 是普通 try/catch，测试会**故意�
 连 `sample.jar` 都构建不出来时整个套件会**直接中止并说明原因**——它是其余用例的前置，
 不是可以跳过的单项（mixin / flow / collide 那三个才是能跳过的）。
 
+## 专项试用版（03）
+
+**范围**：控制流去平坦化（goto 洪水 / 不可约 goto / 异常处理器后跳）+ 常量折叠/不透明
+谓词；动态重放默认套 Java 沙箱（写入限定、无网络/进程执行/native/exit，JDK 9–23）。
+Java 级边界，不是 OS/容器级；native 由 `loadLibrary` 拒绝进入。
+
+**三个独立/试用语料**（2026-10-31，HotSpot 21，`--engine both`，沙箱开）：
+
+| 语料 | 改写方法 | verify | 稳定用例 | JVM value / throw | 解释器 value / throw | union（judged） | union value | 差异 |
+|---|---|---|---|---|---|---|---|---|
+| HMCL 3.15.2 | 411 | 3693/3693 | 960/1062 | 146 / 187 | 66 / 187 | **370/411 = 90.0%** | 165/411 = 40.1% | 0 |
+| 原版 MC 1.8.9 | 162（148 名） | 2507/2507 | 309/317 | 35 / 71 | 10 / 103 | **135/148 = 91.2%** | 39/148 = 26.4% | 0 |
+| Flux（Forge） | 8161；行为 409（406 名） | 10934 通过 / 7 回滚 / 680 未判定 | 425/739 | 66 / 106 | 57 / 267 | **357/406 = 87.9%** | 113/406 = 27.8% | 0 |
+
+Flux 的 409 是 8161 条改写清单里每 20 条取一条（按名字去重后 406）；它缺 680 个类的
+依赖，verify 不能算全量通过。MC 1.8.9 是签名 jar，输出会删掉签名文件后才能加载。
+
+**口径**：`union` 计 value + throw；`union value` 只算返回值相等的（严格口径）；
+`denied` 是被沙箱拒绝的用例，单独列出、不计 value。三者都可作为门槛：
+`--union-gate`、`--value-gate`、`--nodeny-gate`（未达退出 5）。
+
+```bash
+python jdec.py deflat X.jar -o out.jar --rewritten rw.txt --cp deps/
+python jdec.py behave X.jar out.jar --derive --from rw.txt --execute \
+    --engine both --cp deps/ --union-gate 90 --value-gate 40
+```
+
+**已知边界**：throw 是弱证据（只证明到失败点之前一致）；签名/自解压容器会被归一化；
+沙箱不支持 JDK 24+；native 不在边界内；Flux 是用户授权的试用样本，子集口径如上。
+
 ## 边界
 
 - C/C++ 原生程序不在射程内，那个只能到汇编和伪代码。

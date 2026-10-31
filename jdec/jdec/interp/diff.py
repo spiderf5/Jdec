@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from ..behave import Case, CaseOutcome
@@ -149,6 +150,11 @@ def _same_value(a, b, memo) -> bool:
     if a is None or b is None:
         return a is None and b is None
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        # NaN is a value a method can legitimately return or store; comparing
+        # it with == would make two identical runs a diff.
+        if isinstance(a, float) and isinstance(b, float) \
+                and math.isnan(a) and math.isnan(b):
+            return True
         return a == b
     if isinstance(a, str) and isinstance(b, str):
         return a == b
@@ -184,7 +190,8 @@ def _same_value(a, b, memo) -> bool:
 
 
 def _verdict(left: Outcome, right: Outcome,
-             left_heap: Heap, right_heap: Heap):
+             left_heap: Heap, right_heap: Heap,
+             compare_statics: bool = True):
     if left.kind in ("unsupported", "inconclusive") \
             or right.kind in ("unsupported", "inconclusive"):
         reason = left.reason or right.reason or "not modelled"
@@ -207,12 +214,17 @@ def _verdict(left: Outcome, right: Outcome,
     # placeholders that `_same_value` compares by source (both sides ran the
     # same initialiser, so agreement there is a real check on the clinit).
     lstat, rstat = l["statics"], r["statics"]
+    if not compare_statics:
+        # class initialisation failed on both sides: the static fields are
+        # a partial state left by the abort, not an observable contract
+        return "same", ""
     for key in set(lstat) | set(rstat):
         lv, rv = lstat.get(key), rstat.get(key)
         if is_run_opaque(lv) or is_run_opaque(rv):
             return "inconclusive", "static state depends on an unmodelled call"
         if not _same_value(lv, rv, {}):
-            return "diff", f"different static state at {key[0]}.{key[1]}"
+            return "diff", (f"different static state at {key[0]}.{key[1]} "
+                            f"({repr(lv)[:80]} vs {repr(rv)[:80]})")
     return "same", ""
 
 
@@ -268,8 +280,9 @@ def compare_method(left_jar, right_jar, row: tuple[str, str, str],
                     cls, name, desc, None, args)
                 right_out = right_it.invoke(
                     cls, name, desc, None, right_args)
-            verdict, reason = _verdict(left_out, right_out, left_heap,
-                                       right_heap)
+            verdict, reason = _verdict(
+                left_out, right_out, left_heap, right_heap,
+                compare_statics=not (init_results[0] or init_results[1]))
             evidence = ("throw" if left_out.kind == "throw" else "value")
         except Exception as exc:  # noqa: BLE001 - an engine bug is not a diff
             reasons.append(f"engine error: {type(exc).__name__}: {exc}"[:160])

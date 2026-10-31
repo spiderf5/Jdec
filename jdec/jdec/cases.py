@@ -445,6 +445,31 @@ def stabilise(cases: list[Case], jar: Path, *, java: str | None = None,
 # coverage
 # --------------------------------------------------------------------------
 
+def evidence_sets(outcomes) -> dict:
+    """Split judged methods into value, genuine-throw and sandbox-denied.
+
+    A method with any returned value is value evidence. A method whose only
+    throws are sandbox denials lands in `denied`; one with at least one real
+    exception is throw evidence. `denied` still lists methods that also have
+    a value or a real throw, for the "did the sandbox bite at all" count.
+    """
+    value: set = set()
+    throw: set = set()
+    denied: set = set()
+    for o in outcomes:
+        if not o.judged:
+            continue
+        key = (o.case.cls, o.case.method)
+        if o.evidence == "value":
+            value.add(key)
+        elif o.denied:
+            denied.add(key)
+        else:
+            throw.add(key)
+    return {"value": value, "throw": throw, "denied": denied,
+            "judged": value | throw | denied}
+
+
 def coverage(rows, outcomes, der=None, kept=None) -> dict:
     """How many of the rewritten methods actually produced a verdict.
 

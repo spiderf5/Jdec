@@ -686,6 +686,21 @@ def _driver_dir() -> Path:
 _DRIVER_CACHE: Path | None = None
 
 
+def _normalize_throw(text: str) -> str:
+    """Drop JVM-generated helpful-NPE detail from the comparison.
+
+    HotSpot appends `because "var" is null` using the local-variable table
+    and the bytecode around the failing instruction. A rewrite changes that
+    layout, so the same NPE gets a different suffix while the observable
+    behaviour (NPE at the same null receiver) is unchanged. Compare the
+    template, not the layout-dependent detail.
+    """
+    if (text.startswith("THROW:java.lang.NullPointerException:")
+            and " because " in text):
+        return text.split(" because ", 1)[0] + " because <detail>"
+    return text
+
+
 def compare(original: Path, rewritten: Path, cases: list[Case],
             *, java: str | None = None, timeout: int = 300,
             classpath=(), sandbox: bool = False) -> BehaveReport:
@@ -754,7 +769,8 @@ def compare(original: Path, rewritten: Path, cases: list[Case],
             continue
         verdict, left, right = parts[0], parts[3], parts[4]
         if verdict == "JUDGED":
-            status = "same" if left == right else "diff"
+            status = ("same" if _normalize_throw(left) ==
+                      _normalize_throw(right) else "diff")
             rep.outcomes.append(CaseOutcome(case, left, right, status))
         else:
             rep.outcomes.append(CaseOutcome(case, left, right, "unusable",

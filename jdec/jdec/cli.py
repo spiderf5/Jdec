@@ -406,38 +406,46 @@ def cmd_behave(args: argparse.Namespace) -> int:
     # what reflection can call, the interpreter what its models cover — the
     # two sets overlap only partly)
     union_failed = False
+    value_failed = False
+    nodeny_failed = False
     if rep is not None and interp_rep is not None:
-        jvm_keys = {(o.case.cls, o.case.method) for o in rep.outcomes
-                    if o.status in ("same", "diff")}
-        interp_keys = {(r.row[0], r.row[1]) for r in interp_rep.rows
-                       if r.verdict in ("same", "diff")}
+        jvm = CS.evidence_sets(rep.outcomes)
+        interp = CS.evidence_sets(ID.outcomes(interp_rep))
+        jvm_keys = jvm["judged"]
+        interp_keys = interp["judged"]
         total = len({(r.row[0], r.row[1]) for r in interp_rep.rows}) \
             if rows else len(jvm_keys | interp_keys)
         union = len(jvm_keys | interp_keys)
-        line = f"union     : {union}/{total} method(s) judged by either engine"
+        nodeny = len((jvm["value"] | jvm["throw"]) | interp["judged"])
+        value_union = len(jvm["value"] | interp["value"])
+        denied_any = jvm["denied"]
+        denied_only = denied_any - (jvm["value"] | jvm["throw"])
+        pct = pct_n = pct_v = 0.0
         if total:
             pct = 100.0 * union / total
-            line += f" -> {pct:.1f}%"
-        print(line)
-        jvm_value = {(o.case.cls, o.case.method) for o in rep.outcomes
-                     if o.evidence == "value"}
-        interp_value = {(r.row[0], r.row[1]) for r in interp_rep.rows
-                        if r.verdict in ("same", "diff")
-                        and r.evidence == "value"}
-        value_union = len(jvm_value | interp_value)
-        if total:
-            print(f"union value: {value_union}/{total} method(s) with a "
-                  f"returned value on either engine -> "
-                  f"{100.0 * value_union / total:.1f}%")
-        denied_any = {(o.case.cls, o.case.method) for o in rep.outcomes
-                      if o.denied}
+            pct_n = 100.0 * nodeny / total
+            pct_v = 100.0 * value_union / total
+        print(f"union        : {union}/{total} judged by either engine "
+              f"(value+throw) -> {pct:.1f}%")
+        print(f"union nodeny : {nodeny}/{total} without sandbox-denied-only "
+              f"methods -> {pct_n:.1f}%")
+        print(f"union value  : {value_union}/{total} with a returned value "
+              f"-> {pct_v:.1f}%")
         if denied_any:
-            print(f"denied    : {len(denied_any)} method(s) have at least one "
-                  f"sandbox-denied case (not value evidence)")
+            print(f"denied       : {len(denied_any)} method(s) hit the sandbox "
+                  f"at least once ({len(denied_only)} denied-only)")
         if args.union_gate is not None and total:
-            print(f"union gate: {union}/{total} = {pct:.1f}% "
+            print(f"union gate  : {union}/{total} = {pct:.1f}% "
                   f"(threshold {args.union_gate:.0f}%)")
             union_failed = pct + 1e-9 < args.union_gate
+        if args.nodeny_gate is not None and total:
+            print(f"nodeny gate : {nodeny}/{total} = {pct_n:.1f}% "
+                  f"(threshold {args.nodeny_gate:.0f}%)")
+            nodeny_failed = pct_n + 1e-9 < args.nodeny_gate
+        if args.value_gate is not None and total:
+            print(f"value gate  : {value_union}/{total} = {pct_v:.1f}% "
+                  f"(threshold {args.value_gate:.0f}%)")
+            value_failed = pct_v + 1e-9 < args.value_gate
 
     if args.json and rep is not None:
         rep.write_json(Path(args.json))
@@ -453,7 +461,8 @@ def cmd_behave(args: argparse.Namespace) -> int:
         (interp_rep is not None and interp_rep.judged)
     if not judged_any:
         return 4
-    return 5 if (gate_failed or union_failed) else 0
+    return 5 if (gate_failed or union_failed or nodeny_failed
+                 or value_failed) else 0
 
 
 def cmd_engines(args: argparse.Namespace) -> int:
@@ -1466,6 +1475,12 @@ def build_parser() -> argparse.ArgumentParser:
     sb.add_argument("--gate", type=float, default=None, metavar="PCT",
                     help="fail (exit 5) when fewer than PCT%% of the invokable "
                          "methods got a verdict")
+    sb.add_argument("--value-gate", type=float, default=None, metavar="PCT",
+                    help="fail (exit 5) below PCT%% value-only union coverage "
+                         "(returned-value evidence only)")
+    sb.add_argument("--nodeny-gate", type=float, default=None, metavar="PCT",
+                    help="fail (exit 5) below PCT%% after excluding methods "
+                         "whose only evidence is a sandbox denial")
     sb.add_argument("--show", type=int, default=10)
     sb.add_argument("--json", default=None)
     sb.set_defaults(func=cmd_behave)
