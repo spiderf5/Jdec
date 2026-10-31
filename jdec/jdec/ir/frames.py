@@ -170,7 +170,8 @@ def decode(cf, payload: bytes, member=None, max_locals: int = 0) -> dict:
         tag = payload[o]
         o += 1
         if tag <= 63:
-            delta, locals_, stack = tag, locals_, []
+            # same_frame: locals are inherited unchanged from the previous frame
+            delta, stack = tag, []
         elif tag <= 127:
             delta = tag - 64
             v, o = _read_vtype(cf, payload, o)
