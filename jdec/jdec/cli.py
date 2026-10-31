@@ -292,8 +292,11 @@ def cmd_behave(args: argparse.Namespace) -> int:
             except (OSError, ValueError) as exc:
                 print(f"cannot read rewritten list: {exc}")
                 return 2
-        der = CS.derive(orig, rows, per_param=args.per_param)
-        print(f"derive    : {der.summary()}")
+        der = CS.derive(orig, rows, per_param=args.per_param,
+                        sandbox=sandbox)
+        note = (" [sandbox: confined IO/network methods are included]"
+                if sandbox else "")
+        print(f"derive    : {der.summary()}{note}")
         for ex in der.examples:
             print(f"  - {ex}")
         cases = cases + der.cases
@@ -1056,6 +1059,9 @@ def cmd_deflat(args: argparse.Namespace) -> int:
             print("note      : StackMapTables kept as they were. These rewrites "
                   "are length-preserving, so the frames still describe the right "
                   "offsets; the verifier above loaded every class.")
+    if stats.get("signatures_removed"):
+        print(f"note      : removed {stats['signatures_removed']} jar signature "
+              f"file(s); rewritten entries no longer match the original signature")
     failed = stats.get("failed_classes") or []
     if failed:
         print(f"warning   : {len(failed)} class(es) could not be parsed or "

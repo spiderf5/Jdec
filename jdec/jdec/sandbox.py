@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 from . import engines as EN
@@ -141,6 +142,31 @@ public final class SandboxManager extends SecurityManager {
     }
 }
 '''
+
+
+def plain_jar(path: Path, dest_dir: Path) -> Path:
+    """Return a jar URLClassLoader can open under the sandbox.
+
+    A self-extracting installer starts with a native stub, so the file is a
+    valid zip for `zipfile`/`JarFile` but URLClassPath cannot resolve classes
+    from it once a SecurityManager is installed. Repack the entries into a
+    plain jar; an ordinary jar is returned unchanged.
+    """
+    path = Path(path)
+    try:
+        magic = path.open("rb").read(4)
+    except OSError:
+        return path
+    if magic == b"PK\x03\x04":
+        return path
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out = dest_dir / (path.stem + ".jar")
+    with zipfile.ZipFile(path) as zin, \
+            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            zout.writestr(info.filename, zin.read(info.filename))
+    return out
 
 
 class SandboxError(TC.ToolchainError):

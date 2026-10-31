@@ -1045,6 +1045,18 @@ def _is_class_entry(name: str) -> bool:
     return name.endswith(".class") and not name.startswith("META-INF/")
 
 
+def _is_signature_entry(name: str) -> bool:
+    """Jar signature files: stale as soon as one entry is rewritten."""
+    upper = name.upper()
+    if not upper.startswith("META-INF/"):
+        return False
+    rest = upper[len("META-INF/"):]
+    if "/" in rest:
+        return False
+    return (rest.endswith((".SF", ".RSA", ".DSA", ".EC"))
+            or rest.startswith("SIG-"))
+
+
 def _parallel_deflat(jar_in: Path, jar_out: Path, classpath, check_reasons: bool,
                      jobs: int, stats: dict) -> bool:
     """Rewrite classes in worker processes; False means "fall back to serial".
@@ -1064,7 +1076,9 @@ def _parallel_deflat(jar_in: Path, jar_out: Path, classpath, check_reasons: bool
         from math import ceil
 
         with zipfile.ZipFile(jar_in) as zin:
-            entries = [(n, zin.read(n)) for n in zin.namelist()]
+            raw_entries = [(n, zin.read(n)) for n in zin.namelist()]
+        signatures = sum(1 for n, _d in raw_entries if _is_signature_entry(n))
+        entries = [(n, d) for n, d in raw_entries if not _is_signature_entry(n)]
         class_items = [(n, d) for n, d in entries if _is_class_entry(n)]
         if auto and len(class_items) < 400:
             return False
@@ -1111,6 +1125,7 @@ def _parallel_deflat(jar_in: Path, jar_out: Path, classpath, check_reasons: bool
         stats["reason_refused"].extend(refused)
         stats["failed_classes"].extend(failed)
         stats["unresolved_types"] = unresolved
+        stats["signatures_removed"] = signatures
         return True
     except Exception:  # noqa: BLE001 - any pool problem falls back to serial
         try:
@@ -1158,6 +1173,7 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                    "methods_reverted": 0, "frames_rebuilt": 0,
                    "unresolved_types": [],
                    "failed_classes": [],
+                   "signatures_removed": 0,
                    "rewritten": [], "reason_refused": []}
     jar_out.parent.mkdir(parents=True, exist_ok=True)
     if ir_rewrite and jobs != 1 and _parallel_deflat(
@@ -1177,6 +1193,9 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
         stats["unresolved_types"] = sorted(hier.unresolved)
     with zipfile.ZipFile(jar_in) as zin, zipfile.ZipFile(jar_out, "w", zipfile.ZIP_DEFLATED) as zout:
         for name in zin.namelist():
+            if _is_signature_entry(name):
+                stats["signatures_removed"] += 1
+                continue
             data = zin.read(name)
             if name.endswith(".class") and not name.startswith("META-INF/"):
                 stats["classes"] += 1

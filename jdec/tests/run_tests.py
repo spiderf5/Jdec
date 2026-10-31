@@ -2619,6 +2619,16 @@ def test_sandbox_isolation() -> None:
         check("both sides were denied identically",
               all(o.status == "same" for o in rep.outcomes), str(rep.outcomes))
 
+        # a self-extracting exe is a zip with a native prefix; URLClassPath
+        # cannot resolve classes from it under a SecurityManager
+        prefixed = root / "sample.exe"
+        prefixed.write_bytes(b"MZ" + b"\0" * 64 + SAMPLE.read_bytes())
+        pick_case = BH.Case("demo/legacy/OldStyle", "pick",
+                            ("java.lang.String",), ("hello",))
+        rep3 = BH.compare(prefixed, SAMPLE, [pick_case], sandbox=True)
+        check("a prefixed (exe) input is normalized for the sandbox",
+              rep3.compared == 1, rep3.summary())
+
         # negative control: the same call writes when the sandbox is off
         rep2 = BH.compare(jar, jar, [case], sandbox=False)
         check("without the sandbox the write happens", outside.exists(),
@@ -2940,6 +2950,12 @@ def test_missing_dependency_gate() -> None:
         _sh.rmtree(td, ignore_errors=True)
 
 
+def _looks_like_signature(name: str) -> bool:
+    upper = name.upper()
+    return upper.startswith("META-INF/") and upper.endswith(
+        (".SF", ".RSA", ".DSA", ".EC"))
+
+
 def test_deflat_failure_accounting() -> None:
     """A class that cannot be parsed must be named, not silently dropped.
 
@@ -2960,6 +2976,24 @@ def test_deflat_failure_accounting() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "sample_deflat.jar"
         stats = DF.deflat_jar(SAMPLE, out, verify_output=False)
+        # a signed jar: rewritten entries invalidate the signature, so the
+        # stale signature files must not survive into the output
+        signed = Path(td) / "signed.jar"
+        with zipfile.ZipFile(SAMPLE) as zin, \
+                zipfile.ZipFile(signed, "w") as zout:
+            for name in zin.namelist():
+                zout.writestr(name, zin.read(name))
+            zout.writestr("META-INF/FAKE.SF", b"Signature-Version: 1.0\n")
+            zout.writestr("META-INF/FAKE.RSA", b"fake")
+        signed_out = Path(td) / "signed_deflat.jar"
+        signed_stats = DF.deflat_jar(signed, signed_out, verify_output=False)
+        check("stale jar signatures are counted",
+              signed_stats["signatures_removed"] == 2,
+              str(signed_stats["signatures_removed"]))
+        with zipfile.ZipFile(signed_out) as z:
+            left = [n for n in z.namelist() if _looks_like_signature(n)]
+        check("stale jar signatures are gone", not left, str(left))
+
         check("the broken fixture is named in failed_classes",
               any("Truncated" in x for x in stats.get("failed_classes") or []),
               str(stats.get("failed_classes")))
@@ -3181,6 +3215,54 @@ def test_case_derivation() -> None:
     check("a method that starts a thread is not derived",
           not der2.cases and "java/lang/Thread" in " ".join(der2.dropped),
           der2.summary())
+
+    if JAVAC is not None:
+        sbx_td = Path(tempfile.mkdtemp(prefix="jdec_derive_sbx_"))
+        try:
+            sbx_cls = _compile_java(sbx_td, {
+                "demo/dsbx/Io.java": """
+                    package demo.dsbx;
+                    public class Io {
+                        public static int write() {
+                            try {
+                                java.nio.file.Files.writeString(
+                                    java.nio.file.Path.of("out.txt"), "x");
+                                return 1;
+                            } catch (Exception e) { return 0; }
+                        }
+                        public static int net() {
+                            try {
+                                new java.net.Socket("127.0.0.1", 9).close();
+                                return 1;
+                            } catch (Exception e) { return 0; }
+                        }
+                        public static long clock() {
+                            return System.currentTimeMillis();
+                        }
+                    }
+                """,
+            })
+            sbx_jar = _jar_from(sbx_cls, sbx_td / "io.jar")
+            sbx_rows = [("demo/dsbx/Io", "write", "()I"),
+                        ("demo/dsbx/Io", "net", "()I"),
+                        ("demo/dsbx/Io", "clock", "()J")]
+            plain = CS.derive(sbx_jar, sbx_rows)
+            check("without a sandbox file IO is not derived",
+                  not any(c.method == "write" for c in plain.cases),
+                  plain.summary())
+            sand = CS.derive(sbx_jar, sbx_rows, sandbox=True)
+            check("with a sandbox file IO is derived",
+                  any(c.method == "write" for c in sand.cases),
+                  sand.summary())
+            check("with a sandbox network is derived",
+                  any(c.method == "net" for c in sand.cases),
+                  sand.summary())
+            check("the clock stays excluded even under a sandbox",
+                  ("demo/dsbx/Io", "clock") in sand.reason_of,
+                  sand.summary())
+        finally:
+            import shutil as _sh
+            _sh.rmtree(sbx_td, ignore_errors=True)
 
     kept, why = CS.stabilise(der.cases, SAMPLE)
     check("the stable baseline keeps the pure string cases", len(kept) == 4,

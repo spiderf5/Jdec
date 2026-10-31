@@ -145,6 +145,9 @@ python jdec.py verify rewritten.jar --cp original.jar --allow-unresolved
 改写默认按类并行：`-j N`（默认 auto，最多 4 个 worker；`-j 1` 关闭）。
 HMCL 3693 类实测 6.6s → 3.9s（4 worker），改写数、回滚数与产物字节完全一致。
 
+签名 jar：任意一个类被改写都会让原签名失效。输出会删掉
+`META-INF/*.SF|*.RSA|*.DSA|*.EC` 并在 CLI 打 note（`signatures_removed`），
+否则 JVM 加载改写后的类会报 `SHA-256 digest error`。
 实测（2026-10-30，HotSpot 21）。**带依赖**这一列是把目标自己的库放上 classpath
 （`--cp`）之后的结果——依赖不全时"0 拒绝"是有条件的，见下：
 
@@ -213,6 +216,8 @@ demo/legacy/OldStyle|pick|java.lang.String|
   `loadLibrary` 默认拒绝，所以它进不了这层边界。`recover` / `pool harvest` 同样
   默认开启同一沙箱。沙箱下 mock agent 不注入（JPLIS 无法在 SecurityManager 下
   attach），stub 类仍在 classpath；需要该 agent 的目标用 `--no-sandbox`。
+- 沙箱下 `--derive` 会把只碰受控 API 的方法也纳入：文件、网络、进程、并发、线程。
+  两侧被同样拒绝的异常算证据，但计入 throw，不计入 value。
 
 退出码：0 全部一致 / 1 有差异 / 2 参数错 / 3 未授权执行 / **4 没有结论**
 （`PARTIAL`：部分用例调不起来；`NO VERDICT`：一条都没判定）/ **5 覆盖率门槛未达**。

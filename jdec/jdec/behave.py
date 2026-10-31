@@ -711,6 +711,8 @@ def compare(original: Path, rewritten: Path, cases: list[Case],
             jvm_opts = SBX.jvm_args(Path(td) / "sandbox", java=exe,
                                     drivers=(DRIVER_CLASS,))
             cp_entries.append(SBX.classpath_entry(java=exe))
+            original = SBX.plain_jar(Path(original), Path(td) / "input")
+            rewritten = SBX.plain_jar(Path(rewritten), Path(td) / "input")
         cp = TC.path_sep().join(str(x) for x in cp_entries)
         cmd = [exe, *jvm_opts, "-cp", cp, DRIVER_CLASS, str(spec),
                str(Path(original).resolve()), str(Path(rewritten).resolve())]

@@ -721,12 +721,19 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         print(f"sandbox : java-level isolation under {sandbox_root} "
               f"(writes confined; network/exec/native/exit denied)")
 
+    target_for_cp = jar
+    if sandbox:
+        from . import sandbox as SBX
+        try:
+            target_for_cp = SBX.plain_jar(jar, out_dir / "_sandbox_input")
+        except Exception:  # noqa: BLE001 - keep the original path
+            target_for_cp = jar
     entries = [str(out_dir)]
     if sandbox_entry is not None:
         entries.append(str(sandbox_entry))
     if cp:
         entries.append(cp)
-    entries.append(str(jar))
+    entries.append(str(target_for_cp))
     classpath = sep.join(entries)
     classpath = norm_classpath(classpath)
     # Windows 命令行 ~32K 上限装不下几百个库的 classpath，用 @argfile

@@ -83,6 +83,20 @@ _DENY_CLASS_PREFIX = (
 
 # Calling *these* is the problem, not mentioning the class: `System.out` and
 # `System.arraycopy` are everywhere, `System.nanoTime` is not.
+# A sandbox turns these from "unobservable" into "observable": writes stay
+# inside the run root, connections and processes are refused. The method still
+# produces evidence - a value, or the same SecurityException on both sides.
+_SANDBOX_CONFINED = (
+    "java/io/File", "java/io/RandomAccessFile", "java/io/FileDescriptor",
+    "java/nio/file/Files", "java/nio/channels/",
+    "java/net/", "javax/net/",
+    "java/lang/ProcessBuilder", "java/lang/Runtime",
+    # threads and concurrency are allowed by the sandbox; unstable cases
+    # are dropped by the two-run baseline, blocked ones by the per-case
+    # timeout
+    "java/util/concurrent/", "java/lang/Thread", "java/util/Date",
+)
+
 _DENY_MEMBER = {
     ("java/lang/System", "currentTimeMillis"), ("java/lang/System", "nanoTime"),
     ("java/lang/System", "identityHashCode"), ("java/lang/System", "exit"),
@@ -271,7 +285,7 @@ def _resolve(cf, idx: int) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _method_denied(cf, member) -> str | None:
+def _method_denied(cf, member, sandbox: bool = False) -> str | None:
     """Does *this method* read the clock, use a RNG, start threads or do IO?
 
     Per method on purpose: a class is not tainted by its siblings. Resolving the
@@ -288,9 +302,11 @@ def _method_denied(cf, member) -> str | None:
             continue
         cls, name = _resolve(cf, ins.arg)
         if cls:
-            for prefix in _DENY_CLASS_PREFIX:
-                if cls.startswith(prefix):
-                    return f"touches {cls}"
+            confined = sandbox and cls.startswith(_SANDBOX_CONFINED)
+            if not confined:
+                for prefix in _DENY_CLASS_PREFIX:
+                    if cls.startswith(prefix):
+                        return f"touches {cls}"
         if cls and name and (cls, name) in _DENY_MEMBER:
             return f"calls {cls}.{name}"
     return None
@@ -330,7 +346,8 @@ def _cases_for(cls: str, name: str, params: list[str], per_param: int) -> list[C
     return out
 
 
-def derive(jar: Path, rewritten=None, *, per_param: int = 4) -> Derivation:
+def derive(jar: Path, rewritten=None, *, per_param: int = 4,
+           sandbox: bool = False) -> Derivation:
     """Generate cases for `rewritten` methods (or every method when None).
 
     `rewritten` is `[(internal/class/Name, method, descriptor)]`, exactly what
@@ -369,7 +386,7 @@ def derive(jar: Path, rewritten=None, *, per_param: int = 4) -> Derivation:
                 if reason:
                     der.note(reason, f"{cls}.{name}", key=(cls, name))
                     continue
-                denied = _method_denied(cf, member)
+                denied = _method_denied(cf, member, sandbox=sandbox)
                 if denied:
                     der.note(denied, f"{cls}.{name}", key=(cls, name))
                     continue
