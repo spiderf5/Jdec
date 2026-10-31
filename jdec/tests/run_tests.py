@@ -1149,6 +1149,40 @@ def test_classfile_parser_survives_mutation() -> None:
           not unexpected, "; ".join(unexpected[:3]))
 
 
+def test_deflat_parallel_matches_serial() -> None:
+    """The worker pool must not change a byte or the accounting."""
+    print("deflat: parallel rewriting matches the serial result")
+    from jdec import deflat as DF
+
+    with tempfile.TemporaryDirectory() as td:
+        serial = DF.deflat_jar(SAMPLE, Path(td) / "serial.jar",
+                               verify_output=False, jobs=1)
+        par = DF.deflat_jar(SAMPLE, Path(td) / "par.jar",
+                            verify_output=False, jobs=2)
+
+        with zipfile.ZipFile(Path(td) / "serial.jar") as a, \
+                zipfile.ZipFile(Path(td) / "par.jar") as b:
+            names_a = a.namelist()
+            names_b = b.namelist()
+            same = names_a == names_b and all(
+                a.read(n) == b.read(n) for n in names_a)
+        check("the entry order and every class byte are identical", same,
+              f"{len(names_a)} vs {len(names_b)} entries")
+        check("the rewrite count is identical",
+              serial["methods_unflattened"] == par["methods_unflattened"],
+              f"{serial['methods_unflattened']} vs {par['methods_unflattened']}")
+        check("the rewritten list is identical",
+              serial["rewritten"] == par["rewritten"],
+              f"{len(serial['rewritten'])} vs {len(par['rewritten'])}")
+        check("unreadable-class accounting is identical",
+              serial["failed_classes"] == par["failed_classes"],
+              str(par["failed_classes"]))
+        check("the missing-type set is identical",
+              serial["unresolved_types"] == par["unresolved_types"],
+              f"{len(serial['unresolved_types'])} vs "
+              f"{len(par['unresolved_types'])}")
+
+
 def test_deflat_output_loads() -> None:
     """Both deflat modes must ship loadable classes, with different trade-offs."""
     print("deflat: default keeps frames, --strip-frames keeps rewrites straight-line")
@@ -7071,6 +7105,7 @@ def main() -> int:
     test_toolchain_single_entry()
     test_verify_gate()
     test_deflat_output_loads()
+    test_deflat_parallel_matches_serial()
     test_behaviour_is_preserved()
     test_sandbox_isolation()
     test_frame_generation()

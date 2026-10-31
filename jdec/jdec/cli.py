@@ -999,7 +999,8 @@ def cmd_deflat(args: argparse.Namespace) -> int:
                               strip_frames=args.strip_frames,
                               recompute_frames=args.recompute_frames,
                               ir_rewrite=ir, classpath=args.cp or (),
-                              check_reasons=not args.no_reasons)
+                              check_reasons=not args.no_reasons,
+                              jobs=getattr(args, "jobs", 1) or 0)
     if stats.get("frames_rebuilt"):
         print(f"frames    : {stats['frames_rebuilt']} rewritten method(s) got a "
               f"recomputed StackMapTable")
@@ -1695,6 +1696,10 @@ def build_parser() -> argparse.ArgumentParser:
     sdef.add_argument("input", help="target jar to de-flatten")
     sdef.add_argument("-o", "--output", default=None,
                       help="output jar path (default: <input>_deflat.jar)")
+    sdef.add_argument("-j", "--jobs", type=int, default=0, metavar="N",
+                      help="rewrite classes in N worker processes (default: "
+                           "auto; 1 disables). The process pool is only "
+                           "used for the instruction-level path")
     sdef.add_argument("--no-verify", action="store_true",
                       help="skip the -Xverify:all gate (the output is then not "
                            "guaranteed to load)")

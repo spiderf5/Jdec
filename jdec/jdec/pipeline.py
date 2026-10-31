@@ -380,7 +380,7 @@ def run_pipeline(
             # 用户的 cp 里放着这个 jar 依赖的库(如 JavaFX)。帧合并需要真实
             # 父类,否则每次与库类型相遇都会退化成 Object,验证器随后拒绝。
             stats = DF.deflat_jar(current_jar, preclean_jar,
-                                  classpath=_split_cp(cp))
+                                  classpath=_split_cp(cp), jobs=jobs)
             unflattened_count = stats.get("methods_unflattened", 0)
             status, detail = deflat_stage_status(stats)
             v_note = detail.split("; ", 1)[1] if "; " in detail else ""

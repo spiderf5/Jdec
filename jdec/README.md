@@ -142,6 +142,9 @@ python jdec.py verify rewritten.jar --cp original.jar --allow-unresolved
 | `--byte-patch` | 旧的字节补丁：等长 NOP 填充，保留原 StackMapTable | 对照 / 回退 |
 | `--strip-frames` | 剥帧，不保证可加载 | `auto` 喂给反编译器的中间产物 |
 
+改写默认按类并行：`-j N`（默认 auto，最多 4 个 worker；`-j 1` 关闭）。
+HMCL 3693 类实测 6.6s → 3.9s（4 worker），改写数、回滚数与产物字节完全一致。
+
 实测（2026-10-30，HotSpot 21）。**带依赖**这一列是把目标自己的库放上 classpath
 （`--cp`）之后的结果——依赖不全时"0 拒绝"是有条件的，见下：
 

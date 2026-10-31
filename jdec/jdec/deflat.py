@@ -22,6 +22,7 @@ This module cleans and optimizes method bytecode in place:
 from __future__ import annotations
 
 import collections
+import os
 import struct
 from pathlib import Path
 import zipfile
@@ -995,12 +996,138 @@ def _rewrite_class_ir(cf: CF.ClassFile, hier,
     return edits, reverted
 
 
+# --- parallel rewriting ----------------------------------------------------
+# Workers parse and rewrite whole classes; the parent owns the zip and the
+# entry order. Each worker builds its own Hierarchy: the spawn context cannot
+# share the parent's, and one parse per worker is cheaper than shipping the
+# graph. The parent takes the missing-dependency set from a worker instead of
+# building a third copy.
+
+_WORKER: dict = {}
+
+
+def _deflat_worker_init(jar_in: str, classpath, check_reasons: bool) -> None:
+    hier = None
+    try:
+        from .ir import hierarchy as _hierarchy
+        hier = _hierarchy.Hierarchy.from_jar(
+            Path(jar_in), extra=[Path(c) for c in classpath])
+    except Exception:  # noqa: BLE001 - Object fallback still works
+        hier = None
+    _WORKER["hier"] = hier
+    _WORKER["check"] = check_reasons
+    _WORKER["unresolved"] = sorted(hier.unresolved) if hier is not None else []
+
+
+def _deflat_one(item):
+    name, data = item
+    try:
+        cf = CF.parse(data)
+        rewritten: list = []
+        refused: list = []
+        edits, reverted = _rewrite_class_ir(
+            cf, _WORKER.get("hier"), rewritten, refused,
+            _WORKER.get("check", True))
+        if edits:
+            data = cf.serialize()
+        return (name, data, edits, reverted, rewritten, refused, None)
+    except Exception as exc:  # noqa: BLE001 - one bad class only
+        return (name, data, 0, 0, [], [],
+                f"{name}: {type(exc).__name__}: {exc}")
+
+
+def _deflat_chunk(items):
+    return ([_deflat_one(it) for it in items],
+            list(_WORKER.get("unresolved") or []))
+
+
+def _is_class_entry(name: str) -> bool:
+    return name.endswith(".class") and not name.startswith("META-INF/")
+
+
+def _parallel_deflat(jar_in: Path, jar_out: Path, classpath, check_reasons: bool,
+                     jobs: int, stats: dict) -> bool:
+    """Rewrite classes in worker processes; False means "fall back to serial".
+
+    The output is written to a side file and merged into `stats` only after
+    every worker returned, so a failed pool leaves both untouched.
+    """
+    auto = jobs <= 0
+    if auto:
+        jobs = min(4, os.cpu_count() or 1)
+    if jobs <= 1:
+        return False
+    tmp = jar_out.with_name(jar_out.name + ".parallel")
+    try:
+        import concurrent.futures as _cf
+        import multiprocessing as _mp
+        from math import ceil
+
+        with zipfile.ZipFile(jar_in) as zin:
+            entries = [(n, zin.read(n)) for n in zin.namelist()]
+        class_items = [(n, d) for n, d in entries if _is_class_entry(n)]
+        if auto and len(class_items) < 400:
+            return False
+        per = max(1, min(200, ceil(len(class_items) / max(1, jobs * 4))))
+        chunks = [class_items[i:i + per]
+                  for i in range(0, len(class_items), per)]
+        ctx = _mp.get_context("spawn")
+        with _cf.ProcessPoolExecutor(
+                max_workers=jobs, mp_context=ctx,
+                initializer=_deflat_worker_init,
+                initargs=(str(jar_in), tuple(str(c) for c in classpath),
+                          check_reasons)) as ex:
+            results = list(ex.map(_deflat_chunk, chunks))
+        rows = [row for chunk_rows, _u in results for row in chunk_rows]
+        if len(rows) != len(class_items):
+            return False
+        unresolved = next((u for _r, u in results if u), [])
+
+        edits = reverted = 0
+        rewritten: list = []
+        refused: list = []
+        failed: list = []
+        it = iter(rows)
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name, data in entries:
+                if _is_class_entry(name):
+                    _n, ndata, e, r, rw, rf, fail = next(it)
+                    edits += e
+                    reverted += r
+                    rewritten.extend(rw)
+                    refused.extend(rf)
+                    if fail:
+                        failed.append(fail)
+                    zout.writestr(name, ndata)
+                else:
+                    zout.writestr(name, data)
+        os.replace(tmp, jar_out)
+        stats["classes"] = len(class_items)
+        stats["methods_unflattened"] += edits
+        stats["traps_pruned"] += edits
+        stats["frames_rebuilt"] += edits
+        stats["methods_reverted"] += reverted
+        stats["rewritten"].extend(rewritten)
+        stats["reason_refused"].extend(refused)
+        stats["failed_classes"].extend(failed)
+        stats["unresolved_types"] = unresolved
+        return True
+    except Exception:  # noqa: BLE001 - any pool problem falls back to serial
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                strip_frames: bool = False,
                recompute_frames: bool = False,
                ir_rewrite: bool = True,
                classpath=(),
-               check_reasons: bool = True) -> dict:
+               check_reasons: bool = True,
+               jobs: int = 1) -> dict:
     """Rewrite flattened control flow and prune bytecode traps across an entire jar.
 
     The default path works on the instruction list (`ir/transforms.py`): a
@@ -1032,6 +1159,13 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                    "unresolved_types": [],
                    "failed_classes": [],
                    "rewritten": [], "reason_refused": []}
+    jar_out.parent.mkdir(parents=True, exist_ok=True)
+    if ir_rewrite and jobs != 1 and _parallel_deflat(
+            jar_in, jar_out, classpath, check_reasons, jobs, stats):
+        if verify_output:
+            stats["verify"] = _verify_rewrite(jar_in, jar_out, classpath,
+                                              stats.get("rewritten"))
+        return stats
     hier = None
     if recompute_frames or ir_rewrite:
         try:
@@ -1041,7 +1175,6 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
             hier = None
     if hier is not None:
         stats["unresolved_types"] = sorted(hier.unresolved)
-    jar_out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(jar_in) as zin, zipfile.ZipFile(jar_out, "w", zipfile.ZIP_DEFLATED) as zout:
         for name in zin.namelist():
             data = zin.read(name)
