@@ -1010,6 +1010,15 @@ def cmd_deflat(args: argparse.Namespace) -> int:
               f"{args.rewritten}")
     v = stats.get("verify")
     _print_verify(v)
+    missing = stats.get("unresolved_types") or []
+    if missing and stats["methods_unflattened"]:
+        sample = ", ".join(missing[:4])
+        if len(missing) > 4:
+            sample += f" (+{len(missing) - 4} more)"
+        print(f"warning   : {len(missing)} type(s) referenced by the target are "
+              f"not on the classpath ({sample}); frames that merge them widen "
+              f"to java/lang/Object, so \"0 rejected\" is conditional. Re-run "
+              f"with --cp <deps> and verify again.")
     if v and v.get("unjudged_rewritten"):
         print(f"warning   : {v['unjudged_rewritten']} rewritten method(s) live in "
               f"a class the verifier could not load, so they were never judged. "
@@ -1033,7 +1042,11 @@ def cmd_deflat(args: argparse.Namespace) -> int:
             print("note      : StackMapTables kept as they were. These rewrites "
                   "are length-preserving, so the frames still describe the right "
                   "offsets; the verifier above loaded every class.")
-    if v and v.get("reverted"):
+    failed = stats.get("failed_classes") or []
+    if failed:
+        print(f"warning   : {len(failed)} class(es) could not be parsed or "
+              f"rewritten and were written back unchanged; first: {failed[0]}")
+    if (v and v.get("reverted")) or failed:
         return 1
     return 0
 
@@ -1064,6 +1077,16 @@ def cmd_devirt(args: argparse.Namespace) -> int:
               f"{res['devirtualized_classes']} class(es) devirtualized")
         print(f"output     : {out}")
         _print_verify(res.get("verify"))
+        missing = res.get("unresolved_types") or []
+        if missing and res.get("devirtualized_methods"):
+            sample = ", ".join(missing[:4])
+            if len(missing) > 4:
+                sample += f" (+{len(missing) - 4} more)"
+            print(f"warning   : {len(missing)} type(s) referenced by the "
+                  f"target are not on the classpath ({sample}); rebuilt "
+                  f"frames that merge them widen to java/lang/Object, so "
+                  f"\"0 rejected\" is conditional. Re-run with --cp <deps> "
+                  f"and verify again.")
         if res.get("frame_notes"):
             print(f"frames     : {len(res['frame_notes'])} rebuilt method(s) could "
                   f"not be given a StackMapTable; the classes were kept only "

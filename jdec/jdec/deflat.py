@@ -1029,6 +1029,8 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                          "strip_frames removes on purpose")
     stats: dict = {"classes": 0, "methods_unflattened": 0, "traps_pruned": 0,
                    "methods_reverted": 0, "frames_rebuilt": 0,
+                   "unresolved_types": [],
+                   "failed_classes": [],
                    "rewritten": [], "reason_refused": []}
     hier = None
     if recompute_frames or ir_rewrite:
@@ -1037,6 +1039,8 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
             hier = _hierarchy.Hierarchy.from_jar(jar_in, extra=classpath)
         except Exception:  # noqa: BLE001 - Object fallback still works
             hier = None
+    if hier is not None:
+        stats["unresolved_types"] = sorted(hier.unresolved)
     jar_out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(jar_in) as zin, zipfile.ZipFile(jar_out, "w", zipfile.ZIP_DEFLATED) as zout:
         for name in zin.namelist():
@@ -1103,8 +1107,9 @@ def deflat_jar(jar_in: Path, jar_out: Path, verify_output: bool = True,
                                    if m.attrs_blob != old}
                         _record_rewritten(cf, changed, stats)
                         data = cf.serialize()
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - one bad class only
+                    stats["failed_classes"].append(
+                        f"{name}: {type(exc).__name__}: {exc}")
             zout.writestr(name, data)
     if verify_output:
         stats["verify"] = _verify_rewrite(jar_in, jar_out, classpath,

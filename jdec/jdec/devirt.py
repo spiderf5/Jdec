@@ -1516,17 +1516,20 @@ class Devirtualizer:
             "failed_classes": failed,
             "code_id_errors": code_id_errors,
             "frame_notes": frame_notes,
+            "unresolved_types": (sorted(hier.unresolved)
+                                 if hier is not None else []),
             "scan": scan_stats,
             "output": output_jar
         }
         # nothing was rebuilt -> the output is byte-identical to the input, so a
         # gate could only restate what the input already is
         if verify_output and total_methods:
-            stats["verify"] = cls._verify_rewrite(input_jar, output_jar)
+            stats["verify"] = cls._verify_rewrite(input_jar, output_jar,
+                                                  classpath=classpath)
         return stats
 
     @staticmethod
-    def _verify_rewrite(jar_in: Path, jar_out: Path) -> dict:
+    def _verify_rewrite(jar_in: Path, jar_out: Path, classpath=()) -> dict:
         """JVM gate on the devirtualized jar; rolls back what it rejects."""
         try:
             from . import toolchain as TC
@@ -1536,7 +1539,8 @@ class Devirtualizer:
         if not TC.find_java():
             return {"skipped": "java not found: set JAVA_HOME or put java on PATH"}
         try:
-            return VF.verify_or_keep(jar_in, jar_out).to_dict()
+            return VF.verify_or_keep(jar_in, jar_out,
+                                     classpath=classpath).to_dict()
         except Exception as exc:  # noqa: BLE001 - the rewrite itself already succeeded
             return {"skipped": f"{type(exc).__name__}: {exc}"}
 

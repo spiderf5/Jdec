@@ -210,7 +210,16 @@ def deflat_stage_status(stats: dict) -> tuple[str, str]:
     if refused:
         bits.append(f"{len(refused)} rewrite(s) kept original: no replayable "
                     f"derivation")
-    status = STAGE_PARTIAL if (v.get("reverted") or refused) else STAGE_OK
+    failed = stats.get("failed_classes") or []
+    if failed:
+        bits.append(f"{len(failed)} class(es) kept original: parse/rewrite "
+                    f"failed")
+    missing = stats.get("unresolved_types") or []
+    if missing and n:
+        bits.append(f"{len(missing)} type(s) missing from the classpath; "
+                    f"rebuilt frames may be wider than javac")
+    partial = bool(v.get("reverted") or refused or (missing and n) or failed)
+    status = STAGE_PARTIAL if partial else STAGE_OK
     return status, f"{head}; " + ", ".join(bits)
 
 

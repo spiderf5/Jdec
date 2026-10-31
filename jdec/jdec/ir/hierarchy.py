@@ -172,6 +172,9 @@ class Hierarchy:
         self._parents: dict[str, tuple[str, ...]] = {}
         self._anc: dict[str, dict[str, int]] = {}
         self._lca: dict[tuple[str, str], str] = {}
+        # Names referenced by an indexed class but defined by no class on
+        # the classpath. A merge that touches one of them widens to Object.
+        self.unresolved: set[str] = set()
         if seed_jdk:
             for name, (sup, ifaces) in _JDK_SEED.items():
                 self._parents[name] = (sup,) + tuple(ifaces)
@@ -216,6 +219,12 @@ class Hierarchy:
         for name, (sup, ifaces) in resolve_platform_types(sorted(missing)).items():
             if name not in h._parents:
                 h._parents[name] = ((sup,) if sup else ()) + tuple(ifaces)
+        # Whatever is still unowned is a dependency the caller did not pass.
+        # Name them: a merge involving one of these is exactly the case where
+        # the frame widens to Object and still looks valid under the same,
+        # incomplete classpath the verifier was given.
+        h.unresolved = {n for n in referenced
+                        if n not in h._parents and not n.startswith("[")}
         return h
 
     @staticmethod

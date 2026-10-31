@@ -1124,6 +1124,31 @@ def test_verify_gate() -> None:
     check("verify exits 1 when the verifier rejects a class", rc_bad == 1, str(rc_bad))
 
 
+def test_classfile_parser_survives_mutation() -> None:
+    """Mutated input must end in ClassFormatError, never an internal crash."""
+    print("classfile: mutated inputs are rejected, not crashed on")
+    import random
+
+    with zipfile.ZipFile(SAMPLE) as z:
+        blobs = [z.read(n) for n in z.namelist() if n.endswith(".class")]
+    rng = random.Random(20261031)
+    unexpected = []
+    for _ in range(1000):
+        data = bytearray(rng.choice(blobs))
+        for _ in range(rng.randint(1, 4)):
+            data[rng.randrange(len(data))] = rng.randrange(256)
+        if rng.random() < 0.3:
+            data = data[: rng.randrange(len(data) + 1)]
+        try:
+            CF.parse(bytes(data)).serialize()
+        except CF.ClassFormatError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - the point of the test
+            unexpected.append(f"{type(exc).__name__}: {exc}")
+    check("1000 mutated classes: only ClassFormatError escapes",
+          not unexpected, "; ".join(unexpected[:3]))
+
+
 def test_deflat_output_loads() -> None:
     """Both deflat modes must ship loadable classes, with different trade-offs."""
     print("deflat: default keeps frames, --strip-frames keeps rewrites straight-line")
@@ -1673,7 +1698,10 @@ def test_pipeline_gate() -> None:
         check("the default path is the instruction-level one",
               stats.get("frames_rebuilt", 0) > 0, str(stats))
         status, detail = PL.deflat_stage_status(stats)
-        check("a clean run is a clean stage", status == PL.STAGE_OK, detail)
+        check("the knowingly-broken fixture keeps the stage partial",
+              status == PL.STAGE_PARTIAL, detail)
+        check("the detail names the class kept original",
+              "kept original" in detail, detail)
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
@@ -2680,9 +2708,196 @@ def test_hierarchy_extra_classpath() -> None:
         check("with it, the merge finds the real superclass",
               withcp.lca("demo/lib/Sub1", "demo/lib/Sub2") == "demo/lib/Anim",
               withcp.lca("demo/lib/Sub1", "demo/lib/Sub2"))
+        check("without the dependency the missing library types are named",
+              {"demo/lib/Anim", "demo/lib/Sub1", "demo/lib/Sub2"}
+              <= blind.unresolved, str(sorted(blind.unresolved)[:5]))
+        check("with it, none of those types are reported missing",
+              not ({"demo/lib/Anim", "demo/lib/Sub1", "demo/lib/Sub2"}
+                   & withcp.unresolved), str(sorted(withcp.unresolved)[:5]))
     finally:
         import shutil as _sh
         _sh.rmtree(td, ignore_errors=True)
+
+
+def test_missing_dependency_gate() -> None:
+    """A missing dependency must be named, and it must make the stage partial.
+
+    Frames are computed against the classpath deflat is given. A library type
+    that is not there has no supertypes, so a merge involving it widens to
+    Object; the verifier runs on the same incomplete classpath, so it accepts
+    the frame. The packet only shows up when the artifact is verified against
+    the real dependencies. The gate must say so, not report "0 rejected".
+    """
+    print("deflat: missing classpath types are reported, not silently widened")
+    from jdec import deflat as DF
+    from jdec import pipeline as PIPE
+    from jdec import cli as CL
+
+    if JAVAC is None:
+        print("  (skipped: needs javac)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_missing_"))
+    try:
+        dep_cls = _compile_java(td / "dep", {
+            "demo/lib/Anim.java": "package demo.lib; public class Anim {}",
+            "demo/lib/Sub1.java": "package demo.lib; public class Sub1 extends Anim {}",
+            "demo/lib/Sub2.java": "package demo.lib; public class Sub2 extends Anim {}",
+        })
+        dep = _jar_from(dep_cls, td / "dep.jar")
+        app_cls = _compile_java(td / "app", {
+            "demo/app/Use.java": """
+                package demo.app;
+                public class Use {
+                    public static demo.lib.Anim pick(boolean b) {
+                        return b ? new demo.lib.Sub1() : new demo.lib.Sub2();
+                    }
+                }
+            """,
+        }, classpath=[dep_cls])
+        app = _jar_from(app_cls, td / "app.jar")
+
+        blind = DF.deflat_jar(app, td / "blind.jar", verify_output=False)
+        check("deflat names the types the classpath did not provide",
+              {"demo/lib/Anim", "demo/lib/Sub1", "demo/lib/Sub2"}
+              <= set(blind["unresolved_types"]), str(blind["unresolved_types"]))
+        withcp = DF.deflat_jar(app, td / "withcp.jar", verify_output=False,
+                               classpath=[dep])
+        check("deflat stays quiet for a supplied dependency",
+              not (set(withcp["unresolved_types"])
+                   & {"demo/lib/Anim", "demo/lib/Sub1", "demo/lib/Sub2"}),
+              str(withcp["unresolved_types"]))
+
+        partial = {"classes": 1, "methods_unflattened": 2,
+                   "unresolved_types": ["demo/lib/Anim"],
+                   "verify": {"verified": 1}, "reason_refused": []}
+        status, detail = PIPE.deflat_stage_status(partial)
+        check("a rewritten method behind a missing type is partial",
+              status == PIPE.STAGE_PARTIAL, status)
+        check("the stage detail says the classpath is missing types",
+              "classpath" in detail, detail)
+        ok = {"classes": 1, "methods_unflattened": 2, "unresolved_types": [],
+              "verify": {"verified": 1}, "reason_refused": []}
+        check("with a complete classpath the stage stays ok",
+              PIPE.deflat_stage_status(ok)[0] == PIPE.STAGE_OK)
+        untouched = {"classes": 1, "methods_unflattened": 0,
+                     "unresolved_types": ["demo/lib/Anim"],
+                     "verify": {"verified": 1}, "reason_refused": []}
+        check("no rewrite means no rebuilt frame, so the stage stays ok",
+              PIPE.deflat_stage_status(untouched)[0] == PIPE.STAGE_OK)
+
+        import contextlib
+        import io as _io
+        from types import SimpleNamespace
+        from unittest import mock
+        fake = {"classes": 1, "methods_unflattened": 2, "methods_reverted": 0,
+                "reason_refused": [], "rewritten": [], "verify": None,
+                "unresolved_types": ["demo/lib/Anim"]}
+        ns = SimpleNamespace(input=str(app), output=str(td / "cli.jar"),
+                             no_verify=True, strip_frames=False,
+                             recompute_frames=False, byte_patch=False,
+                             cp=[], no_reasons=False, rewritten=None)
+        buf = _io.StringIO()
+        with mock.patch("jdec.deflat.deflat_jar", return_value=fake), \
+                contextlib.redirect_stdout(buf):
+            rc = CL.cmd_deflat(ns)
+        check("the CLI warns about the missing type",
+              "not on the classpath" in buf.getvalue(), buf.getvalue()[-300:])
+        check("the warning does not turn into a failure", rc == 0, str(rc))
+
+        # devirt has the same blind spot: it rebuilds frames from the same
+        # hierarchy and then verifies without the declared dependencies.
+        from jdec import devirt as DV
+        dv_blind = DV.Devirtualizer.devirtualize_jar(
+            app, td / "dv_blind.jar", {}, verify_output=False)
+        check("devirt names the missing types too",
+              {"demo/lib/Anim", "demo/lib/Sub1", "demo/lib/Sub2"}
+              <= set(dv_blind["unresolved_types"]),
+              str(dv_blind["unresolved_types"]))
+        dv_cp = DV.Devirtualizer.devirtualize_jar(
+            app, td / "dv_cp.jar", {}, verify_output=False, classpath=[dep])
+        check("devirt stays quiet for a supplied dependency",
+              not (set(dv_cp["unresolved_types"])
+                   & {"demo/lib/Anim", "demo/lib/Sub1", "demo/lib/Sub2"}),
+              str(dv_cp["unresolved_types"]))
+
+        fake_dv = {"devirtualized_methods": 2, "devirtualized_classes": 1,
+                   "verify": None, "frame_notes": [],
+                   "unresolved_types": ["demo/lib/Anim"]}
+        dvns = SimpleNamespace(input=str(app), output=str(td / "dv_cli.jar"),
+                               pool=None, no_verify=True, cp=[])
+        dvbuf = _io.StringIO()
+        with mock.patch("jdec.devirt.Devirtualizer.devirtualize_jar",
+                        return_value=fake_dv), \
+                contextlib.redirect_stdout(dvbuf):
+            dvrc = CL.cmd_devirt(dvns)
+        check("the devirt CLI warns about the missing type",
+              "not on the classpath" in dvbuf.getvalue(),
+              dvbuf.getvalue()[-300:])
+        check("the devirt warning does not turn into a failure",
+              dvrc == 0, str(dvrc))
+
+        with mock.patch("jdec.verify.verify_or_keep") as vk, \
+                mock.patch("jdec.toolchain.find_java", return_value="java"):
+            vk.return_value.to_dict.return_value = {"skipped": "test"}
+            DV.Devirtualizer._verify_rewrite(app, td / "dv_verify.jar",
+                                             classpath=[dep])
+        check("devirt hands the verifier the classpath the frames used",
+              (vk.call_args.kwargs if vk.call_args else {}).get("classpath")
+              == [dep], str(vk.call_args))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_deflat_failure_accounting() -> None:
+    """A class that cannot be parsed must be named, not silently dropped.
+
+    `deflat_jar` used to swallow every per-class exception; the truncated
+    fixture in sample.jar therefore disappeared without a trace. A tool that
+    says "done" while skipping input is the same failure mode as "0 rejected"
+    on an incomplete classpath.
+    """
+    print("deflat: unreadable classes are counted and surfaced")
+    from jdec import deflat as DF
+    from jdec import pipeline as PIPE
+    from jdec import cli as CL
+    import contextlib
+    import io as _io
+    from types import SimpleNamespace
+    from unittest import mock
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "sample_deflat.jar"
+        stats = DF.deflat_jar(SAMPLE, out, verify_output=False)
+        check("the broken fixture is named in failed_classes",
+              any("Truncated" in x for x in stats.get("failed_classes") or []),
+              str(stats.get("failed_classes")))
+
+        bad = {"classes": 12, "methods_unflattened": 3, "unresolved_types": [],
+               "failed_classes": ["demo/broken/Truncated.class: ClassFormatError"],
+               "verify": {"verified": 10}, "reason_refused": []}
+        st, detail = PIPE.deflat_stage_status(bad)
+        check("a class failure makes the stage partial",
+              st == PIPE.STAGE_PARTIAL, st)
+        check("the stage detail counts the failure",
+              "parse" in detail, detail)
+
+        fake = {"classes": 12, "methods_unflattened": 3, "methods_reverted": 0,
+                "reason_refused": [], "rewritten": [], "verify": None,
+                "unresolved_types": [],
+                "failed_classes": ["demo/broken/Truncated.class: ClassFormatError"]}
+        ns = SimpleNamespace(input=str(SAMPLE), output=str(Path(td) / "x.jar"),
+                             no_verify=True, strip_frames=False,
+                             recompute_frames=False, byte_patch=False,
+                             cp=[], no_reasons=False, rewritten=None)
+        buf = _io.StringIO()
+        with mock.patch("jdec.deflat.deflat_jar", return_value=fake), \
+                contextlib.redirect_stdout(buf):
+            rc = CL.cmd_deflat(ns)
+        check("the CLI names the failed class",
+              "could not be parsed" in buf.getvalue(), buf.getvalue()[-300:])
+        check("a failed class changes the exit code to partial", rc == 1, str(rc))
 
 
 def test_coverage_accounting() -> None:
@@ -6777,6 +6992,7 @@ def main() -> int:
     # their assertions on a fresh checkout
     build_fixtures.ensure_mixin_jar(quiet=True)
     test_roundtrip_sample()
+    test_classfile_parser_survives_mutation()
     test_synthetic_members_ignored()
     test_scoring_sees_obfuscated_names()
     test_partial_failure_is_not_total_failure()
@@ -6819,6 +7035,8 @@ def main() -> int:
     test_behave_classpath()
     test_verify_skips_multirelease()
     test_hierarchy_extra_classpath()
+    test_missing_dependency_gate()
+    test_deflat_failure_accounting()
     test_coverage_accounting()
     test_case_derivation()
     test_verify_matrix()
