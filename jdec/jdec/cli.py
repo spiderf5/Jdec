@@ -378,7 +378,9 @@ def cmd_behave(args: argparse.Namespace) -> int:
         diffs += [d.describe() for d in interp_rep.diff]
         cov_i = CS.coverage(rows, ID.outcomes(interp_rep))
         line = (f"interp    : {cov_i['judged']}/{cov_i['total']} method(s) judged "
-                f"-> {100.0 * cov_i['judged'] / cov_i['total']:.1f}%"
+                f"({cov_i['value']} returned a value, {cov_i['throw']} threw "
+                f"the same exception) -> "
+                f"{100.0 * cov_i['judged'] / cov_i['total']:.1f}%"
                 if cov_i["total"] else "interp    : nothing to compare")
         print(line)
         if cov_i["missing"]:
@@ -417,6 +419,21 @@ def cmd_behave(args: argparse.Namespace) -> int:
             pct = 100.0 * union / total
             line += f" -> {pct:.1f}%"
         print(line)
+        jvm_value = {(o.case.cls, o.case.method) for o in rep.outcomes
+                     if o.evidence == "value"}
+        interp_value = {(r.row[0], r.row[1]) for r in interp_rep.rows
+                        if r.verdict in ("same", "diff")
+                        and r.evidence == "value"}
+        value_union = len(jvm_value | interp_value)
+        if total:
+            print(f"union value: {value_union}/{total} method(s) with a "
+                  f"returned value on either engine -> "
+                  f"{100.0 * value_union / total:.1f}%")
+        denied_any = {(o.case.cls, o.case.method) for o in rep.outcomes
+                      if o.denied}
+        if denied_any:
+            print(f"denied    : {len(denied_any)} method(s) have at least one "
+                  f"sandbox-denied case (not value evidence)")
         if args.union_gate is not None and total:
             print(f"union gate: {union}/{total} = {pct:.1f}% "
                   f"(threshold {args.union_gate:.0f}%)")

@@ -3049,6 +3049,14 @@ def test_coverage_accounting() -> None:
     check("an identical throw is counted apart", cov["throw"] == 1, str(cov))
     check("the method with both is counted once",
           sum(1 for m in cov["missing"] if m[1] == "m") == 0, str(cov["missing"]))
+    from jdec.interp import diff as ID
+    irow = ("a/A", "m", "()I")
+    ithrow = ID.InterpReport(rows=[ID.MethodDiff(irow, "same", "", 1, "throw")])
+    check("an interpreter throw is classified as a throw",
+          ID.outcomes(ithrow)[0].evidence == "throw")
+    ivalue = ID.InterpReport(rows=[ID.MethodDiff(irow, "same", "", 1, "value")])
+    check("an interpreter value is classified as a value",
+          ID.outcomes(ivalue)[0].evidence == "value")
     reasons = {name: why for _cls, name, why in cov["missing"]}
     check("the filter's reason is carried through",
           reasons.get("o") == "touches java/nio/file/Files", str(reasons))

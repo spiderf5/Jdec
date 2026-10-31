@@ -513,6 +513,12 @@ class CaseOutcome:
         return self.status in ("same", "diff")
 
     @property
+    def denied(self) -> bool:
+        """True when both sides were stopped by the sandbox itself."""
+        return (self.judged and self.evidence == "throw"
+                and "sandbox: " in self.left and "sandbox: " in self.right)
+
+    @property
     def evidence(self) -> str:
         """What kind of observation this was: a returned value or a throw.
 

@@ -238,15 +238,22 @@ python jdec.py behave in.jar out.jar --derive --from rewritten.txt --execute \
 判定，最后打印：
 
 ```
-jvm    : 251/411 judged by either engine -> 61.1%
-interp : 252/411 judged by either engine -> 61.3%
-union  : 341/411 judged by either engine -> 83.0%
+jvm        : 333/411 (146 value, 187 throw) -> 81.0%
+interp     : 252/411 (65 value, 187 throw) -> 61.3%
+union      : 370/411 judged by either engine -> 90.0%
+union value: 165/411 with a returned value on either engine -> 40.1%
 ```
 
 `--union-gate PCT` 让并集成为硬门槛：未达 PCT 退出 5（与"改错了"的 1、"没结论"的
 4 分开）。分母是全部改写方法。解释器不知道的方法（如深 `Files` API）会诚实记
 inconclusive，绝不拿 `same` 覆盖没观测到的状态；拼接 recipe 的字面量也在比对范围内
 （`makeConcatWithConstants` 按 `\u0001` 占位符展开，改写若动了字面量必 DIFF）。
+
+**value 与 throw 不是一档证据。** `value` 是两侧返回值的渲染文本相同（最强）；
+`throw` 只是两侧抛了同类、同消息的异常，说明到失败点之前一致，不说明失败点之后。
+所以 CLI 另打一行 `union value`：只算返回值相等的口径；`--union-gate` 计的是
+`value + throw`。沙箱拒绝产生的异常在 JVM 侧会另外打印 `denied`——它是"两侧被同样
+拦下"，只能说明先到达了同一个受控 API，不算 value。
 
 **用例可以自动派生**（`--derive`）：从改写清单出发，为可反射调用的方法生成固定输入。
 

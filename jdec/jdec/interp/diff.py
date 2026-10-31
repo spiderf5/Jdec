@@ -18,6 +18,7 @@ class MethodDiff:
     verdict: str                 # same/diff/inconclusive
     reason: str = ""
     trials: int = 0
+    evidence: str = "value"      # value/throw, for the same/diff verdicts
 
     def describe(self) -> str:
         cls, name, desc = self.row
@@ -62,7 +63,8 @@ def outcomes(report: InterpReport) -> list[CaseOutcome]:
         cls, name, desc = diff.row
         status = diff.verdict if diff.verdict in ("same", "diff") \
             else "inconclusive"
-        out.append(CaseOutcome(Case(cls, name), "", "", status,
+        marker = "THROW:" if diff.evidence == "throw" else "OK:"
+        out.append(CaseOutcome(Case(cls, name), marker, marker, status,
                                diff.reason))
     return out
 
@@ -223,6 +225,7 @@ def compare_method(left_jar, right_jar, row: tuple[str, str, str],
     from .models import Models
     model = Models()
     reasons: list[str] = []
+    evidence = "value"
     for trial in range(max(1, trials)):
         try:
             left_heap, right_heap = Heap(), Heap()
@@ -267,16 +270,17 @@ def compare_method(left_jar, right_jar, row: tuple[str, str, str],
                     cls, name, desc, None, right_args)
             verdict, reason = _verdict(left_out, right_out, left_heap,
                                        right_heap)
+            evidence = ("throw" if left_out.kind == "throw" else "value")
         except Exception as exc:  # noqa: BLE001 - an engine bug is not a diff
             reasons.append(f"engine error: {type(exc).__name__}: {exc}"[:160])
             continue
         if verdict == "diff":
-            return MethodDiff(row, "diff", reason, trials)
+            return MethodDiff(row, "diff", reason, trials, evidence)
         if verdict == "inconclusive":
             reasons.append(reason)
     if reasons:
         return MethodDiff(row, "inconclusive", reasons[0], trials)
-    return MethodDiff(row, "same", "", trials)
+    return MethodDiff(row, "same", "", trials, evidence)
 
 
 def compare_rows(left_jar, right_jar, rows, *, trials: int = 4,
