@@ -50,5 +50,6 @@ include = ["jdec*"]
 jdec = [
     "fingerprints.json",
     "*.java",
-    "*.js"
+    "*.js",
+    "web_assets/*"
 ]

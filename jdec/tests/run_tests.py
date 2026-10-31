@@ -6539,6 +6539,32 @@ def test_web_class_tags() -> None:
     check("empty report has no tags", WB._class_tags({}) == {})
 
 
+def test_web_bytecode_endpoint() -> None:
+    """The Bytecode tab is backed by javap on the recorded input jar."""
+    print("web: /api/bytecode disassembles a class from the input jar")
+    import threading
+    from jdec import web as WB
+    handler = lambda *a, **k: WB.WorkbenchHandler(*a, work_dir=SAMPLE, **k)
+    server = WB.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        with urllib.request.urlopen(base + "/api/tree", timeout=20) as res:
+            tree = json.loads(res.read().decode("utf-8"))
+        name = next(c for c in tree["classes"] if c.endswith("/Showcase"))
+        with urllib.request.urlopen(base + "/api/bytecode?class=" + name, timeout=30) as res:
+            data = json.loads(res.read().decode("utf-8"))
+        check("bytecode endpoint succeeds", data.get("ok") is True, str(data.get("error")))
+        check("bytecode contains disassembly",
+              "Code:" in data.get("bytecode", "") or "Compiled from" in data.get("bytecode", ""))
+        with urllib.request.urlopen(base + "/api/bytecode?class=../escape", timeout=20) as res:
+            bad = json.loads(res.read().decode("utf-8"))
+        check("bytecode endpoint rejects a bad class name", bad.get("ok") is False)
+    finally:
+        server.shutdown()
+
+
 def test_web_source_path_containment() -> None:
     """Engine labels and report rels are joined into paths: keep them inside."""
     print("web: source lookup refuses engine labels and rels that escape")
@@ -7355,6 +7381,7 @@ def main() -> int:
     test_web_callgraph_error_semantics()
     test_web_workbench_features()
     test_web_source_path_containment()
+    test_web_bytecode_endpoint()
     test_web_class_tags()
     test_callgraph_and_reachability()
     test_conservative_prune()

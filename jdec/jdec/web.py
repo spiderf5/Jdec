@@ -16,6 +16,10 @@ from __future__ import annotations
 import datetime
 import difflib
 import json
+import os
+import re
+import shutil
+import subprocess
 import sys
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -29,668 +33,12 @@ from . import callgraph as CG
 _CG_CACHE: dict[str, tuple[CG.CallGraph, CG.ReachabilityReport]] = {}
 _CG_FAIL: set[str] = set()
 
-HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>jdec Workbench - Interactive Deobfuscation & Audit</title>
-<style>
-  :root {
-    --bg-dark: #1e1e24;
-    --bg-card: #282830;
-    --bg-side: #18181c;
-    --text-main: #f0f0f5;
-    --text-muted: #9595a8;
-    --accent: #5e81ac;
-    --accent-hover: #81a1c1;
-    --danger: #bf616a;
-    --success: #a3be8c;
-    --warning: #ebcb8b;
-    --purple: #b48ead;
-    --teal: #8fbcbb;
-    --border: #383842;
-    --code-bg: #141418;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
-  body { background: var(--bg-dark); color: var(--text-main); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-  header { background: var(--bg-side); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; }
-  header h1 { font-size: 1.15rem; font-weight: 700; color: var(--accent-hover); display: flex; align-items: center; gap: 8px; }
-  header .badge { background: var(--bg-card); border: 1px solid var(--border); padding: 3px 8px; border-radius: 4px; font-size: 0.8rem; color: var(--text-muted); }
-  .layout { display: flex; flex: 1; height: calc(100vh - 48px); }
-  .sidebar { width: 320px; background: var(--bg-side); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .search-box { padding: 10px; border-bottom: 1px solid var(--border); }
-  .search-box input { width: 100%; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; color: var(--text-main); outline: none; font-size: 0.85rem; }
-  .filter-pills { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: rgba(0,0,0,0.1); }
-  .pill { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; color: var(--text-muted); font-size: 0.75rem; padding: 2px 8px; cursor: pointer; }
-  .pill:hover { color: var(--text-main); }
-  .pill.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
-  .tree-list { flex: 1; overflow-y: auto; padding: 8px; font-size: 0.85rem; }
-  .tree-item { padding: 5px 8px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; color: var(--text-muted); }
-  .tree-item:hover { background: var(--bg-card); color: var(--text-main); }
-  .tree-item.active { background: var(--accent); color: #fff; font-weight: 600; }
-  .tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-  .tag-badge { font-size: 0.7rem; padding: 1px 5px; border-radius: 3px; margin-left: 6px; font-weight: 600; flex-shrink: 0; }
-  .tag-suspect { background: rgba(235,203,139,0.25); color: #ebcb8b; border: 1px solid #ebcb8b; }
-  .tag-threat { background: rgba(191,97,106,0.25); color: #bf616a; border: 1px solid #bf616a; }
-  .tag-core { background: rgba(129,161,193,0.25); color: #81a1c1; border: 1px solid #81a1c1; }
-  .tag-net { background: rgba(180,142,173,0.25); color: #b48ead; border: 1px solid #b48ead; }
-  .tag-hook { background: rgba(143,188,187,0.25); color: #8fbcbb; border: 1px solid #8fbcbb; }
-.tag-failed { background: rgba(191,97,106,0.25); color: #bf616a; border: 1px solid #bf616a; }
-.tag-partial { background: rgba(235,203,139,0.25); color: #ebcb8b; border: 1px solid #ebcb8b; }
-.tag-native { background: rgba(180,142,173,0.25); color: #b48ead; border: 1px solid #b48ead; }
-.tag-engine { background: rgba(129,161,193,0.18); color: #81a1c1; border: 1px solid #81a1c1; }
-  .tag-benign { background: rgba(163,190,140,0.25); color: #a3be8c; border: 1px solid #a3be8c; }
-  .main-pane { flex: 1; display: flex; flex-direction: column; background: var(--bg-dark); overflow: hidden; }
-  .tabs-bar { background: var(--bg-side); border-bottom: 1px solid var(--border); display: flex; gap: 2px; padding: 0 10px; }
-  .tab-btn { background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); padding: 8px 14px; font-size: 0.85rem; cursor: pointer; }
-  .tab-btn:hover { color: var(--text-main); }
-  .tab-btn.active { color: var(--accent-hover); border-bottom-color: var(--accent-hover); font-weight: 600; }
-  .content-area { flex: 1; display: flex; overflow: hidden; position: relative; }
-  .code-view { flex: 1; background: var(--code-bg); padding: 15px; overflow: auto; font-family: "Consolas", "Courier New", monospace; font-size: 0.88rem; line-height: 1.45; white-space: pre; color: #d8dee9; }
-  .diff-view { flex: 1; display: none; flex-direction: column; background: var(--code-bg); overflow: hidden; }
-  .diff-toolbar { padding: 8px 15px; background: var(--bg-side); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; font-size: 0.85rem; }
-  .diff-toolbar select { background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 0.82rem; outline: none; }
-  .diff-content { flex: 1; overflow: auto; padding: 12px; font-family: "Consolas", monospace; font-size: 0.88rem; line-height: 1.4; white-space: pre; }
-  .diff-line { font-family: "Consolas", monospace; white-space: pre-wrap; padding: 1px 6px; }
-  .diff-line.add { background: rgba(163, 190, 140, 0.18); color: #a3be8c; }
-  .diff-line.del { background: rgba(191, 97, 106, 0.18); color: #bf616a; }
-  .diff-line.chunk { background: rgba(94, 129, 172, 0.15); color: #88c0d0; font-weight: 600; }
-  .diff-line.hdr { color: #81a1c1; font-weight: 600; }
-  .diff-line.ctx { color: #abb2bf; }
-  .inspector { width: 340px; background: var(--bg-side); border-left: 1px solid var(--border); overflow-y: auto; padding: 15px; font-size: 0.85rem; }
-  .inspector h3 { font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; font-weight: 700; letter-spacing: 0.5px; }
-  .inspector .sec { margin-bottom: 16px; }
-  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
-  .tag { display: inline-block; font-size: 0.75rem; padding: 2px 6px; border-radius: 3px; background: var(--border); color: var(--text-main); margin-right: 4px; margin-bottom: 4px; }
-  .tag.danger { background: rgba(191,97,106,0.25); color: var(--danger); border: 1px solid var(--danger); }
-  .tag.warning { background: rgba(235,203,139,0.25); color: var(--warning); border: 1px solid var(--warning); }
-  .btn { background: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 0.82rem; transition: all 0.15s; }
-  .btn:hover { background: var(--border); border-color: var(--accent); }
-  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
-  .btn-primary:hover { background: var(--accent-hover); }
-  .btn-ghost { background: transparent; border-color: var(--border); color: var(--text-muted); }
-  .btn-ghost:hover { color: var(--text-main); border-color: var(--text-muted); }
-  .btn-ai { background: linear-gradient(135deg, #5e81ac, #b48ead); color: #fff; border: none; font-weight: 600; width: 100%; padding: 8px 12px; margin-top: 6px; border-radius: 4px; cursor: pointer; transition: opacity 0.15s; }
-  .btn-ai:hover { opacity: 0.92; }
-  /* Modal dialog */
-  .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(4px); z-index: 1000; align-items: center; justify-content: center; }
-  .modal-overlay.active { display: flex; }
-  .modal-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; width: 750px; max-width: 92vw; max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-  .modal-hdr { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-  .modal-hdr h2 { font-size: 1.05rem; color: var(--accent-hover); }
-  .modal-body { padding: 15px 20px; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-  .modal-body textarea { width: 100%; height: 340px; background: var(--code-bg); color: #e5e9f0; border: 1px solid var(--border); border-radius: 4px; padding: 10px; font-family: "Consolas", monospace; font-size: 0.85rem; resize: vertical; line-height: 1.45; }
-  .modal-ftr { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; align-items: center; }
-</style>
-</head>
-<body>
-  <header>
-    <div style="display:flex; align-items:center; gap:12px;">
-      <h1><span>jdec</span> Workbench</h1>
-      <div id="target-summary" class="badge">Loading target ...</div>
-    </div>
-    <div style="display:flex; align-items:center; gap:8px;">
-      <button class="btn btn-primary" onclick="exportIdeProject()" style="padding:5px 12px; font-size:0.8rem; cursor:pointer;">Export IDE Project</button>
-    </div>
-  </header>
-  <div class="layout">
-    <div class="sidebar">
-      <div class="search-box">
-        <input type="text" id="class-filter" placeholder="Filter classes & packages ...">
-      </div>
-      <div class="filter-pills">
-        <button class="pill active" id="pill-all" onclick="setTreeFilter('all')">All</button>
-        <button class="pill" id="pill-tagged" onclick="setTreeFilter('tagged')">Tagged</button>
-        <button class="pill" id="pill-suspect" onclick="setTreeFilter('suspect')">Suspects</button>
-        <button class="pill" id="pill-failed" onclick="setTreeFilter('failed')">Failed</button>
-        <button class="pill" id="pill-partial" onclick="setTreeFilter('partial')">Partial</button>
-        <button class="pill" id="pill-native" onclick="setTreeFilter('native')">Native</button>
-      </div>
-      <div class="tree-list" id="class-tree"></div>
-    </div>
-    <div class="main-pane">
-      <div class="tabs-bar">
-        <button class="tab-btn active" onclick="switchView('decompiled')">Decompiled Source</button>
-        <button class="tab-btn" onclick="switchView('diff')">Engine Diff</button>
-        <button class="tab-btn" onclick="switchView('natives')">Native C Code</button>
-        <button class="tab-btn" onclick="switchView('threats')">Threats & Strings</button>
-        <button class="tab-btn" onclick="switchView('report')">Triage Report</button>
-      </div>
-      <div class="content-area">
-        <div class="code-view" id="code-content">// Select a class from the left sidebar to view decompiled code.</div>
-        <div class="diff-view" id="diff-view">
-          <div class="diff-toolbar">
-            <span>Engine 1:</span>
-            <select id="diff-e1" onchange="fetchDiff()">
-              <option value="final" selected>Final (Winner)</option>
-              <option value="cfr">CFR 0.152</option>
-              <option value="vineflower">Vineflower</option>
-              <option value="procyon">Procyon</option>
-            </select>
-            <span>vs Engine 2:</span>
-            <select id="diff-e2" onchange="fetchDiff()">
-              <option value="cfr" selected>CFR 0.152</option>
-              <option value="vineflower">Vineflower</option>
-              <option value="procyon">Procyon</option>
-              <option value="final">Final (Winner)</option>
-            </select>
-            <button class="btn btn-primary" onclick="fetchDiff()">Compare</button>
-            <span id="diff-stats" class="badge"></span>
-          </div>
-          <div class="diff-content" id="diff-content">// Select a class and engines to compare diff.</div>
-        </div>
-        <div class="inspector" id="inspector-content">
-          <div class="sec">
-            <h3>Class Information</h3>
-            <div id="class-meta" class="card">No class selected</div>
-          </div>
-          <div class="sec">
-            <h3>Engine & Quality</h3>
-            <div id="class-engine-info" class="card">Loading engine details ...</div>
-          </div>
-          <div class="sec">
-            <h3>Audit & Triage Notes</h3>
-            <div class="card">
-              <div style="margin-bottom:8px;">
-                <label style="font-size:0.75rem; color:var(--text-muted); display:block; margin-bottom:3px;">TAG</label>
-                <select id="audit-tag" style="width:100%; background:var(--bg-dark); color:var(--text-main); border:1px solid var(--border); border-radius:4px; padding:4px 6px; font-size:0.82rem; outline:none;">
-                  <option value="">-- No Tag --</option>
-                  <option value="benign">benign</option>
-                  <option value="suspect">suspect</option>
-                  <option value="threat">threat</option>
-                  <option value="core">core</option>
-                  <option value="net">net</option>
-                  <option value="hook">hook</option>
-                </select>
-              </div>
-              <div style="margin-bottom:8px;">
-                <label style="font-size:0.75rem; color:var(--text-muted); display:block; margin-bottom:3px;">INVESTIGATOR NOTE (CTRL+S)</label>
-                <textarea id="audit-note" rows="4" style="width:100%; background:var(--bg-dark); color:var(--text-main); border:1px solid var(--border); border-radius:4px; padding:6px; font-size:0.82rem; resize:vertical; outline:none;" placeholder="Write observations or notes (Ctrl+S to save)..."></textarea>
-              </div>
-              <div style="display:flex; justify-content:space-between; align-items:center;">
-                <button class="btn btn-primary" onclick="saveAuditNote()">Save Note</button>
-                <button class="btn btn-ghost" onclick="clearAuditNote()">Clear</button>
-                <span id="audit-status" style="font-size:0.75rem; color:var(--text-muted);"></span>
-              </div>
-            </div>
-            <button class="btn-ai" onclick="openLlmPromptModal()">AI Semantic Rename Prompt</button>
-          </div>
-          <div class="sec">
-            <h3>Mixin Hooks</h3>
-            <div id="class-hooks" class="card">None detected</div>
-          </div>
-          <div class="sec">
-            <h3>Strings & Identifiers</h3>
-            <div id="class-strings" class="card">None detected</div>
-          </div>
-          <div class="sec">
-            <h3>Call Graph & Reachability</h3>
-            <div class="card" id="class-reach-card">
-              <div id="class-reach-badge" style="margin-bottom:8px;">Analyzing reachability ...</div>
-              <div id="class-reach-path" style="display:none; margin-bottom:8px; font-size:0.78rem; background:rgba(0,0,0,0.25); padding:6px; border-radius:4px; border-left:2px solid var(--accent-hover);"></div>
-              <div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:3px; font-weight:600;">CALLERS (Incoming)</div>
-              <div id="class-callers" style="margin-bottom:8px; font-size:0.8rem; max-height:110px; overflow-y:auto; line-height:1.4;">None detected</div>
-              <div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:3px; font-weight:600;">CALLEES (Outgoing)</div>
-              <div id="class-callees" style="font-size:0.8rem; max-height:110px; overflow-y:auto; line-height:1.4;">None detected</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- LLM Prompt Modal -->
-  <div class="modal-overlay" id="llm-modal">
-    <div class="modal-box">
-      <div class="modal-hdr">
-        <h2 id="llm-modal-title">AI Semantic Rename Prompt</h2>
-        <button class="btn btn-ghost" onclick="closeLlmModal()">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p style="font-size:0.82rem; color:var(--text-muted);">
-          Copy this prompt into Claude, Gemini, or ChatGPT to analyze obfuscated logic and receive a standard ProGuard mapping block.
-        </p>
-        <textarea id="llm-prompt-text" readonly></textarea>
-      </div>
-      <div class="modal-ftr">
-        <span id="copy-status" style="font-size:0.82rem; color:var(--success); display:none;">Copied to clipboard!</span>
-        <button class="btn btn-primary" id="btn-copy-prompt" onclick="copyLlmPrompt()">Copy Prompt</button>
-        <button class="btn btn-ghost" onclick="closeLlmModal()">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    let currentData = {
-      classes: [],
-      names: {},
-      selected: null,
-      currentView: 'decompiled',
-      annotations: {},
-      tags: {},
-      treeFilter: 'all'
-    };
-
-    const TAG_MAP = {
-      'benign':  { label: 'benign',  cls: 'tag-benign' },
-      'suspect': { label: 'suspect', cls: 'tag-suspect' },
-      'threat':  { label: 'threat',  cls: 'tag-threat' },
-      'core':    { label: 'core',    cls: 'tag-core' },
-      'net':     { label: 'net',     cls: 'tag-net' },
-      'hook':    { label: 'hook',    cls: 'tag-hook' }
-    };
-
-    async function loadTree() {
-      try {
-        const [resTree, resAnn] = await Promise.all([
-          fetch('/api/tree'),
-          fetch('/api/annotations').catch(() => ({ json: () => ({}) }))
-        ]);
-        const data = await resTree.json();
-        currentData.annotations = (await resAnn.json()) || {};
-        currentData.classes = data.classes || [];
-        currentData.names = data.names || {};
-        currentData.tags = data.tags || {};
-        document.getElementById('target-summary').innerText = (data.target || 'target') + ' (' + currentData.classes.length + ' classes)';
-        filterAndRenderTree();
-        if (currentData.classes.length > 0) {
-          selectClass(currentData.classes[0]);
-        }
-      } catch (e) {
-        document.getElementById('code-content').innerText = 'Failed to load project: ' + e;
-      }
-    }
-
-    function setTreeFilter(type) {
-      currentData.treeFilter = type;
-      document.querySelectorAll('.filter-pills .pill').forEach(btn => {
-        btn.classList.toggle('active', btn.id === 'pill-' + type);
-      });
-      filterAndRenderTree();
-    }
-
-    function filterAndRenderTree() {
-      const q = (document.getElementById('class-filter').value || '').toLowerCase();
-      let list = currentData.classes.filter(c => c.toLowerCase().includes(q));
-      if (currentData.treeFilter === 'tagged') {
-        list = list.filter(c => Boolean(currentData.annotations[c] && (currentData.annotations[c].tag || currentData.annotations[c].note)));
-      } else if (currentData.treeFilter === 'suspect') {
-        list = list.filter(c => {
-          const ann = currentData.annotations[c];
-          return ann && (ann.tag === 'suspect' || ann.tag === 'threat');
-        });
-      } else if (currentData.treeFilter === 'failed') {
-        list = list.filter(c => (currentData.tags[c] || {}).status === 'failed');
-      } else if (currentData.treeFilter === 'partial') {
-        list = list.filter(c => (currentData.tags[c] || {}).status === 'partial');
-      } else if (currentData.treeFilter === 'native') {
-        list = list.filter(c => Boolean((currentData.tags[c] || {}).native));
-      }
-      renderTree(list);
-    }
-
-    function renderTree(list) {
-      const container = document.getElementById('class-tree');
-      container.innerHTML = '';
-      list.forEach(cls => {
-        const el = document.createElement('div');
-        el.className = 'tree-item' + (currentData.selected === cls ? ' active' : '');
-
-        const label = document.createElement('span');
-        label.className = 'tree-label';
-        // show the decoded name (`pkg/A`), keep the on-disk stem as the key
-        label.innerText = currentData.names[cls] || cls;
-        el.appendChild(label);
-
-        const auto = currentData.tags[cls];
-        if (auto) {
-          const addBadge = (label, clsName, title) => {
-            const b = document.createElement('span');
-            b.className = 'tag-badge ' + clsName;
-            b.innerText = label;
-            if (title) b.title = title;
-            el.appendChild(b);
-          };
-          if (auto.status === 'failed') addBadge('failed', 'tag-failed', 'decompilation failed');
-          else if (auto.status === 'partial') addBadge('partial', 'tag-partial',
-            'some members missing' + (auto.score != null ? ' (score ' + auto.score + ')' : ''));
-          if (auto.native) addBadge('native', 'tag-native', auto.native + ' native method(s)');
-          if (auto.engine) {
-            const EN = { cfr: 'CFR', vineflower: 'VF', procyon: 'Procyon' };
-            addBadge(EN[auto.engine] || auto.engine, 'tag-engine', 'winning engine: ' + auto.engine);
-          }
-        }
-
-        const ann = currentData.annotations[cls];
-        if (ann && ann.tag && TAG_MAP[ann.tag]) {
-          const tagInfo = TAG_MAP[ann.tag];
-          const badge = document.createElement('span');
-          badge.className = 'tag-badge ' + tagInfo.cls;
-          badge.innerText = tagInfo.label;
-          el.appendChild(badge);
-        }
-
-        el.onclick = () => selectClass(cls);
-        container.appendChild(el);
-      });
-    }
-
-    document.getElementById('class-filter').oninput = () => {
-      filterAndRenderTree();
-    };
-
-    function esc(s) {
-      return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
-    async function selectClass(cls) {
-      currentData.selected = cls;
-      filterAndRenderTree();
-      const ann = currentData.annotations[cls];
-      let metaHtml = '<b>' + esc(cls) + '</b>';
-      if (ann && ann.tag && TAG_MAP[ann.tag]) {
-        const tagInfo = TAG_MAP[ann.tag];
-        metaHtml += ' <span class="tag-badge ' + tagInfo.cls + '" style="font-size:0.75rem; padding:2px 7px;">' + esc(tagInfo.label) + '</span>';
-      }
-      document.getElementById('class-meta').innerHTML = metaHtml;
-
-      // Load audit annotations
-      const noteData = currentData.annotations[cls] || {};
-      document.getElementById('audit-tag').value = noteData.tag || '';
-      document.getElementById('audit-note').value = noteData.note || '';
-      document.getElementById('audit-status').innerText = noteData.updated_at ? ('Saved ' + noteData.updated_at.split(' ')[1]) : '';
-
-      // Load decompiled source
-      if (currentData.currentView === 'decompiled') {
-        const res = await fetch('/api/source?class=' + encodeURIComponent(cls));
-        const code = await res.text();
-        document.getElementById('code-content').innerText = code;
-      } else if (currentData.currentView === 'diff') {
-        fetchDiff();
-      }
-
-      // Load class metadata & engine info
-      const metaRes = await fetch('/api/class_info?class=' + encodeURIComponent(cls));
-      const meta = await metaRes.json();
-      
-      let engText = '<b>Engine:</b> ' + esc(meta.engine || 'Final (src)');
-      if (meta.quality && meta.quality.score !== undefined) {
-        engText += ' &bull; <b>Score:</b> ' + (Math.round(meta.quality.score * 10) / 10) + '%';
-      }
-      if (meta.attempts && meta.attempts.length > 0) {
-        engText += '<div style="margin-top:4px; font-size:0.75rem; color:var(--text-muted);">Tries: ' + esc(meta.attempts.join(', ')) + '</div>';
-      }
-      document.getElementById('class-engine-info').innerHTML = engText;
-
-      let hooksHtml = '';
-      if (meta.hooks && meta.hooks.length > 0) {
-        meta.hooks.forEach(h => {
-          hooksHtml += '<div style="margin-bottom:6px;"><b>@' + esc(h.kind) + '</b> &rarr; ' + esc(h.target_class || '') + ' ' + esc(h.target_method || '') + '</div>';
-        });
-      } else {
-        hooksHtml = 'No mixin hooks';
-      }
-      document.getElementById('class-hooks').innerHTML = hooksHtml;
-
-      let strHtml = '';
-      if (meta.strings && meta.strings.length > 0) {
-        meta.strings.forEach(s => {
-          const tags = (s.tags || []).map(t => '<span class="tag danger">' + esc(t) + '</span>').join('');
-          strHtml += '<div style="margin-bottom:4px;"><code>' + esc(s.string) + '</code> ' + tags + '</div>';
-        });
-      } else {
-        strHtml = 'No sensitive literals';
-      }
-      document.getElementById('class-strings').innerHTML = strHtml;
-
-      fetchCallGraph(cls);
-    }
-
-    async function fetchCallGraph(cls) {
-      const badgeEl = document.getElementById('class-reach-badge');
-      const pathEl = document.getElementById('class-reach-path');
-      const callersEl = document.getElementById('class-callers');
-      const calleesEl = document.getElementById('class-callees');
-      badgeEl.innerHTML = '<span style="color:var(--text-muted); font-size:0.78rem;">Analyzing reachability ...</span>';
-      pathEl.style.display = 'none';
-
-      try {
-        const res = await fetch('/api/callgraph?class=' + encodeURIComponent(cls));
-        const data = await res.json();
-        if (data.error) {
-          // 结构化错误：构建失败/无目标，明确报错而不是伪装成空图
-          badgeEl.innerHTML = '<span class="tag-badge tag-suspect" style="font-size:0.76rem; padding:2px 7px;">unavailable</span>' +
-            '<div style="font-size:0.74rem; color:var(--text-muted); margin-top:3px;">' + esc(data.error) + '</div>';
-          callersEl.innerHTML = '<div style="color:var(--text-muted); font-size:0.75rem;">N/A (callgraph unavailable)</div>';
-          calleesEl.innerHTML = '<div style="color:var(--text-muted); font-size:0.75rem;">N/A (callgraph unavailable)</div>';
-          return;
-        }
-        if (data.reachable === true) {
-          badgeEl.innerHTML = '<span class="tag-badge tag-benign" style="font-size:0.76rem; padding:2px 7px;">reachable</span>' +
-            '<div style="font-size:0.74rem; color:var(--text-muted); margin-top:3px;">Triggerable from ' + (data.entrypoints_count || 1) + ' entrypoint(s)</div>';
-        } else if (data.reachable === false) {
-          badgeEl.innerHTML = '<span class="tag-badge tag-suspect" style="font-size:0.76rem; padding:2px 7px;">unreachable</span>' +
-            '<div style="font-size:0.74rem; color:var(--text-muted); margin-top:3px;">No execution path found from mod/mixin entrypoints</div>';
-        } else {
-          badgeEl.innerHTML = '<span style="font-size:0.76rem; color:var(--text-muted);">No entrypoints defined for target</span>';
-        }
-
-        if (data.path && data.path.length > 0) {
-          let pathHtml = '<div style="font-weight:600; margin-bottom:4px; color:var(--accent-hover);">Execution Trigger Path:</div>';
-          data.path.forEach((step, i) => {
-            pathHtml += '<div style="margin-left:' + (i * 8) + 'px; margin-bottom:2px;">' +
-              '&bull; <code>' + esc(step.from) + '</code>' +
-              ' <span style="font-size:0.7rem; color:var(--text-muted);">(' + esc(step.opcode) + ')</span>' +
-              ' &rarr; <code>' + esc(step.to) + '</code></div>';
-          });
-          pathEl.innerHTML = pathHtml;
-          pathEl.style.display = 'block';
-        }
-
-        let cHtml = '';
-        if (data.callers && data.callers.length > 0) {
-          data.callers.forEach(c => {
-            cHtml += '<div style="margin-bottom:3px;"><span style="color:var(--accent); font-size:0.72rem;">[' + esc(c.opcode) + ']</span> <code>' + esc(c.caller) + '</code></div>';
-          });
-        } else {
-          cHtml = '<div style="color:var(--text-muted); font-size:0.75rem;">None detected</div>';
-        }
-        callersEl.innerHTML = cHtml;
-
-        let ceHtml = '';
-        if (data.callees && data.callees.length > 0) {
-          data.callees.forEach(c => {
-            ceHtml += '<div style="margin-bottom:3px;"><span style="color:var(--teal); font-size:0.72rem;">[' + esc(c.opcode) + ']</span> <code>' + esc(c.callee) + '</code></div>';
-          });
-        } else {
-          ceHtml = '<div style="color:var(--text-muted); font-size:0.75rem;">None detected</div>';
-        }
-        calleesEl.innerHTML = ceHtml;
-      } catch (e) {
-        badgeEl.innerText = 'Call graph unavailable: ' + e;
-      }
-    }
-
-    async function saveAuditNote() {
-      const cls = currentData.selected;
-      if (!cls) return;
-      const tag = document.getElementById('audit-tag').value;
-      const note = document.getElementById('audit-note').value.trim();
-      const statusEl = document.getElementById('audit-status');
-      statusEl.innerText = 'Saving ...';
-
-      try {
-        const res = await fetch('/api/annotations', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ class: cls, tag: tag, note: note })
-        });
-        const resData = await res.json();
-        if (resData.ok) {
-          currentData.annotations = resData.annotations || {};
-          statusEl.innerText = 'Saved!';
-          filterAndRenderTree();
-          const cur = currentData.annotations[cls];
-          let metaHtml = '<b>' + esc(cls) + '</b>';
-          if (cur && cur.tag && TAG_MAP[cur.tag]) {
-            const tagInfo = TAG_MAP[cur.tag];
-            metaHtml += ' <span class="tag-badge ' + tagInfo.cls + '" style="font-size:0.75rem; padding:2px 7px;">' + esc(tagInfo.label) + '</span>';
-          }
-          document.getElementById('class-meta').innerHTML = metaHtml;
-          setTimeout(() => {
-            const latest = currentData.annotations[cls];
-            if (latest && latest.updated_at) {
-              statusEl.innerText = 'Saved ' + latest.updated_at.split(' ')[1];
-            }
-          }, 1500);
-        } else {
-          statusEl.innerText = 'Save error';
-        }
-      } catch (e) {
-        statusEl.innerText = 'Err: ' + e;
-      }
-    }
-
-    async function clearAuditNote() {
-      document.getElementById('audit-tag').value = '';
-      document.getElementById('audit-note').value = '';
-      await saveAuditNote();
-    }
-
-    async function fetchDiff() {
-      const cls = currentData.selected;
-      if (!cls) return;
-      const e1 = document.getElementById('diff-e1').value;
-      const e2 = document.getElementById('diff-e2').value;
-      const diffContent = document.getElementById('diff-content');
-      const statsBadge = document.getElementById('diff-stats');
-      diffContent.innerText = 'Calculating diff between ' + e1 + ' and ' + e2 + ' ...';
-      statsBadge.innerText = '...';
-
-      try {
-        const res = await fetch('/api/diff?class=' + encodeURIComponent(cls) + '&e1=' + encodeURIComponent(e1) + '&e2=' + encodeURIComponent(e2));
-        const data = await res.json();
-
-        if (data.identical) {
-          statsBadge.innerText = 'Identical (0 diff)';
-          diffContent.innerHTML = '<div style="color:var(--success); padding:10px;">Output from ' + esc(e1) + ' and ' + esc(e2) + ' are completely identical.</div>';
-          return;
-        }
-
-        statsBadge.innerText = '+' + (data.stats.added || 0) + ' / -' + (data.stats.removed || 0);
-
-        const lines = (data.diff || '').split('\\n');
-        let htmlOut = '';
-        lines.forEach(line => {
-          let lineCls = 'ctx';
-          if (line.startsWith('+++') || line.startsWith('---')) {
-            lineCls = 'hdr';
-          } else if (line.startsWith('@@')) {
-            lineCls = 'chunk';
-          } else if (line.startsWith('+')) {
-            lineCls = 'add';
-          } else if (line.startsWith('-')) {
-            lineCls = 'del';
-          }
-          htmlOut += '<div class="diff-line ' + lineCls + '">' + esc(line) + '</div>';
-        });
-        diffContent.innerHTML = htmlOut || '<div style="color:var(--text-muted); padding:10px;">No diff output generated.</div>';
-      } catch (e) {
-        diffContent.innerText = 'Diff calculation failed: ' + e;
-      }
-    }
-
-    async function openLlmPromptModal() {
-      const cls = currentData.selected;
-      if (!cls) return;
-      document.getElementById('llm-modal-title').innerText = 'AI Semantic Rename: ' + cls;
-      document.getElementById('llm-prompt-text').value = 'Generating prompt ...';
-      document.getElementById('copy-status').style.display = 'none';
-      document.getElementById('llm-modal').classList.add('active');
-
-      try {
-        const res = await fetch('/api/llm_prompt?class=' + encodeURIComponent(cls));
-        const data = await res.json();
-        document.getElementById('llm-prompt-text').value = data.prompt || '// No prompt generated';
-      } catch (e) {
-        document.getElementById('llm-prompt-text').value = 'Failed to generate prompt: ' + e;
-      }
-    }
-
-    function closeLlmModal() {
-      document.getElementById('llm-modal').classList.remove('active');
-    }
-
-    async function copyLlmPrompt() {
-      const txt = document.getElementById('llm-prompt-text').value;
-      try {
-        await navigator.clipboard.writeText(txt);
-        const status = document.getElementById('copy-status');
-        status.style.display = 'inline';
-        setTimeout(() => { status.style.display = 'none'; }, 2500);
-      } catch (e) {
-        alert('Copy failed: ' + e);
-      }
-    }
-
-    async function exportIdeProject() {
-      if (!confirm('Export decompiled source as an IDE-ready Gradle project (with build.gradle, stubs, and resources)?')) {
-        return;
-      }
-      try {
-        const res = await fetch('/api/export_project');
-        const data = await res.json();
-        if (data.ok) {
-          alert('IDE Project generated successfully!\\n\\nTarget directory: ' + data.project_dir + '\\n\\nOpen in IntelliJ IDEA: File -> Open -> build.gradle');
-        } else {
-          alert('Project export error: ' + (data.error || 'Unknown failure'));
-        }
-      } catch (e) {
-        alert('Failed to connect to export endpoint: ' + e);
-      }
-    }
-
-    function switchView(view) {
-      currentData.currentView = view;
-      document.querySelectorAll('.tab-btn').forEach((btn, idx) => {
-        btn.classList.toggle('active', ['decompiled', 'diff', 'natives', 'threats', 'report'][idx] === view);
-      });
-      const codeView = document.getElementById('code-content');
-      const diffView = document.getElementById('diff-view');
-
-      if (view === 'diff') {
-        codeView.style.display = 'none';
-        diffView.style.display = 'flex';
-        fetchDiff();
-      } else {
-        codeView.style.display = 'block';
-        diffView.style.display = 'none';
-        if (view === 'report') {
-          fetch('/api/report').then(r => r.text()).then(txt => codeView.innerText = txt);
-        } else if (view === 'natives') {
-          fetch('/api/natives').then(r => r.text()).then(txt => codeView.innerText = txt);
-        } else if (view === 'threats') {
-          fetch('/api/threats').then(r => r.text()).then(txt => codeView.innerText = txt);
-        } else if (currentData.selected) {
-          selectClass(currentData.selected);
-        }
-      }
-    }
-
-    // Keyboard shortcut: Ctrl+S to save audit note
-    document.addEventListener('keydown', e => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        saveAuditNote();
-      }
-    });
-
-    loadTree();
-  </script>
-</body>
-</html>
-"""
+_WEB_ASSETS = Path(__file__).with_name("web_assets")
+HTML_TEMPLATE = (
+    (_WEB_ASSETS / "index.html").read_text(encoding="utf-8")
+    .replace("/*__INLINE_CSS__*/", (_WEB_ASSETS / "app.css").read_text(encoding="utf-8"))
+    .replace("/*__INLINE_JS__*/", (_WEB_ASSETS / "app.js").read_text(encoding="utf-8"))
+)
 
 
 def _report_classes(data: dict) -> dict:
@@ -737,6 +85,42 @@ def _class_tags(data: dict) -> dict:
             item["score"] = round(float(score), 1)
         tags[str(key)] = item
     return tags
+
+
+def _analysis_input(work_dir: Path) -> Path | None:
+    """The original jar recorded by the decompiler/pipeline report, if any."""
+    if work_dir.is_file() and work_dir.suffix.lower() in (".jar", ".exe"):
+        return work_dir
+    candidates = [work_dir / "report.json",
+                  work_dir.parent / (work_dir.name + "_decompile") / "report.json"]
+    for rep in candidates:
+        if not rep.is_file():
+            continue
+        try:
+            data = json.loads(rep.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        raw = data.get("input")
+        if not raw:
+            continue
+        path = Path(raw)
+        if not path.is_absolute():
+            for base in (work_dir, work_dir.parent):
+                cand = base / path
+                if cand.is_file():
+                    return cand
+        if path.is_file():
+            return path
+    return None
+
+
+def _javap_bin() -> str | None:
+    java = EN.find_java()
+    if java:
+        exe = Path(java).with_name("javap" + Path(java).suffix)
+        if exe.is_file():
+            return str(exe)
+    return shutil.which("javap")
 
 
 def _engine_key(engine: str) -> str | None:
@@ -1205,6 +589,43 @@ class WorkbenchHandler(SimpleHTTPRequestHandler):
                 "candidate_count": len(candidates),
                 "line_count": len(code_lines),
             })
+            return
+
+        if path == "/api/bytecode":
+            cls = query.get("class", [""])[0]
+            if not cls or not re.fullmatch(r"[A-Za-z_$][\w$/]*", cls):
+                self.send_json({"ok": False, "error": "invalid class name"})
+                return
+            jar = _analysis_input(self.work_dir)
+            javap = _javap_bin()
+            if jar is None:
+                self.send_json({"ok": False,
+                                "error": "no input jar recorded in report.json"})
+                return
+            if jar.suffix.lower() == ".exe":
+                from . import sandbox as SBX
+                jar = SBX.plain_jar(jar)
+            if javap is None:
+                self.send_json({"ok": False,
+                                "error": "javap not found (install a JDK)"})
+                return
+            try:
+                proc = subprocess.run(
+                    [javap, "-p", "-c", "-classpath", str(jar),
+                     cls.replace("/", ".")],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=30)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": f"javap failed: {exc}"})
+                return
+            if proc.returncode != 0 and not proc.stdout:
+                err = (proc.stderr or "javap failed").strip()
+                self.send_json({"ok": False, "error": err[:2000]})
+                return
+            out = proc.stdout
+            if len(out) > 2_000_000:
+                out = out[:2_000_000] + "\n// ... output truncated ...\n"
+            self.send_json({"ok": True, "class": cls, "bytecode": out})
             return
 
         if path == "/api/class_info":

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jdec workbench</title>
+<style>/*__INLINE_CSS__*/</style>
+</head>
+<body>
+<div id="app">
+  <header class="appbar">
+    <div class="brand"><span class="brand-mark">jdec</span><span class="brand-name">workbench</span></div>
+    <div class="target-pill" id="target-summary">Loading target</div>
+    <button class="palette-trigger" id="palette-trigger" title="Jump to a class (Ctrl+K)">
+      <span>Jump to class</span><kbd>Ctrl</kbd><kbd>K</kbd>
+    </button>
+    <div class="appbar-spacer"></div>
+    <div class="appbar-stats" id="appbar-stats"></div>
+    <button class="btn" id="btn-export">Export IDE Project</button>
+    <button class="icon-btn" id="btn-help" title="Keyboard shortcuts (F1)">?</button>
+  </header>
+
+  <main class="workspace" id="workspace">
+    <aside class="sidebar" id="sidebar">
+      <div class="pane-header">
+        <input id="class-filter" class="search-input" type="search" placeholder="Filter classes and packages" spellcheck="false">
+        <span class="pane-count" id="tree-count"></span>
+      </div>
+      <div class="filter-pills" id="filters">
+        <button class="pill active" id="pill-all" data-filter="all">All</button>
+        <button class="pill" id="pill-failed" data-filter="failed">Failed <span class="pill-count" id="count-failed">0</span></button>
+        <button class="pill" id="pill-partial" data-filter="partial">Partial <span class="pill-count" id="count-partial">0</span></button>
+        <button class="pill" id="pill-native" data-filter="native">Native <span class="pill-count" id="count-native">0</span></button>
+        <button class="pill" id="pill-tagged" data-filter="tagged">Tagged <span class="pill-count" id="count-tagged">0</span></button>
+      </div>
+      <div class="tree-scroll" id="tree-scroll">
+        <div class="tree-spacer" id="tree-spacer"></div>
+        <div class="tree-rows" id="tree-rows"></div>
+      </div>
+      <div class="pane-footer" id="tree-footer"></div>
+    </aside>
+
+    <div class="splitter" id="split-left" title="Drag to resize"></div>
+
+    <section class="editor">
+      <div class="tabs" id="main-tabs">
+        <button class="tab active" data-view="source">Source</button>
+        <button class="tab" data-view="diff">Engine Diff</button>
+        <button class="tab" data-view="bytecode">Bytecode</button>
+        <button class="tab" data-view="audit">Audit</button>
+      </div>
+      <div class="editor-toolbar">
+        <div class="crumb" id="crumb">no class selected</div>
+        <div class="toolbar-actions">
+          <button class="btn-ghost" id="btn-copy" title="Copy source">Copy</button>
+          <button class="btn-ghost" id="btn-wrap" title="Toggle line wrap">Wrap</button>
+          <span class="toolbar-meta" id="editor-meta"></span>
+        </div>
+      </div>
+
+      <div class="view active" id="view-source">
+        <div class="code-scroll" id="code-scroll">
+          <div class="code-lines" id="code-lines"></div>
+        </div>
+      </div>
+
+      <div class="view" id="view-diff">
+        <div class="diff-toolbar">
+          <span>Engine 1</span>
+          <select id="diff-e1">
+            <option value="final" selected>Final (winner)</option>
+            <option value="cfr">CFR 0.152</option>
+            <option value="vineflower">Vineflower</option>
+            <option value="procyon">Procyon</option>
+          </select>
+          <span>Engine 2</span>
+          <select id="diff-e2">
+            <option value="cfr" selected>CFR 0.152</option>
+            <option value="vineflower">Vineflower</option>
+            <option value="procyon">Procyon</option>
+            <option value="final">Final (winner)</option>
+          </select>
+          <button class="btn" id="btn-diff">Compare</button>
+          <span class="toolbar-meta" id="diff-stats"></span>
+        </div>
+        <div class="diff-scroll" id="diff-body"><div class="empty">Select a class and run Compare.</div></div>
+      </div>
+
+      <div class="view" id="view-bytecode">
+        <div class="bytecode-scroll" id="bytecode-body"><div class="empty">Select a class to disassemble it with javap.</div></div>
+      </div>
+
+      <div class="view" id="view-audit">
+        <div class="audit-grid">
+          <section class="audit-card">
+            <h3>Triage Report</h3>
+            <pre id="report-body" class="report-text">No class selected.</pre>
+          </section>
+          <section class="audit-card">
+            <h3>Native Triage</h3>
+            <pre id="natives-body" class="report-text">No native triage report.</pre>
+          </section>
+          <section class="audit-card">
+            <h3>Threat Strings</h3>
+            <pre id="threats-body" class="report-text">No strings.tsv found.</pre>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <div class="splitter" id="split-right" title="Drag to resize"></div>
+
+    <aside class="inspector" id="inspector">
+      <div class="tabs tabs-small" id="inspector-tabs">
+        <button class="tab active" data-iview="overview">Overview</button>
+        <button class="tab" data-iview="members">Members</button>
+        <button class="tab" data-iview="graph">Callgraph</button>
+        <button class="tab" data-iview="notes">Notes</button>
+      </div>
+      <div class="inspector-body">
+        <div class="iview active" id="iview-overview">
+          <div class="card" id="class-meta">No class selected.</div>
+          <div class="card" id="class-engine-info"></div>
+          <div class="card">
+            <div class="card-title">Class Strings</div>
+            <div id="class-strings" class="string-list"></div>
+          </div>
+        </div>
+        <div class="iview" id="iview-members">
+          <input id="outline-filter" class="search-input outline-search" placeholder="Filter members" spellcheck="false">
+          <div id="outline-list" class="outline-list"></div>
+        </div>
+        <div class="iview" id="iview-graph">
+          <div id="callgraph-body" class="graph-body"></div>
+        </div>
+        <div class="iview" id="iview-notes">
+          <div class="card">
+            <label for="audit-tag" class="field-label">TAG</label>
+            <select id="audit-tag">
+              <option value="">-- No Tag --</option>
+              <option value="benign">benign</option>
+              <option value="suspect">suspect</option>
+              <option value="threat">threat</option>
+              <option value="core">core</option>
+              <option value="net">net</option>
+              <option value="hook">hook</option>
+            </select>
+            <label for="audit-note" class="field-label">NOTE</label>
+            <textarea id="audit-note" rows="5" placeholder="What is this class responsible for?"></textarea>
+            <div class="row">
+              <button class="btn" id="btn-save-note">Save note</button>
+              <button class="btn-ghost" id="btn-clear-note">Clear</button>
+              <span class="muted" id="audit-status"></span>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">AI Semantic Rename</div>
+            <p class="muted">Generate a ProGuard/Tiny mapping prompt from this class, its hooks and sensitive strings.</p>
+            <button class="btn" id="btn-llm">Build prompt</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span class="status-item" id="status-target">jdec workbench</span>
+    <span class="status-item" id="status-selection">no selection</span>
+    <span class="status-spacer"></span>
+    <span class="status-item" id="status-connection">localhost</span>
+  </footer>
+</div>
+
+<div class="modal-backdrop" id="palette-modal" hidden>
+  <div class="modal palette">
+    <div class="modal-head"><span>Jump to class</span><kbd>Esc</kbd></div>
+    <input id="palette-input" class="palette-input" placeholder="Type a class or package name" spellcheck="false">
+    <div class="palette-list" id="palette-list"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="llm-modal" hidden>
+  <div class="modal wide">
+    <div class="modal-head"><span>AI Semantic Rename</span><button class="icon-btn" id="btn-llm-close">?</button></div>
+    <div class="modal-body">
+      <div class="row"><span class="muted" id="llm-meta"></span></div>
+      <textarea id="llm-prompt" class="prompt-text" readonly></textarea>
+    </div>
+    <div class="modal-foot"><button class="btn" id="btn-llm-copy">Copy prompt</button><button class="btn-ghost" id="btn-llm-dismiss">Close</button></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="help-modal" hidden>
+  <div class="modal">
+    <div class="modal-head"><span>Keyboard shortcuts</span><button class="icon-btn" id="btn-help-close">?</button></div>
+    <div class="modal-body shortcuts">
+      <div><kbd>Ctrl</kbd><kbd>K</kbd><span>Jump to class</span></div>
+      <div><kbd>F1</kbd><span>This help</span></div>
+      <div><kbd>Esc</kbd><span>Close overlay</span></div>
+      <div><kbd>Ctrl</kbd><kbd>S</kbd><span>Save note</span></div>
+      <div><kbd>1</kbd><span>Source view</span></div>
+      <div><kbd>2</kbd><span>Engine diff</span></div>
+      <div><kbd>3</kbd><span>Bytecode</span></div>
+      <div><kbd>4</kbd><span>Audit</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script>/*__INLINE_JS__*/</script>
+</body>
+</html>
