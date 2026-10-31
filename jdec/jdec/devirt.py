@@ -832,7 +832,10 @@ def compute_max_stack(instructions: list[VMInstruction], vm_method: VMMethod,
         if after < 0:
             after = 0  # malformed stream: clamp so propagation stays usable
 
-        def reach(target_vpc: int) -> None:
+        # `after` is rebound every iteration; binding it here keeps the closure
+        # from reading a later iteration's value if this ever stops being called
+        # immediately.
+        def reach(target_vpc: int, after: int = after) -> None:
             t_idx = v_pc_to_idx.get(target_vpc, last)
             if after > depths.get(t_idx, -1):
                 depths[t_idx] = after

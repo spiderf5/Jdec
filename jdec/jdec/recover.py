@@ -574,7 +574,7 @@ def rewrite_sources(src_dir: Path, tsv_path: Path | None = None,
         n_files += 1
         mask = code_mask(txt)
 
-        def sub(m: "re.Match") -> str:
+        def sub(m: "re.Match", mask=mask) -> str:
             nonlocal replaced, missed
             if not mask[m.start()]:
                 # 匹配起点落在注释/字符串内：不是真实调用点，原样保留
@@ -789,8 +789,11 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
             f"{len(fail_lines)} FAIL line(s) parsed into zero triage buckets "
             f"- driver FAIL 行格式变了，修 triage_failures 再跑")
     if fail_lines:
-        assert triage_path is not None and triage_path.exists(), \
-            "fail_lines present but failed_triage.md missing"
+        # `assert` would vanish under `python -O`, and this guard exists to
+        # stop a malformed driver report from being read as "no failures".
+        if triage_path is None or not triage_path.exists():
+            raise RuntimeError(
+                "fail_lines present but failed_triage.md missing")
     # 文本值去重：剔除数组/对象 toString（"[Lxxx;@hash"、"xxx@hash"）
     uniq = set()
     for v in values:

@@ -482,7 +482,10 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
         # 词法 mask：注释/字符串里的同形调用点不是真调用，跳过
         mask = code_mask(txt)
 
-        def repl_q(m: "re.Match") -> str:
+        # Bind the per-file values as defaults: these callbacks are handed to
+        # re.sub inside the same iteration today, but a closure over the loop
+        # variable is a silent mis-substitution waiting for a refactor.
+        def repl_q(m: "re.Match", mask=mask) -> str:
             if not mask[m.start()]:
                 return m.group(0)
             cls_raw, meth = m.group(1), m.group(2)
@@ -502,28 +505,30 @@ def apply(src_dir: Path, harvest_path: Path | None, out_dir: Path,
             stat["miss_q"] += 1
             return m.group(0)
 
-        def repl_b(m: "re.Match") -> str:
-            if not mask_b[m.start()]:
-                return m.group(0)
-            meth = m.group(1)
-            if meth not in own_acc:
-                return m.group(0)
-            if _overload_ok(acc, own_fq, meth,
-                            m.group(2), m.group(3)) != "ok":
-                return m.group(0)
-            key = (own_fq, meth, norm_int(m.group(2)), norm_int(m.group(3)))
-            if key in plain:
-                lit = java_escape(plain[key])
-                _check_lit(lit, plain[key])
-                stat["repl_bare"] += 1
-                return '"' + lit + '"'
-            stat["miss_bare"] += 1
-            return m.group(0)
-
         txt = _CALL_Q.sub(repl_q, txt)
         if own_acc:
             # _CALL_Q 的替换会改变长度偏移，bare 正则须对新文本重算 mask
             mask_b = code_mask(txt)
+
+            def repl_b(m: "re.Match", mask_b=mask_b,
+                       own_acc=own_acc, own_fq=own_fq) -> str:
+                if not mask_b[m.start()]:
+                    return m.group(0)
+                meth = m.group(1)
+                if meth not in own_acc:
+                    return m.group(0)
+                if _overload_ok(acc, own_fq, meth,
+                                m.group(2), m.group(3)) != "ok":
+                    return m.group(0)
+                key = (own_fq, meth, norm_int(m.group(2)), norm_int(m.group(3)))
+                if key in plain:
+                    lit = java_escape(plain[key])
+                    _check_lit(lit, plain[key])
+                    stat["repl_bare"] += 1
+                    return '"' + lit + '"'
+                stat["miss_bare"] += 1
+                return m.group(0)
+
             txt = _CALL_BARE.sub(repl_b, txt)
         if txt != orig:
             _write(f, txt)
