@@ -101,6 +101,12 @@ jobs:
       - name: Engine cache must not live under site-packages
         run: |
           test ! -d /tmp/jdec-wheel-venv/lib/python3.11/site-packages/engines
+      - name: Build fixtures
+        # jdec/tests/*.jar is gitignored, so a fresh checkout has none and the
+        # probe below would fail with "no such file". run_tests.py builds them
+        # itself; this job never runs the suite, so it must ask explicitly.
+        run: |
+          python jdec/tests/build_fixtures.py
       - name: Probe a fixture with the wheel install
         run: |
           /tmp/jdec-wheel-venv/bin/jdec probe jdec/tests/sample.jar
