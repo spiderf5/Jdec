@@ -43,6 +43,10 @@ jobs:
         run: |
           jdec --help
 
+      - name: Skill self-test
+        run: |
+          python java-deobf/scripts/self_test.py
+
       - name: Run test suite
         run: |
           python jdec/tests/run_tests.py
