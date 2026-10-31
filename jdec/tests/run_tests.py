@@ -1817,6 +1817,177 @@ def test_rewritten_list_from_both_paths() -> None:
         _sh.rmtree(td, ignore_errors=True)
 
 
+def test_devirt_realistic_vm() -> None:
+    """A high-fidelity VM sample: tableswitch dispatch, handlers, wide types.
+
+    Four virtualized methods go through the full chain — pool, devirtualize
+    with frame generation, -Xverify:all, differential behaviour — covering the
+    structural features a real VM protector has: a table-driven dispatcher
+    with 4 routes, a VM-level exception handler that swallows a division by
+    zero, long/double arithmetic across loop bodies, and an array loop. A real
+    commercial protector sample is still missing; this is the closest
+    structural simulation and it is registered as such.
+    """
+    print("devirt: tableswitch dispatcher, handler, long/double, array loop")
+    import zipfile
+    from jdec import behave as BH
+    from jdec import devirt as DV
+    from jdec import bvm_devirt as BVM
+    from jdec import stubs as SB
+    from jdec.ir import attrs as AT
+
+    if EN.find_java() is None:
+        print("  (skipped: needs a JVM)")
+        return
+
+    O = DV.ORDINAL_BY_NAME
+    pool = {
+        # calc(III)I: switch(op): 0 add, 1 sub, 2 div (handler -> -1), dflt mul
+        900: BVM.BVMMethod(
+            code_id=900, name="calc", desc="(III)I", is_static=True,
+            max_locals=3, max_stack=4,
+            # VM jump targets and exception ranges are virtual BYTE offsets,
+            # not instruction indexes. The switch consumes `op`; each case
+            # pushes a and b from locals before the arithmetic.
+            code=[O["ILOAD"], 0,
+                  O["TABLESWITCH"], 0, 2, 28, 3, 10, 16, 22,
+                  O["ILOAD"], 1, O["ILOAD"], 2, O["IADD"], O["IRETURN"],
+                  O["ILOAD"], 1, O["ILOAD"], 2, O["ISUB"], O["IRETURN"],
+                  O["ILOAD"], 1, O["ILOAD"], 2, O["IDIV"], O["IRETURN"],
+                  O["ILOAD"], 1, O["ILOAD"], 2, O["IMUL"], O["IRETURN"],
+                  O["POP"], O["ICONST_M1"], O["IRETURN"]],
+            exception_handlers=[26, 27, 34, 0]),
+        # prod(I)I: long accumulator over a counted loop
+        901: BVM.BVMMethod(
+            code_id=901, name="prod", desc="(I)I", is_static=True,
+            max_locals=5, max_stack=4,
+            code=[O["LCONST_1"], O["LSTORE"], 1,
+                  O["ICONST_1"], O["ISTORE"], 3,
+                  O["ILOAD"], 3, O["ILOAD"], 0, O["IF_ICMPGE"], 25,
+                  O["LLOAD"], 1, O["ILOAD"], 3, O["I2L"], O["LMUL"],
+                  O["LSTORE"], 1,
+                  O["IINC"], 3, 1,
+                  O["GOTO"], 6,
+                  O["LLOAD"], 1, O["L2I"], O["IRETURN"]]),
+        # mul2(D)D
+        902: BVM.BVMMethod(
+            code_id=902, name="mul2", desc="(D)D", is_static=True,
+            max_locals=3, max_stack=4,
+            code=[O["DLOAD"], 0, O["DCONST_1"], O["DADD"], O["DRETURN"]]),
+        # sum([I)I
+        903: BVM.BVMMethod(
+            code_id=903, name="sum", desc="([I)I", is_static=True,
+            max_locals=3, max_stack=3,
+            code=[O["ICONST_0"], O["ISTORE"], 1,
+                  O["ICONST_0"], O["ISTORE"], 2,
+                  O["ILOAD"], 2, O["ALOAD"], 0, O["ARRAYLENGTH"],
+                  O["IF_ICMPGE"], 28,
+                  O["ILOAD"], 1, O["ALOAD"], 0, O["ILOAD"], 2, O["IALOAD"],
+                  O["IADD"], O["ISTORE"], 1,
+                  O["IINC"], 2, 1,
+                  O["GOTO"], 6,
+                  O["ILOAD"], 1, O["IRETURN"]]),
+    }
+
+    def host():
+        cf = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
+        helper = BVM.ConstantPoolHelper(cf)
+        mref = helper.add_methodref("com/example/VM", "execute", "(I)V")
+        tail = {"calc": 0xAC, "prod": 0xAC, "mul2": 0xAE, "sum": 0xAC}
+        for mid, m in pool.items():
+            member = CF.Member(
+                access_flags=CF.ACC_PUBLIC | CF.ACC_STATIC,
+                name_index=cf.intern_utf8(m.name),
+                descriptor_index=cf.intern_utf8(m.desc),
+                attrs_blob=b"")
+            cf.methods.append(member)
+            blob = bytes([0x11, (mid >> 8) & 0xFF, mid & 0xFF,
+                          0xB8, (mref >> 8) & 0xFF, mref & 0xFF,
+                          tail[m.name]])
+            BVM.BVMDevirtualizer.set_code_attribute(
+                cf, member,
+                BVM.BVMDevirtualizer.build_code_attribute(
+                    cf, 2, 4, blob, [], member=member))
+        return cf
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_vm_hi_"))
+    try:
+        src = td / "vm.jar"
+        with zipfile.ZipFile(src, "w") as z:
+            z.writestr("com/example/Host.class", host().serialize())
+
+        out = td / "devirt.jar"
+        res = BVM.BVMDevirtualizer.devirtualize_jar(src, out, pool,
+                                                    verify_output=True)
+        check("all four VM methods were devirtualized",
+              res["devirtualized_methods"] == 4,
+              str(res.get("devirtualized_methods")))
+        vres = res.get("verify") or {}
+        check("the verifier accepted every rebuilt class",
+              vres.get("verified") == 1 and not vres.get("reverted")
+              and not res.get("frame_notes"),
+              str({k: vres.get(k) for k in ("verified", "reverted")}
+                  | {"frame_notes": len(res.get("frame_notes") or [])}))
+
+        # every rebuilt method carries a StackMapTable: loading is not enough
+        with zipfile.ZipFile(out) as z:
+            cf = CF.parse(z.read("com/example/Host.class"))
+        frames_found = 0
+        for m in cf.methods:
+            ci = BC.method_code(cf, m, decode_insns=False)
+            if ci is None or not ci.code:
+                continue
+            found = any(n == "StackMapTable"
+                        for n, _payload in AT.code_subattrs(cf, m))
+            if found:
+                frames_found += 1
+        check("all rebuilt methods have StackMapTables", frames_found == 4,
+              f"{frames_found}/4")
+
+        # differential: the translated jar against itself through both the
+        # interpreter (value assertions) and the real JVM (same verdict)
+        from jdec.interp.engine import Interp, Universe
+        from jdec.interp.values import Arr, Heap
+        from jdec.interp.models import Models
+        it = Interp(Universe(out), Heap(), Models())
+        cases = [
+            ("calc", [0, 3, 4], 7), ("calc", [1, 9, 4], 5),
+            ("calc", [9, 2, 3], 6),            # default route
+            ("calc", [2, 7, 0], -1),           # handler swallows the /0
+            ("prod", [5], 24), ("prod", [0], 1),
+            ("sum", [Arr("I", [1, 2, 3])], 6),
+        ]
+        for name, argv, expect in cases:
+            desc = {"calc": "(III)I", "prod": "(I)I",
+                    "sum": "([I)I"}[name]
+            h = Heap()
+            o = it.invoke("com/example/Host", name, desc, None, argv)
+            check(f"{name}{argv} computes {expect}",
+                  o.kind == "return" and o.value == expect,
+                  f"{o.kind}:{o.value} {o.reason[:60]}")
+        h = Heap()
+        o = it.invoke("com/example/Host", "mul2", "(D)D", None, [2.5])
+        check("mul2(2.5) computes 3.5",
+              o.kind == "return" and abs(o.value - 3.5) < 1e-9,
+              f"{o.kind}:{o.value}")
+
+        jvm_cases = [BH.Case("com/example/Host", n, t, v)
+                     for n, t, v in [("calc", ("int", "int", "int"),
+                                      ("0", "3", "4")),
+                                     ("calc", ("int", "int", "int"),
+                                      ("2", "7", "0")),
+                                     ("prod", ("int",), ("5",)),
+                                     ("sum", ("[I",), ("@arr0",))]]
+        rep = BH.compare(out, out, jvm_cases)
+        check("the translated methods agree on the real JVM",
+              all(o.status == "same" for o in rep.outcomes),
+              rep.summary() + " || " + "; ".join(u.describe()
+                                                 for u in rep.unusable[:2]))
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
 def test_jsr_subroutine_is_left_alone() -> None:
     """`jsr`/`ret`: the IR cannot type a subroutine, so the method must survive.
 
@@ -1874,6 +2045,187 @@ def test_jsr_subroutine_is_left_alone() -> None:
         _sh.rmtree(td, ignore_errors=True)
 
 
+
+
+def test_interp_engine_semantics() -> None:
+    """Negative controls for the interpreter bugs this round actually had.
+
+    Each check pins one concrete mis-execution: category-2 argument popping
+    in the wrong order, reference comparison routed through pop_int, and an
+    Opaque hiding inside a model collection.
+    """
+    print("interp engine: category-2 args, acmp, and taint in containers")
+    from pathlib import Path as _P
+    from jdec.interp import diff as ID
+    from jdec.interp.values import Heap, Obj, Opaque
+    from jdec.interp.engine import Interp, Universe
+
+    if JAVAC is None:
+        print("  (skipped: needs javac)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_interpeng_"))
+    try:
+        # mix(J, String): the long is NOT the last parameter, so a pop-order
+        # bug grabs a reference where the long belongs
+        cls = _compile_java(td, {
+            "demo/eng/Mix.java": """
+                package demo.eng;
+                public final class Mix {
+                    public static String mix(long v, String tag) {
+                        return tag + ":" + (v * 2);
+                    }
+                }
+            """,
+        })
+        jar = _jar_from(cls, td / "mix.jar")
+        row = ("demo/eng/Mix", "mix",
+               "(JLjava/lang/String;)Ljava/lang/String;")
+        rep = ID.compare_rows(jar, jar, [row], trials=3)
+        check("a (long, String) signature executes identically",
+              rep.rows[0].verdict == "same", rep.rows[0].describe())
+
+        # acmp: comparing references must not go through as_int
+        cls2 = _compile_java(td / "acmp", {
+            "demo/eng/Same.java": """
+                package demo.eng;
+                public final class Same {
+                    public static boolean same(Object a, Object b) {
+                        return a == b;
+                    }
+                }
+            """,
+        })
+        jar2 = _jar_from(cls2, td / "acmp.jar")
+        rep2 = ID.compare_rows(jar2, jar2,
+                               [("demo/eng/Same", "same",
+                                 "(Ljava/lang/Object;Ljava/lang/Object;)Z")],
+                               trials=2)
+        check("reference equality runs without an int cast",
+              rep2.rows[0].verdict == "same", rep2.rows[0].describe())
+
+        # taint: a run-era Opaque inside a model collection must never read
+        # as same; a clinit-era one is a structural placeholder by design
+        left = Universe(jar)
+        h1, h2 = Heap(), Heap()
+        it = Interp(left, h1, __import__("jdec.interp.models",
+                                        fromlist=["Models"]).Models())
+        hidden = Opaque("call:java/lang/System.currentTimeMillis()J", 1, 1)
+        h1.statics[("demo/eng/Mix", "bag")] = \
+            Obj("java/util/ArrayList", {"items": [hidden]})
+        h2.statics[("demo/eng/Mix", "bag")] = \
+            Obj("java/util/ArrayList", {"items": [hidden]})
+        from jdec.interp.diff import _verdict
+        from jdec.interp.values import Outcome
+        verdict, _reason = _verdict(Outcome("return", value=1),
+                                    Outcome("return", value=1), h1, h2)
+        check("a run-era Opaque inside a collection is inconclusive",
+              verdict == "inconclusive", verdict)
+
+        # clinit-era Opaques with matching sources agree structurally: both
+        # sides ran the same initialiser
+        init_opaque = Opaque("call:java/lang/System.nanoTime()J", 2, 0)
+        h1.statics[("demo/eng/Mix", "bag")] = \
+            Obj("java/util/ArrayList", {"items": [init_opaque]})
+        h2.statics[("demo/eng/Mix", "bag")] = \
+            Obj("java/util/ArrayList", {"items": [init_opaque]})
+        verdict2, _r2 = _verdict(Outcome("return", value=1),
+                                 Outcome("return", value=1), h1, h2)
+        check("a clinit-era Opaque pair agrees structurally",
+              verdict2 == "same", verdict2)
+        h2.statics[("demo/eng/Mix", "bag")] = \
+            Obj("java/util/ArrayList", {"items":
+                                        [Opaque("call:other", 3, 0)]})
+        verdict3, _r3 = _verdict(Outcome("return", value=1),
+                                 Outcome("return", value=1), h1, h2)
+        check("clinit Opaques from different sources do not agree",
+              verdict3 == "diff", verdict3)
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
+
+
+def test_interp_lambda_and_streams() -> None:
+    """Lambdas and Stream pipelines execute deterministically on the IR.
+
+    A lambda is an invokedynamic site resolved through BootstrapMethods to a
+    synthetic `lambda$...` body; the model executes it synchronously on both
+    sides. File IO goes through the in-memory VFS, so a pipeline that reads
+    and writes the filesystem is decisive without touching the real disk.
+    """
+    print("interp: lambda bodies, Stream pipelines, and the VFS")
+    from pathlib import Path as _P
+    from jdec.interp import diff as ID
+
+    if JAVAC is None:
+        print("  (skipped: needs javac)")
+        return
+
+    td = Path(tempfile.mkdtemp(prefix="jdec_lambda_"))
+    try:
+        cls = _compile_java(td, {
+            "demo/lm/Target.java": """
+                package demo.lm;
+                import java.nio.file.*;
+                import java.util.stream.*;
+                import java.util.*;
+                public final class Target {
+                    public static String roundtrip(String name) throws Exception {
+                        Path dir = Paths.get("/case/sub");
+                        Files.createDirectories(dir);
+                        Path file = dir.resolve(name + ".txt");
+                        Files.writeString(file, "hello " + name);
+                        return Files.readString(file);
+                    }
+                    public static String collect(List<String> xs) {
+                        return xs.stream().filter(s -> s.length() > 1)
+                                 .map(s -> s + "!")
+                                 .collect(Collectors.joining("-"));
+                    }
+                    public static int viaMethodRef(List<String> xs) {
+                        return xs.stream().map(String::length)
+                                 .reduce(0, Integer::sum);
+                    }
+                }
+            """,
+        })
+        jar = _jar_from(cls, td / "t.jar")
+        rows = [("demo/lm/Target", "roundtrip",
+                 "(Ljava/lang/String;)Ljava/lang/String;"),
+                ("demo/lm/Target", "collect",
+                 "(Ljava/util/List;)Ljava/lang/String;"),
+                ("demo/lm/Target", "viaMethodRef",
+                 "(Ljava/util/List;)I")]
+        rep = ID.compare_rows(jar, jar, rows, trials=3)
+        check("original vs original never differs through lambdas",
+              not rep.diff, "; ".join(d.describe() for d in rep.diff))
+        check("every lambda/stream row was judged",
+              rep.judged == len(rows),
+              "; ".join(r.describe() for r in rep.rows))
+
+        # a changed lambda body must be a DIFF: the pipeline has to matter
+        bad = _compile_java(td / "bad", {
+            "demo/lm/Target.java": """
+                package demo.lm;
+                import java.util.*;
+                import java.util.stream.*;
+                public final class Target {
+                    public static String collect(List<String> xs) {
+                        return xs.stream().filter(s -> s.length() > 1)
+                                 .map(s -> s + "?")
+                                 .collect(Collectors.joining("-"));
+                    }
+                }
+            """,
+        })
+        bad_jar = _jar_from(bad, td / "bad.jar")
+        rep_bad = ID.compare_rows(jar, bad_jar, rows[1:2], trials=4)
+        check("a changed lambda body is a DIFF",
+              rep_bad.rows[0].verdict == "diff",
+              rep_bad.rows[0].describe())
+    finally:
+        import shutil as _sh
+        _sh.rmtree(td, ignore_errors=True)
 
 
 def test_reason_replay_and_rollback() -> None:
@@ -2456,6 +2808,33 @@ def test_behave_semantics() -> None:
             check("an impossible gate exits 5, not 1", rc == 5, f"rc={rc}")
             check("the gate line names both numbers",
                   "gate      :" in text and "threshold 101%" in text,
+                  text[-300:])
+
+        # the union gate spans both engines: the CLI must print the union and
+        # enforce it as exit 5, exactly like --gate/--interp-gate
+        if stats.get("rewritten"):
+            import contextlib
+            import io
+            from jdec import cli as CL
+
+            def run_union(gate):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = CL.main(["behave", str(SAMPLE), str(out_jar), "--derive",
+                                  "--from", str(rewritten), "--execute",
+                                  "--engine", "both", "--union-gate", str(gate)])
+                return rc, buf.getvalue()
+
+            rc, text = run_union(0)
+            check("a met union gate keeps exit 0", rc == 0,
+                  f"rc={rc}: {text[-200:]}")
+            check("the union line names both numbers",
+                  "union     :" in text and "either engine" in text,
+                  text[-400:])
+            rc, text = run_union(101)
+            check("an impossible union gate exits 5", rc == 5, f"rc={rc}")
+            check("the union gate line prints the threshold",
+                  "union gate:" in text and "threshold 101%" in text,
                   text[-300:])
 
 
@@ -6401,12 +6780,15 @@ def main() -> int:
     test_pipeline_gate()
     test_devirt_output_loads()
     test_devirt_behaviour()
+    test_devirt_realistic_vm()
     test_jsr_subroutine_is_left_alone()
     test_dead_branch_is_not_nop_ed()
     test_rewritten_list_from_both_paths()
     test_reason_replay_and_rollback()
     test_unflatten_strict_rejection()
     test_interp_same_negative_and_models()
+    test_interp_engine_semantics()
+    test_interp_lambda_and_streams()
     test_behave_semantics()
     test_receiver_and_argument_synthesis()
     test_behave_classpath()

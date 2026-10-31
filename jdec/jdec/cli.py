@@ -366,7 +366,7 @@ def cmd_behave(args: argparse.Namespace) -> int:
                                      trials=args.trials)
         print(interp_rep.summary())
         diffs += [d.describe() for d in interp_rep.diff]
-        cov_i = CS.coverage(rows, ID.outcomes(interp_rep), der)
+        cov_i = CS.coverage(rows, ID.outcomes(interp_rep))
         line = (f"interp    : {cov_i['judged']}/{cov_i['total']} method(s) judged "
                 f"-> {100.0 * cov_i['judged'] / cov_i['total']:.1f}%"
                 if cov_i["total"] else "interp    : nothing to compare")
@@ -389,6 +389,29 @@ def cmd_behave(args: argparse.Namespace) -> int:
         if len(interp_rep.diff) > args.show:
             print(f"  ... and {len(interp_rep.diff) - args.show} more")
 
+    # the union of both engines is the headline coverage number: a method
+    # counts once when either harness could judge it (the JVM harness reaches
+    # what reflection can call, the interpreter what its models cover — the
+    # two sets overlap only partly)
+    union_failed = False
+    if rep is not None and interp_rep is not None:
+        jvm_keys = {(o.case.cls, o.case.method) for o in rep.outcomes
+                    if o.status in ("same", "diff")}
+        interp_keys = {(r.row[0], r.row[1]) for r in interp_rep.rows
+                       if r.verdict in ("same", "diff")}
+        total = len({(r.row[0], r.row[1]) for r in interp_rep.rows}) \
+            if rows else len(jvm_keys | interp_keys)
+        union = len(jvm_keys | interp_keys)
+        line = f"union     : {union}/{total} method(s) judged by either engine"
+        if total:
+            pct = 100.0 * union / total
+            line += f" -> {pct:.1f}%"
+        print(line)
+        if args.union_gate is not None and total:
+            print(f"union gate: {union}/{total} = {pct:.1f}% "
+                  f"(threshold {args.union_gate:.0f}%)")
+            union_failed = pct + 1e-9 < args.union_gate
+
     if args.json and rep is not None:
         rep.write_json(Path(args.json))
         print(f"json      : {args.json}")
@@ -403,7 +426,7 @@ def cmd_behave(args: argparse.Namespace) -> int:
         (interp_rep is not None and interp_rep.judged)
     if not judged_any:
         return 4
-    return 5 if gate_failed else 0
+    return 5 if (gate_failed or union_failed) else 0
 
 
 def cmd_engines(args: argparse.Namespace) -> int:
@@ -1370,6 +1393,10 @@ def build_parser() -> argparse.ArgumentParser:
     sb.add_argument("--interp-gate", type=float, default=None, metavar="PCT",
                     help="fail (exit 5) when fewer than PCT%% of ALL rewritten "
                          "methods got a conclusive interp verdict")
+    sb.add_argument("--union-gate", type=float, default=None, metavar="PCT",
+                    help="fail (exit 5) when fewer than PCT%% of ALL rewritten "
+                         "methods were judged by either engine (only with "
+                         "--engine both)")
     sb.add_argument("--gate", type=float, default=None, metavar="PCT",
                     help="fail (exit 5) when fewer than PCT%% of the invokable "
                          "methods got a verdict")

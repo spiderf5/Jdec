@@ -14,7 +14,7 @@
 | # | 阶段 | 周期 | 交付 | 门槛（硬条件） | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | 01 | 修正成功口径 | 第 0–1 个月 | 缺陷修复、阶段状态 | 失败不再被标为成功 | ✅ **已达成**（2026-10-07） |
-| 02 | 建设改写底座 | 第 1–4 个月 | 类型 IR、帧与栈验证 | 限定转换通过 JVM 校验 | 进行中（理由 411/411 可重放；JVM 对拍 61.1%；解释器 31.4%，0 DIFF，2026-10-31） |
+| 02 | 建设改写底座 | 第 1–4 个月 | 类型 IR、帧与栈验证 | 限定转换通过 JVM 校验 | 进行中（理由 411/411 可重放；双引擎对拍并集 83.0%、0 差异；90% 门槛未达，2026-10-31） |
 | 03 | 建立专项试用版 | 第 4–9 个月 | 2–3 类机制、隔离重放 | 独立样本与用户试用 | 未开始 |
 | 04 | 发布商业 1.0 | 第 9–18 个月 | 支持矩阵、离线交付 | 6–8 类机制的明确支持项 | 未开始 |
 | 05 | 成熟化运营 | 第 18–36 个月 | 版本维护、诊断与回归 | 持续客户验证与更新 | 未开始 |
@@ -137,6 +137,48 @@ classloader 里永远不等，现在归一化（`SVGImage.scale` 那 4 条假差
 python jdec.py behave in.jar out.jar --derive --from rewritten.txt --execute \
     --cp <deps> --gate 90     # 未达门槛退出 5（与"改错了"的 1、"没结论"的 4 分开）
 ```
+
+**解释器差分（2026-10-31 第四轮）：** `jdec/interp/` 按 JVMS 双槽栈语义重写引擎
+（long/double 占两槽 + VOID 填充，`dup2`/`pop2`/`swap` 逐字翻译），修掉三个真实
+mis-execution：`_pop_args` 按参数序弹栈（混合 `(J, 引用)` 签名即损坏）、`if_acmp`
+被路由进 `pop_int`、`is_opaque` 看不见模型集合裸 list 里的 Opaque。证据口径：
+clinit 期 Opaque 是结构占位（两侧跑同一初始化代码，同源即一致性证据），执行期
+Opaque 一律污染——`same` 永不覆盖未观测的状态。模型面：regex 桥（Java 命名组/\p{}/\R
+翻译，翻不动即 Unsupported）、VFS 读写/临时文件、BlockingQueue/Deque/Iterator/
+StringTokenizer/Atomic*、Buffered 读写、`new String` 产出真 str。数字（HMCL 411）：
+JVM 251 判定 + 解释器 220 判定，**并集 325 = 79.1%，0 个真实差异**（负控：改常数必
+DIFF、原版×原版必 same、污染必 inconclusive）。剩余 86 个逐类归因：38 Files 深层
+API（Stream/属性视图）、13 构造器、20 并发/时钟/网络、4 抽象宿主、2 参数超限、
+9 环境未知量。**90% 门槛未达，差 11 个点**；再往上需要 03 的真实沙箱或 JavaFX
+运行时，不是模型调参。
+
+**解释器差分（2026-10-31 第五轮，02 收尾）：** lambda 与 Stream 落地。
+`invokedynamic` 不再忽略 recipe 字面量——`makeConcatWithConstants` 按 `\u0001`
+占位符展开为"字面量+参数"拼接，负控（改写改变拼接字面量）此前抓到过静默 same
+的假同；BootstrapMethods 取 impl MethodHandle（kind 6 静态 lambda / 5,7 方法引用，
+无捕获方法引用的 receiver 是 SAM 首参）生成函数式接口实例；模型面补 Stream 全管道
+（filter/map/flatMap/collect/reduce/count…）、IntStream/Optional、`Integer::sum` 等
+方法引用靶点、Files 属性视图与 `Stream<Path>`；`_inputs` 的 List 参数补非空变体
+（此前 filter 全滤光，两侧都是空串的"平凡 same"）；clinit 期异常被 diff 层包裹，
+确定性两侧一致不再毒化。**并集成为可执行门禁**：`behave --engine both` 打印
+`union : N/M -> x%`，`--union-gate PCT` 未达退出 5。数字（HMCL 411）：JVM 251 +
+解释器 252，**并集 341 = 83.0%，0 个真实差异**（负控全绿）。OptiFine 19 个改写方法
+带 MC 1.8.9 全依赖（Mojang 官方源 + sha1）重测：verify 原版/产物完全一致、
+19/19 全判定、behave 0 差异、union 7/19（Config/渲染方法在纯 vanilla classpath 上
+本质调不动）。devirt 高保真合成夹具：tableswitch+IDIV 异常表、LMUL 循环、lambda
+全链路真 JVM 直跑全部正确、StackMapTable 4/4、0 拒绝——并暴露修掉 handler_pc 被
+映射成 0 的真 bug。剩余 70 个未判定（Files 深层 API、构造器、并发/时钟/网络、
+抽象宿主、环境未知量）。**90% 硬门槛未达（83.0% vs 90%），02 保持"进行中"**；
+再往上需要 03 的真实沙箱或 JavaFX 运行时，不是模型调参。回归 983 → **1002 项全绿**
+（新增 lambda/Stream、并集门禁、devirt 高保真、recipe 负控）。
+
+**90% 可达性评估与收口拍板（2026-10-31）：** 对剩余 70 个未判定方法做了卡点 API
+实证（逐个解码方法体，对照解释器模型面）：17 个定义上不可测（ctor/`<clinit>`/
+抖动/native/JNA）、20 个硬环境（GUI 框架态/网络/线程）、~9 个贵深层（gson/javafx
+深解析）、~24 个理论可榨（上限 ~30）。过 90% 需 29 个新判定且几乎全中——
+**过线概率 10–20%，02 内不可达**。拍板：**接受 83.0% 收口进 03**，不修改门槛与
+分母；数字可复现性已验证（漏带 `--cp` 复现出 76.4%，带 `--cp javafx-*` 逐字一致
+复现 83.0%——`--cp` 是口径的一部分）。
 
 **02 收口（2026-10-30）：**
 

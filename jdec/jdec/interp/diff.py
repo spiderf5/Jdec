@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 
 from ..behave import Case, CaseOutcome
 from .engine import Interp, Universe
-from .values import (Arr, Heap, Obj, Opaque, Outcome, default_value,
-                     is_opaque)
+from .values import (VOID, Arr, Heap, JavaThrow, Obj, Opaque, Outcome,
+                     Unsupported,
+                     default_value,
+                     is_opaque, is_run_opaque)
 
 
 @dataclass
@@ -102,17 +104,45 @@ def _inputs(desc: str, heap: Heap, trial: int) -> list:
         elif d == "Ljava/nio/file/Path;":
             pools.append([Obj("java/nio/file/Path", {"path": "/case/a.txt"}),
                           Obj("java/nio/file/Path", {"path": "/case/missing"})])
-        else:
-            model = default_value(d, heap)
-            pools.append([model if model is not None
-                          else heap.opaque(f"input:{d}")])
+        elif d.startswith("L"):
+            # a stand-in instance is deterministic and lets the method read
+            # default fields; only *calling* anything on it turns Opaque. A
+            # bare Opaque input would poison every method that stores it.
+            internal = d[1:-1]
+            if internal in ("java/util/List", "java/util/Collection",
+                            "java/util/ArrayList"):
+                # an empty list filters everything away; rotate real contents
+                pools.append([
+                    Obj("java/util/ArrayList", {"items": []}),
+                    Obj("java/util/ArrayList", {"items": [heap.intern("a")]}),
+                    Obj("java/util/ArrayList",
+                        {"items": [heap.intern("a"), heap.intern("bb"),
+                                   heap.intern("")]}),
+                ])
+            elif internal in ("java/util/Map",):
+                pools.append([
+                    Obj("java/util/HashMap", {"entries": {}}),
+                    Obj("java/util/HashMap",
+                        {"entries": {"k": heap.intern("v")}}),
+                ])
+            else:
+                model = default_value(d, heap)
+                pools.append([model if model is not None
+                              else Obj(internal, {})])
     if not pools:
         return []
     return [pool[trial % len(pool)] for pool in pools]
 
 
 def _same_value(a, b, memo) -> bool:
+    if a is VOID or b is VOID:
+        raise Unsupported("a two-slot filler leaked into a comparison")
     if isinstance(a, Opaque) or isinstance(b, Opaque):
+        # clinit-era Opaques are structural placeholders: both sides ran the
+        # same clinit, so matching sources prove the initialisers agree on
+        # *what* they could not compute. Run-era Opaques never agree.
+        if isinstance(a, Opaque) and isinstance(b, Opaque):
+            return a.epoch == 0 and b.epoch == 0 and a.source == b.source
         return False
     if a is None or b is None:
         return a is None and b is None
@@ -142,6 +172,12 @@ def _same_value(a, b, memo) -> bool:
         if set(a) != set(b):
             return False
         return all(_same_value(a[k], b[k], memo) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        # a model collection's items: without this branch every Obj holding a
+        # list read as "different static state" (the false DIFF on HMCL)
+        if len(a) != len(b):
+            return False
+        return all(_same_value(x, y, memo) for x, y in zip(a, b))
     return False
 
 
@@ -159,14 +195,22 @@ def _verdict(left: Outcome, right: Outcome,
     elif not _same_value(left.value, right.value, {}):
         return "diff", "different return values"
     l, r = left_heap.snapshot(), right_heap.snapshot()
-    if is_opaque(l["statics"]) or is_opaque(r["statics"]):
-        return "inconclusive", "static state depends on an unmodelled call"
     if l["stdout"] != r["stdout"]:
         return "diff", "different stdout"
     if l["vfs"] != r["vfs"]:
         return "diff", "different filesystem effects"
-    if not _same_value(l["statics"], r["statics"], {}):
-        return "diff", "different static state"
+    # Static fields are part of the observable contract: a later method could
+    # read them, so anything stored into one is evidence. Opaques produced by
+    # *this* run poison the verdict; clinit-era Opaques are structural
+    # placeholders that `_same_value` compares by source (both sides ran the
+    # same initialiser, so agreement there is a real check on the clinit).
+    lstat, rstat = l["statics"], r["statics"]
+    for key in set(lstat) | set(rstat):
+        lv, rv = lstat.get(key), rstat.get(key)
+        if is_run_opaque(lv) or is_run_opaque(rv):
+            return "inconclusive", "static state depends on an unmodelled call"
+        if not _same_value(lv, rv, {}):
+            return "diff", f"different static state at {key[0]}.{key[1]}"
     return "same", ""
 
 
@@ -184,18 +228,42 @@ def compare_method(left_jar, right_jar, row: tuple[str, str, str],
             left_heap, right_heap = Heap(), Heap()
             args = _inputs(desc, left_heap, trial)
             right_args = _inputs(desc, right_heap, trial)
+            left_it = Interp(left, left_heap, model)
+            right_it = Interp(right, right_heap, model)
+            # class initialisers run in epoch 0 (their Opaques are structural
+            # placeholders); the method under test runs in epoch 1. A clinit
+            # that throws is deterministic on both sides (same static prefix,
+            # same exception later) and does not poison the run — but the two
+            # sides must agree on *whether and what* it threw, otherwise the
+            # remaining state diverges before the method even starts.
+            init_results = []
+            for it in (left_it, right_it):
+                threw = ""
+                try:
+                    it._ensure_init(cls)
+                except JavaThrow as exc:
+                    threw = exc.cls
+                except Exception:  # noqa: BLE001 - deterministic both sides
+                    threw = "<unmodelled>"
+                init_results.append(threw)
+            if init_results[0] != init_results[1]:
+                reasons.append("class initialisation differs: "
+                               f"{init_results[0]!r} vs {init_results[1]!r}")
+                continue
+            left_heap.epoch = 1
+            right_heap.epoch = 1
             if name == "<init>":
-                left_out = Interp(left, left_heap, model).invoke(
+                left_out = left_it.invoke(
                     cls, name, desc, Obj(cls, {}), args)
-                right_out = Interp(right, right_heap, model).invoke(
+                right_out = right_it.invoke(
                     cls, name, desc, Obj(cls, {}), right_args)
                 if left_out.kind == "return" and right_out.kind == "return":
                     left_out.value = left_out.value or Obj(cls, {})
                     right_out.value = right_out.value or Obj(cls, {})
             else:
-                left_out = Interp(left, left_heap, model).invoke(
+                left_out = left_it.invoke(
                     cls, name, desc, None, args)
-                right_out = Interp(right, right_heap, model).invoke(
+                right_out = right_it.invoke(
                     cls, name, desc, None, right_args)
             verdict, reason = _verdict(left_out, right_out, left_heap,
                                        right_heap)
