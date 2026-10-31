@@ -673,6 +673,18 @@ def _report_classes(data: dict) -> dict:
     return data.get("classes") or data.get("outcomes") or {}
 
 
+def _engine_key(engine: str) -> str | None:
+    """Map a UI engine label to a known engine key, or None.
+
+    The label arrives in a query string and is joined into a path below, so
+    an unknown one must never become a directory name.
+    """
+    key = (engine or "").strip().lower()
+    if key in ("", "final", "current"):
+        return ""
+    return key if key in EN.ENGINES else None
+
+
 def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     """Retrieve Java source code for a class produced by a specific decompiler engine."""
     if not cls:
@@ -692,8 +704,10 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     src_dir = (work_dir / "src").resolve()
     target_path = (src_dir / rel_name).resolve()
 
-    eng_key = engine.lower().strip()
-    if eng_key in ("final", "current", ""):
+    eng_key = _engine_key(engine)
+    if eng_key is None:
+        return f"// Unknown engine: {engine}"
+    if eng_key == "":
         if target_path.is_relative_to(src_dir) and target_path.is_file():
             try:
                 return target_path.read_text(encoding="utf-8", errors="replace")
@@ -722,9 +736,10 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
     # 3. Check pass 2 work directories: _work/out2_<engine>...
     work_sub = work_dir / "_work"
     if work_sub.is_dir():
+        work_root = work_sub.resolve()
         for d in work_sub.glob(f"out*_{eng_key}*"):
-            f = d / rel_name
-            if f.is_file():
+            f = (d / rel_name).resolve()
+            if f.is_relative_to(work_root) and f.is_file():
                 try:
                     return f.read_text(encoding="utf-8", errors="replace")
                 except Exception:
@@ -736,7 +751,7 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
             r_data = json.loads(rep_json.read_text(encoding="utf-8"))
             outcomes = _report_classes(r_data)
             if cls in outcomes and (outcomes[cls].get("engine") or "").lower() == eng_key:
-                if target_path.is_file():
+                if target_path.is_relative_to(src_dir) and target_path.is_file():
                     return target_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             pass

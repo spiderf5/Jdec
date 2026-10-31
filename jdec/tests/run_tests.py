@@ -6058,6 +6058,31 @@ def test_bvm_extract_code_id_descriptor_gate() -> None:
     check("(I...) execute still yields codeId", got_ok == 88, f"got={got_ok}")
 
 
+def test_web_source_path_containment() -> None:
+    """Engine labels and report rels are joined into paths: keep them inside."""
+    print("web: source lookup refuses engine labels and rels that escape")
+    from jdec import web as WB
+
+    with tempfile.TemporaryDirectory() as td:
+        wd = Path(td)
+        (wd / "src" / "demo").mkdir(parents=True)
+        (wd / "src" / "demo" / "A.java").write_text("class A {}\n", encoding="utf-8")
+        (wd / "secret.java").write_text("SECRET\n", encoding="utf-8")
+        (wd / "report.json").write_text(json.dumps({"classes": {
+            "demo/A": {"engine": "cfr", "rel": "../secret.java"}}}),
+            encoding="utf-8")
+
+        check("a known engine label maps to its key", WB._engine_key("cfr") == "cfr")
+        check("an unknown engine label has no key",
+              WB._engine_key("../../../") is None)
+        got = WB._get_source_for_engine(wd, "demo/A", "../../../")
+        check("an unknown engine label is not used as a path",
+              got.startswith("// Unknown engine"), got[:80])
+        got = WB._get_source_for_engine(wd, "demo/A", "final")
+        check("a report rel that escapes src/ is refused",
+              "SECRET" not in got, got[:80])
+
+
 def test_web_callgraph_error_semantics() -> None:
     """BUG round negative: /api/callgraph used to synthesize reachable:null
     plus empty lists when the callgraph could not be built - masking
@@ -6843,6 +6868,7 @@ def main() -> int:
     test_bvm_extract_code_id_descriptor_gate()
     test_web_callgraph_error_semantics()
     test_web_workbench_features()
+    test_web_source_path_containment()
     test_callgraph_and_reachability()
     test_conservative_prune()
     test_decompiler_trap_pruning()
