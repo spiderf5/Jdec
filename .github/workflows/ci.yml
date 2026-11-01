@@ -116,6 +116,8 @@ jobs:
         # The suite proves the gates work against the in-tree fixtures; this
         # proves they work through the console script and the installed package
         # data (the engine bridge, web assets, fingerprints.json).
+        # flow.jar, not sample.jar: sample ships a truncated class on purpose,
+        # so ircheck answers PARTIAL (exit 3) and verify reports it INVALID.
         run: |
-          /tmp/jdec-wheel-venv/bin/jdec ircheck jdec/tests/sample.jar
-          /tmp/jdec-wheel-venv/bin/jdec verify jdec/tests/sample.jar
+          /tmp/jdec-wheel-venv/bin/jdec ircheck jdec/tests/flow.jar
+          /tmp/jdec-wheel-venv/bin/jdec verify jdec/tests/flow.jar
