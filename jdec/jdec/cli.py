@@ -8,11 +8,13 @@ import shutil
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
 from . import analyze as AZ
 from . import bsm as BM
 from . import classfile as CF
+from . import container as CT
 from . import engines as EN
 from . import ghidra_engine as GE
 from . import mappings as MP
@@ -168,6 +170,11 @@ def cmd_ircheck(args: argparse.Namespace) -> int:
     try:
         rep = IR.audit_path(p)
     except (zipfile.BadZipFile, OSError) as exc:
+        print(f"cannot read {p}: {exc}")
+        return 2
+    except CT.ContainerError as exc:
+        # The input is not a jar, a class or a directory, and saying which of
+        # those it is not is the useful answer.
         print(f"cannot read {p}: {exc}")
         return 2
     except Exception as exc:  # noqa: BLE001 - a gate must not end in a traceback
@@ -1135,7 +1142,7 @@ def cmd_devirt(args: argparse.Namespace) -> int:
             print(f"pool file not found: {pool_p}")
             return 2
 
-    if p.suffix.lower() == ".jar":
+    if CT.is_zip(p):
         res = DV.Devirtualizer.devirtualize_jar(
             p, out, code_pool, verify_output=not getattr(args, "no_verify", False),
             classpath=getattr(args, "cp", None) or ())
@@ -1232,8 +1239,18 @@ def cmd_reach(args: argparse.Namespace) -> int:
 
     custom_eps = [e.strip() for e in args.entrypoints.split(",")] if getattr(args, "entrypoints", None) else None
     print(f"analyzing call graph: {raw.name} ...")
-    cg = callgraph.build_callgraph(raw, custom_entrypoints=custom_eps)
+    try:
+        cg = callgraph.build_callgraph(raw, custom_entrypoints=custom_eps)
+    except (CT.ContainerError, zipfile.BadZipFile, OSError) as exc:
+        print(f"cannot read {raw}: {exc}")
+        return 2
     rep = callgraph.compute_reachability(cg)
+    if rep.total_classes == 0:
+        # An empty graph is not a finding: it means the input was understood as
+        # "a container with no classes", which has exactly one cause worth
+        # reporting instead of a page of zeros.
+        print(f"no classes in {raw} ({CT.describe(raw)})")
+        return 2
 
     print(f"classes      : {rep.total_classes} total -> {len(rep.reachable_classes)} reachable ({rep.reachability_pct}%), {len(rep.dead_classes)} suspected unused ({rep.dead_classes_pct}%)")
     print(f"methods      : {rep.total_methods} declared -> {len(rep.reachable_methods)} reachable, {len(rep.dead_methods)} dead")
@@ -1930,7 +1947,31 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (zipfile.BadZipFile, zlib.error) as exc:
+        # A corrupt or truncated container is a verdict on the input, not a
+        # crash. Letting it escape would mean Python's default status 1 -
+        # which every wrapper here reads as "partial success" - and a
+        # traceback where the answer should be "this file is damaged".
+        hint = ""
+        target = getattr(args, "input", None)
+        if target:
+            try:
+                if CT.kind_of(Path(target)) == CT.KIND_CLASS:
+                    hint = (" (this is a single class file; ircheck reads one, "
+                            "the rest of the commands want a jar)")
+            except OSError:
+                pass
+        print(f"cannot read the input: {type(exc).__name__}: {exc}{hint}")
+        return 2
+    except CT.ContainerError as exc:
+        print(str(exc))
+        return 2
+    except BrokenPipeError:
+        # `jdec decompile big.jar | head` closes the pipe mid-report; that is
+        # the reader's choice, not a failure of the run.
+        return 0
 
 
 if __name__ == "__main__":

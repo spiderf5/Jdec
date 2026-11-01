@@ -130,25 +130,15 @@ class ReachabilityReport:
 
 
 def _read_class_bytes(target: Path) -> dict[str, bytes]:
-    """Extract class bytes from a jar file or directory."""
-    out: dict[str, bytes] = {}
-    if target.is_file() and target.suffix.lower() in (".jar", ".zip"):
-        with zipfile.ZipFile(target) as z:
-            for n in z.namelist():
-                if n.endswith(".class") and not n.startswith("META-INF/"):
-                    try:
-                        out[n[:-6]] = z.read(n)
-                    except Exception:
-                        pass
-    elif target.is_dir():
-        for p in target.rglob("*.class"):
-            try:
-                rel = p.relative_to(target).as_posix()
-                if rel.endswith(".class"):
-                    out[rel[:-6]] = p.read_bytes()
-            except Exception:
-                pass
-    return out
+    """Extract class bytes from a jar, a self-extracting installer, or a directory.
+
+    The container question is answered in `container.py` from magic bytes. The
+    old check was `suffix in (".jar", ".zip")`, which turned a 10 MB installer
+    into an empty class map and let `reach` report a 0-class graph as a result.
+    """
+    from . import container as CT
+
+    return CT.read_classes(target)
 
 
 def build_callgraph(target: Path, custom_entrypoints: list[str] | None = None) -> CallGraph:

@@ -233,14 +233,25 @@ def audit_dir(path: Path) -> AuditReport:
 
 
 def audit_path(path: Path) -> AuditReport:
-    """Audit a jar, a .class file, or a directory tree of classes."""
+    """Audit a jar, a .class file, or a directory tree of classes.
+
+    The input is classified by magic bytes, not by suffix: a self-extracting
+    installer (`MZ` stub + zip) used to fall through to the single-class branch
+    and be handed to the parser whole, which reported "nothing was checked"
+    instead of auditing the 3693 classes it actually contains.
+    """
+    from .. import container as CT
+
     p = Path(path)
-    if p.is_dir():
+    kind = CT.kind_of(p)
+    if kind == CT.KIND_DIR:
         return audit_dir(p)
-    if p.suffix.lower() in (".jar", ".zip"):
+    if kind == CT.KIND_ZIP:
         return audit_jar(p)
-    report = AuditReport(target=str(p))
-    t0 = time.time()
-    audit_class_bytes(p.read_bytes(), p.stem, report)
-    report.elapsed = time.time() - t0
-    return report
+    if kind == CT.KIND_CLASS:
+        report = AuditReport(target=str(p))
+        t0 = time.time()
+        audit_class_bytes(p.read_bytes(), p.stem, report)
+        report.elapsed = time.time() - t0
+        return report
+    raise CT.ContainerError(f"{p}: {CT.describe(p)}")

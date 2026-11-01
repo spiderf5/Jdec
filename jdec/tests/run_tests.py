@@ -7189,6 +7189,96 @@ def test_conservative_prune() -> None:
               not rep2.entrypoints)
 
 
+def test_container_classification() -> None:
+    print("container: every reader classifies the input the same way")
+    from jdec import container as CT
+    from jdec.ir import roundtrip as RT
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        # A self-extracting installer is an MZ stub with the jar appended. The
+        # zip reader finds it, but only if the command asks the magic bytes
+        # instead of the file suffix.
+        sfx = d / "installer.exe"
+        sfx.write_bytes(b"MZ" + b"\x90" * 4094 + SAMPLE.read_bytes())
+
+        check("a jar is a zip by magic", CT.kind_of(SAMPLE) == CT.KIND_ZIP)
+        check("an MZ stub with a zip payload is a zip too",
+              CT.kind_of(sfx) == CT.KIND_ZIP, CT.describe(sfx))
+        cls = next((ROOT / "tests" / "build").rglob("*.class"))
+        check("a class file is a class", CT.kind_of(cls) == CT.KIND_CLASS)
+        check("a directory is a directory", CT.kind_of(d) == CT.KIND_DIR)
+
+        junk = d / "notes.txt"
+        junk.write_bytes(b"not a container\n")
+        check("a text file is unknown", CT.kind_of(junk) == CT.KIND_UNKNOWN)
+        try:
+            CT.read_classes(junk)
+            check("reading an unknown container is an error", False)
+        except CT.ContainerError as exc:
+            check("reading an unknown container is an error", True)
+            check("...and the message says what it is",
+                  "first bytes" in str(exc), str(exc))
+
+        direct = CT.read_classes(SAMPLE)
+        stubbed = CT.read_classes(sfx)
+        check("the stub does not change the class set",
+              set(direct) == set(stubbed),
+              f"{len(direct)} vs {len(stubbed)}")
+
+        # META-INF/versions is an alternative to the base class, not a second
+        # class; counting it produced NoClassDefFoundError (wrong name) before.
+        mr = d / "multirelease.jar"
+        one_name, one_bytes = next(iter(direct.items()))
+        with zipfile.ZipFile(mr, "w") as z:
+            z.writestr(one_name + ".class", one_bytes)
+            z.writestr("META-INF/versions/9/" + one_name + ".class", one_bytes)
+        check("multi-release copies are not counted as classes",
+              set(CT.read_classes(mr)) == {one_name})
+
+        a = RT.audit_path(SAMPLE)
+        b = RT.audit_path(sfx)
+        check("ircheck audits an installer instead of refusing it",
+              b.classes == a.classes and b.classes > 0,
+              f"{b.classes} vs {a.classes}")
+        check("...and reaches the same byte-exactness verdict", b.ok == a.ok)
+
+        cg_direct = CG.build_callgraph(SAMPLE)
+        cg_stub = CG.build_callgraph(sfx)
+        check("the call graph sees the same classes through the stub",
+              len(cg_direct.classes) == len(cg_stub.classes) > 0,
+              f"{len(cg_direct.classes)} vs {len(cg_stub.classes)}")
+
+
+def test_corrupt_container_is_a_verdict() -> None:
+    print("container: a damaged archive is a verdict, not a traceback")
+    import contextlib
+    import io
+
+    from jdec import cli as CL
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        data = SAMPLE.read_bytes()
+        trunc = d / "truncated.jar"
+        # Half a jar: the central directory is gone, so every reader that
+        # asks zipfile a question gets BadZipFile. The exit code has to stay
+        # 2 - Python's default 1 would read as "partial success".
+        trunc.write_bytes(data[: len(data) // 2])
+        for cmd in ("probe", "reach", "ircheck", "strings", "analyze"):
+            extra = ["-o", str(d / "strings_out")] if cmd == "strings" else []
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(buf):
+                rc = CL.main([cmd, str(trunc)] + extra)
+            text = buf.getvalue()
+            check(f"{cmd}: truncated archive exits 2", rc == 2, f"rc={rc} {text[-160:]}")
+            check(f"{cmd}: ...says the input cannot be read",
+                  "cannot read" in text, text[-160:])
+            check(f"{cmd}: ...and does not print a traceback",
+                  "Traceback" not in text, text[-200:])
+
+
 def test_selfheal_audit() -> None:
     """REVIEW 2.4 negative: self-heal used to overwrite the only copy of the
     decompiled source, with no record of what changed."""
@@ -7808,6 +7898,8 @@ def main() -> int:
     test_web_cross_site_guard()
     test_cli_json_and_version()
     test_review_2026_11_01()
+    test_container_classification()
+    test_corrupt_container_is_a_verdict()
     test_callgraph_and_reachability()
     test_conservative_prune()
     test_decompiler_trap_pruning()
