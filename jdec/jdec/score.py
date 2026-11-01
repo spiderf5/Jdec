@@ -20,6 +20,7 @@ signature-recovery rate, and reports label it as such.
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass, field
 
@@ -181,62 +182,36 @@ def _member_name_floor(cf: ClassFile) -> int:
     return 1 if short * 2 >= len(names) else 3
 
 
-def _hard_error_spans(src: str) -> list[tuple[int, int]]:
-    """Character ranges covered by an engine's "I could not decompile this" note.
+def _noise_spans(src: str) -> list[tuple[str, int, int]]:
+    """`(kind, start, end)` for every comment and string/char literal.
 
-    Decompilers emit these as block comments wrapped around the one method they
-    gave up on, so the span runs from the comment opener to the matching closer.
-    Locating them lets a class that lost a single method be told apart from a
-    class the engine refused outright.
+    One scanner, three consumers, because they disagree about what counts:
+    `_strip_noise` blanks all of them (an engine note that lists the real member
+    names must not score as a recovery, and neither must an encrypted payload);
+    `_comment_spans` keeps only comments (a give-up note is only a note when it
+    sits inside one - `throw new IllegalStateException("internal error")` is
+    ordinary Java, not an engine giving up).
     """
-    spans: list[tuple[int, int]] = []
-    for p in _HARD_ERROR_PATTERNS:
-        for m in p.finditer(src):
-            start = src.rfind("/*", 0, m.start())
-            if start == -1:
-                continue
-            end = src.find("*/", m.end())
-            if end == -1:
-                continue
-            spans.append((start, end + 2))
-    return spans
-
-
-def _strip_noise(src: str) -> str:
-    """Blank comments and string/char literals, preserving length and lines.
-
-    Coverage matching must not be fooled by identifiers that only live in a
-    comment (an engine note listing the real member names) or inside a string
-    literal (encrypted pool payloads), so member matching runs over this
-    sanitised text. Newlines survive so `^`-anchored scans stay aligned.
-    """
-    out = list(src)
-    n = len(src)
-
-    def blank(a: int, b: int) -> None:
-        for k in range(a, min(b, n)):
-            if out[k] not in "\r\n":
-                out[k] = " "
-
-    i = 0
+    spans: list[tuple[str, int, int]] = []
+    i, n = 0, len(src)
     while i < n:
         c = src[i]
         nxt = src[i + 1] if i + 1 < n else ""
         if c == "/" and nxt == "/":
             j = src.find("\n", i)
             e = n if j < 0 else j
-            blank(i, e)
+            spans.append(("comment", i, e))
             i = e
         elif c == "/" and nxt == "*":
             j = src.find("*/", i + 2)
             e = n if j < 0 else j + 2
-            blank(i, e)
+            spans.append(("comment", i, e))
             i = e
         elif c == '"':
             if src[i:i + 3] == '"""':            # text block
                 j = src.find('"""', i + 3)
                 e = n if j < 0 else j + 3
-                blank(i, e)
+                spans.append(("string", i, e))
                 i = e
                 continue
             j = i + 1
@@ -250,7 +225,7 @@ def _strip_noise(src: str) -> str:
                     j += 1
             else:
                 j = n
-            blank(i, j)
+            spans.append(("string", i, j))
             i = j
         elif c == "'":                           # char literal
             j = i + 1
@@ -264,11 +239,69 @@ def _strip_noise(src: str) -> str:
                     j += 1
             else:
                 j = n
-            blank(i, j)
+            spans.append(("char", i, j))
             i = j
         else:
             i += 1
+    return spans
+
+
+def _comment_spans(src: str) -> list[tuple[int, int]]:
+    return [(a, b) for kind, a, b in _noise_spans(src) if kind == "comment"]
+
+
+def _strip_noise(src: str) -> str:
+    """Blank comments and string/char literals, preserving length and lines.
+
+    Coverage matching must not be fooled by identifiers that only live in a
+    comment (an engine note listing the real member names) or inside a string
+    literal (encrypted pool payloads), so member matching runs over this
+    sanitised text. Newlines survive so `^`-anchored scans stay aligned.
+    """
+    out = list(src)
+    n = len(src)
+    for _kind, a, b in _noise_spans(src):
+        for k in range(a, min(b, n)):
+            if out[k] not in "\r\n":
+                out[k] = " "
     return "".join(out)
+
+
+def _hard_error_spans(src: str, comments=None) -> list[tuple[int, int]]:
+    """Character ranges of the comments that carry an engine's give-up note.
+
+    Decompilers emit these as a block comment wrapped around the one method they
+    gave up on (CFR) or as a line note (`// $FF: Couldn't be decompiled`,
+    Fernflower/Vineflower). Locating them lets a class that lost a single method
+    be told apart from a class the engine refused outright - and restricting the
+    match to comments keeps an ordinary string literal that happens to say
+    "internal error" from being read as a verdict on the class.
+    """
+    spans = _comment_spans(src) if comments is None else comments
+    if not spans:
+        return []
+    starts = [a for a, _ in spans]
+    out: list[tuple[int, int]] = []
+    for p in _HARD_ERROR_PATTERNS:
+        for m in p.finditer(src):
+            k = bisect.bisect_right(starts, m.start()) - 1
+            if k < 0:
+                continue
+            a, b = spans[k]
+            if m.end() <= b and (a, b) not in out:
+                out.append((a, b))
+    return out
+
+
+def find_engine_notes(src: str) -> list[tuple[int, int]]:
+    """Comment ranges that hold an engine's give-up note (public entry point).
+
+    `decompile` uses the same vocabulary as the scorer, so a class flagged for
+    a second opinion is exactly one the scorer would charge for - two regexes
+    drifting apart is how a "suspect" sweep and a scorecard end up disagreeing
+    about the same file.
+    """
+    return _hard_error_spans(src, _comment_spans(src))
 
 
 def _enum_constant_names(text: str) -> list[str]:
@@ -374,8 +407,16 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
     # outer type, any segment of A$B$C showing up *as a declaration* counts.
     # A bare `p in idents` test was useless on obfuscated input: with names
     # like `a`, any identifier anywhere in the file made it pass.
+    #
+    # The member-name floor deliberately does NOT apply here: it exists to keep
+    # `a`/`b`/`c` members from being "recovered" by any single letter, but a
+    # class named `IO` or `A` is a real declaration, and filtering it out used
+    # to charge a perfect recovery 10 points for a class name that was right
+    # there in the source. Anonymous-class ordinals (`A$1`) carry no name to
+    # look for, so they are dropped instead.
     has_init = any(n == "<init>" for n, _ in cf.method_sigs())
-    segments = [p for p in cf.name.rsplit("/", 1)[-1].split("$") if len(p) >= floor]
+    segments = [p for p in cf.name.rsplit("/", 1)[-1].split("$")
+                if p and not p.isdigit()]
     ctor_ok = (not has_init) or bool(segments) and bool(re.search(
         r"\b(?:class|interface|enum|record)\s+(?:" +
         "|".join(re.escape(p) for p in segments) + r")\b", stripped))
@@ -385,8 +426,11 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
     matched += sum(min(k, decls.get(n, 0)) for n, k in field_cands.items())
     coverage = (matched / total) if total else 1.0
 
-    hard_error = any(p.search(src) for p in _HARD_ERROR_PATTERNS)
-    spans = _hard_error_spans(src) if hard_error else []
+    # A verdict about the class, so the note has to live in a comment: the same
+    # words inside a string literal are the program's own message, not the
+    # engine's.
+    spans = _hard_error_spans(src, _comment_spans(src))
+    hard_error = bool(spans)
 
     # How much of the class did the engine actually give up on? A decompiler
     # that lost one method out of fifteen still produced a usable file, so
@@ -418,7 +462,11 @@ def evaluate(src: str, cf: ClassFile, min_name_len: int | None = None) -> Qualit
     if hard_error_class_level:
         issues.append("engine reported a decompilation error")
     elif hard_error:
-        issues.append(f"engine gave up on part of the class ({damaged * 100:.0f}% of output)")
+        pct = damaged * 100
+        # a one-line `// $FF` note over a 6000-line file is 0.0% when rounded,
+        # and "gave up on 0% of the class" reads like a bug in the report
+        shown = "<1%" if pct < 1 else f"{pct:.0f}%"
+        issues.append(f"engine gave up on part of the class ({shown} of output)")
     if leftover:
         issues.append(f"{leftover} bytecode mnemonic(s) left in output")
     if unbalanced:

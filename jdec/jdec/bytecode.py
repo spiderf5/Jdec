@@ -177,6 +177,11 @@ def decode(code: bytes) -> list[Insn]:
         length = _OP_LEN.get(op)
         if length is None:
             raise BytecodeError(f"unknown opcode 0x{op:02x} at {pc}")
+        # Operands must fit inside the code array. A class whose last
+        # instruction is cut in half is hostile input, not a crash: every
+        # operand read below assumes this check already passed.
+        if length and o + length > n:
+            raise BytecodeError(f"truncated instruction 0x{op:02x} at {pc}")
 
         if op == OP_WIDE:
             if o + 1 >= n:

@@ -83,6 +83,20 @@ class AuditReport:
                 and self.classes > 0 and self.methods > 0)
 
     @property
+    def unchecked(self) -> int:
+        """How many things were never compared: unreadable classes + methods
+        whose Code attribute could not be decoded."""
+        return self.classes_unreadable + self.methods_undecodable
+
+    @property
+    def full_coverage(self) -> bool:
+        """True only when every class parsed and every method with a body was
+        compared. `ok` answers "did anything differ"; this answers "did we
+        actually look at all of it", and the two must not be conflated - a jar
+        where 99% of methods were skipped is not a passing gate."""
+        return self.unchecked == 0
+
+    @property
     def checked_classes(self) -> int:
         return self.classes - len(self.class_mismatch)
 
@@ -100,7 +114,10 @@ class AuditReport:
         if self.methods_no_code:
             lines.append(f"no code   : {self.methods_no_code} abstract/native method(s)")
         lines.append(f"elapsed   : {self.elapsed:.2f}s")
-        lines.append(f"result    : {'PASS' if self.ok else 'FAIL'}")
+        verdict = "PASS" if self.ok else "FAIL"
+        if self.ok and not self.full_coverage:
+            verdict = "PARTIAL (not everything was checked)"
+        lines.append(f"result    : {verdict}")
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -116,6 +133,8 @@ class AuditReport:
             "undecodable": list(self.undecodable),
             "elapsed_seconds": round(self.elapsed, 3),
             "ok": self.ok,
+            "full_coverage": self.full_coverage,
+            "unchecked": self.unchecked,
         }
 
     def write_json(self, path: Path) -> None:

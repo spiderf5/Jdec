@@ -29,7 +29,7 @@ from pathlib import Path
 from . import classfile as CF
 from . import engines as EN
 from .probe import profile_jar, JarProfile
-from .score import evaluate, better, Quality
+from .score import evaluate, better, Quality, find_engine_notes
 
 
 class EngineUnavailable(RuntimeError):
@@ -203,8 +203,14 @@ def _out_rel(name: str, produced_stem: str, collisions: set[str]) -> str:
     disagrees with the class it contains, so an inlined nested class keeps the
     outer file's path.
     """
-    owner = name if produced_stem == name else produced_stem
+    owner = produced_stem
     return _safe_rel(owner) if owner in collisions else owner + ".java"
+
+
+def _owns_file(outcome: ClassOutcome | None, rel: str, dest: Path) -> bool:
+    """True when another class already produced `rel` and still claims it."""
+    return bool(outcome is not None and outcome.rel == rel
+                and outcome.status in ("ok", "partial") and dest.exists())
 
 
 def _iso_buckets(collisions: dict[str, list[str]]) -> list[list[str]]:
@@ -268,7 +274,11 @@ def _run_chunks(
             err = f"  ({r.error})" if r.error else ""
             print(f"    {label} chunk {done}/{len(futs)}: {len(r.files)} files "
                   f"in {r.seconds:.1f}s{err}", flush=True)
-    return [r for r in results if r is not None]
+    if any(r is None for r in results):
+        # callers zip results with their inputs; a filtered list would mispair
+        # every chunk after the hole instead of failing loudly
+        raise RuntimeError("an engine chunk produced no result")
+    return results
 
 
 def decompile(
@@ -542,15 +552,28 @@ def decompile(
                 # copied the whole outer source a second time under `A$B.java`
                 rel = _out_rel(name, path.stem, colliding)
                 dest = src_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dest)
-                o.rel = rel
-                o.engine = ekey
-                o.variant = variant
-                o.quality = q
-                o.status = "ok" if q.score >= 75 else "partial"
-                if o.status == "ok":
-                    improved += 1
+                owner = name.split("$", 1)[0]
+                if owner != name and _owns_file(outcomes.get(owner), rel, dest):
+                    # This candidate was picked for the *nested* class' ground
+                    # truth, but the file it would land in is the outer class'
+                    # source, produced from a different candidate. Copying it
+                    # would silently replace that class' output while its
+                    # outcome still reports the engine that wrote the old one.
+                    o.rel = rel
+                    o.quality = q
+                    o.status = "partial"
+                    q.issues.append(f"not written: {rel} belongs to {owner} "
+                                    f"and came from another candidate")
+                else:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest)
+                    o.rel = rel
+                    o.engine = ekey
+                    o.variant = variant
+                    o.quality = q
+                    o.status = "ok" if q.score >= 75 else "partial"
+                    if o.status == "ok":
+                        improved += 1
             o.attempts.append(f"{ekey}:{variant}")
 
     # ------------------------------------------------------- verification
@@ -688,11 +711,13 @@ def _default_engine_order(prof: JarProfile) -> list[str]:
 
 def _scan_error_markers(src_dir: Path, all_names: list[str],
                         outcomes: dict[str, ClassOutcome]) -> list[str]:
-    """Cheap regex sweep: which already-produced files look broken?"""
-    import re
-    bad = re.compile(
-        r"(could\s*n'?o?t\s+be\s+decompiled|unable\s+to\s+decompile|internal\s+error|"
-        r"failed\s+to\s+decompile|error\s+while\s+decompiling)", re.I)
+    """Which already-produced files carry an engine's give-up note?
+
+    The note is matched the way the scorer matches it: only inside a comment.
+    A plain `re.search` over the file used to turn the program's own message
+    (`throw new IllegalStateException("internal error")`) into a verdict, which
+    re-ran every engine over a class that had come out perfectly.
+    """
     suspects: list[str] = []
     for name in all_names:
         o = outcomes.get(name)
@@ -705,7 +730,7 @@ def _scan_error_markers(src_dir: Path, all_names: list[str],
             head = p.read_text("utf-8", "replace")
         except Exception:
             continue
-        if bad.search(head):
+        if find_engine_notes(head):
             o.status = "missing"
             suspects.append(name)
     return suspects

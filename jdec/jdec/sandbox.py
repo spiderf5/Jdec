@@ -6,9 +6,14 @@ sandbox. This module installs a Java `SecurityManager` at JVM start that:
 
   * allows filesystem writes only below a per-run root,
   * denies network access, process execution, native libraries and `System.exit`,
-  * leaves reads, reflection, class loading, threads and properties alone
-    (a decoder needs those, and they do not cross the boundary).
+  * allows deep reflection (`setAccessible`) only from a driver frame: it is the
+    door to `sun.misc.Unsafe`, and Unsafe can rewrite the manager's own `root`
+    field and undo every check below. Reads, class loading, threads and
+    properties stay allowed - a decoder needs them and they do not cross the
+    boundary.
 
+A target that needs `setAccessible` on its own classes therefore runs inside a
+driver method, not on its own: the driver is the frame the check looks at.
 Native code is outside a Java sandbox. `loadLibrary` is denied so a jar cannot
 enter it; hostile native payloads still need an OS/container boundary.
 
@@ -42,9 +47,11 @@ import java.security.Permission;
  * Installed at JVM start with -Djava.security.manager=jdecsandbox.SandboxManager
  * and -Djdec.sandbox.root=&lt;dir&gt;. It denies process execution, network access,
  * native libraries and JVM exit, and allows filesystem writes only below the
- * configured root. Reads, reflection, class loading, threads and properties are
- * allowed: the replay driver needs them, and they are the operations a decoder
- * legitimately performs.
+ * configured root. Reads, class loading, threads and properties are allowed:
+ * the replay driver needs them, and they are the operations a decoder
+ * legitimately performs. Deep reflection is allowed from a driver frame only,
+ * because setAccessible leads to sun.misc.Unsafe, and Unsafe can rewrite this
+ * object's own `root` field.
  *
  * This is not an OS boundary: native code, if it can be loaded at all, runs
  * outside it. loadLibrary is therefore denied by default.
@@ -85,6 +92,31 @@ public final class SandboxManager extends SecurityManager {
         return false;
     }
 
+    /**
+     * Is the *nearest* non-JDK frame a driver?
+     *
+     * driverExit() asks "is a driver somewhere on the stack", which is right
+     * for an exit the driver performs itself. Reflection needs a stricter
+     * question: target code is always invoked from a driver, so a whole-stack
+     * test answers "yes" for the target as well and hands it setAccessible -
+     * which is all it takes to read sun.misc.Unsafe and rewrite this object's
+     * `root` field.
+     */
+    private boolean driverFrame() {
+        ClassLoader mine = SandboxManager.class.getClassLoader();
+        for (Class<?> c : getClassContext()) {
+            if (c == null) continue;
+            String n = c.getName();
+            if (n.startsWith("java.") || n.startsWith("javax.")
+                    || n.startsWith("jdk.") || n.startsWith("sun.")
+                    || n.startsWith("jdecsandbox.")) {
+                continue;                        // JDK plumbing, and this class
+            }
+            return drivers.contains(n) && c.getClassLoader() == mine;
+        }
+        return false;
+    }
+
     private boolean within(String path) {
         if (root == null) {
             return false;
@@ -99,6 +131,16 @@ public final class SandboxManager extends SecurityManager {
 
     @Override
     public void checkPermission(Permission perm) {
+        if (perm instanceof java.lang.reflect.ReflectPermission) {
+            // setAccessible is the door to sun.misc.Unsafe, and Unsafe writes
+            // `root` below and undoes every check in this method. Drivers do
+            // their own reflection; target code that runs *under* a driver
+            // frame is a different thing, hence the nearest-frame test.
+            if (!driverFrame()) {
+                throw new SecurityException("sandbox: deep reflection denied");
+            }
+            return;
+        }
         if (perm instanceof java.io.FilePermission) {
             String actions = perm.getActions();
             if (actions.contains("execute")) {
@@ -132,8 +174,9 @@ public final class SandboxManager extends SecurityManager {
                 throw new SecurityException("sandbox: native library denied");
             }
         }
-        // Reads, reflection, class loading, threads and property access stay
-        // allowed: a decoder needs them and they do not cross the boundary.
+        // Reads, class loading, threads and property access stay allowed: a
+        // decoder needs them and they do not cross the boundary. Reflection is
+        // decided above, and only for driver frames.
     }
 
     @Override

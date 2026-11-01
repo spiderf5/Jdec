@@ -107,8 +107,10 @@ python jdec.py ircheck client.jar                 # 0 = 全部字节相等
 python jdec.py ircheck client.jar --json ir.json --limit 50
 ```
 
-退出码：**0** 全部相等，**1** 有差异，**2** 没有任何可检查的类。Code 属性无法
-解码的方法单独记 `undecodable`——“没检查到”和“检查过没问题”是两件事，不合并。
+退出码：**0** 全部相等，**1** 有差异，**2** 没有任何可检查的类，**3** 有类或方法
+从未被检查（解析不了 / Code 属性解不出，`--allow-undecodable` 可显式接受）。
+Code 属性无法解码的方法单独记 `undecodable`——“没检查到”和“检查过没问题”是两件事，
+报告与退出码都不合并。
 
 实测（2026-10-29）：4207 个类 / 33149 个方法，含 192 个不同 opcode
 （tableswitch / lookupswitch / wide / multianewarray / invokeinterface /
@@ -211,7 +213,10 @@ demo/legacy/OldStyle|pick|java.lang.String|
 - 会**执行目标代码**（`Class.forName(..., true)` 会跑 `<clinit>`，字符串解密器就在
   这一步），所以必须显式 `--execute`，否则退出码 3
 - 重放 JVM 默认套 Java 沙箱（`jdec/sandbox.py`）：写入只允许在本次运行目录内，
-  网络、进程执行、native 库加载和 `System.exit` 被拒；`--no-sandbox` 显式关闭。
+  网络、进程执行、native 库加载和 `System.exit` 被拒；深度反射（`setAccessible`）
+  只允许从 driver 帧发起——它是通往 `sun.misc.Unsafe` 的门，而 Unsafe 能反写沙箱
+  自己的 `root` 字段。目标代码要反射自己，得由 driver 方法代发，或 `--no-sandbox`。
+  `--no-sandbox` 显式关闭沙箱。
   JDK 24+ 已移除 SecurityManager，需要 JDK 9–23。native 代码不受 Java 沙箱约束，
   `loadLibrary` 默认拒绝，所以它进不了这层边界。`recover` / `pool harvest` 同样
   默认开启同一沙箱。沙箱下 mock agent 不注入（JPLIS 无法在 SecurityManager 下

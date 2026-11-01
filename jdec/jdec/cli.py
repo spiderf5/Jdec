@@ -170,6 +170,12 @@ def cmd_ircheck(args: argparse.Namespace) -> int:
     except (zipfile.BadZipFile, OSError) as exc:
         print(f"cannot read {p}: {exc}")
         return 2
+    except Exception as exc:  # noqa: BLE001 - a gate must not end in a traceback
+        # A hostile class can trip a decoder bug no test anticipated. The exit
+        # code is the contract callers read, so turn it into a verdict instead
+        # of letting Python's default "1" impersonate "differences found".
+        print(f"audit aborted: {type(exc).__name__}: {exc}")
+        return 2
     print(rep.summary())
     limit = args.limit or 10
     shown = 0
@@ -190,7 +196,20 @@ def cmd_ircheck(args: argparse.Namespace) -> int:
     if rep.classes == 0:
         print("exit 2: nothing was checked")
         return 2
-    return 0 if rep.ok else 1
+    if not rep.ok:
+        return 1
+    if not rep.full_coverage and not getattr(args, "allow_undecodable", False):
+        # "looked and it was fine" and "could not look" are different answers;
+        # the report separates them, so the exit code has to as well.
+        parts = []
+        if rep.classes_unreadable:
+            parts.append(f"{rep.classes_unreadable} unreadable class(es)")
+        if rep.methods_undecodable:
+            parts.append(f"{rep.methods_undecodable} undecodable method(s)")
+        print("exit 3: never checked: " + ", ".join(parts)
+              + " (pass --allow-undecodable to accept that)")
+        return 3
+    return 0
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -1392,6 +1411,10 @@ def build_parser() -> argparse.ArgumentParser:
     si.add_argument("--json", default=None, help="write the full report as JSON")
     si.add_argument("--limit", type=int, default=10,
                     help="show at most N mismatches (default 10)")
+    si.add_argument("--allow-undecodable", action="store_true",
+                    help="treat classes/methods that could not be decoded as "
+                         "acceptable (default: exit 3, because they were "
+                         "never checked)")
     si.set_defaults(func=cmd_ircheck)
 
     sr = sub.add_parser(

@@ -51,7 +51,8 @@ from jdec import recover as RC        # noqa: E402
 from jdec import score as SCORE       # noqa: E402
 from jdec import strings as ST        # noqa: E402
 from jdec import engines as EN  # noqa: E402
-from jdec.decompile import _iso_buckets, decompile, write_report  # noqa: E402
+from jdec.decompile import (_iso_buckets, _owns_file, _scan_error_markers,
+                            ClassOutcome, decompile, write_report)  # noqa: E402
 from jdec.probe import JarProfile, profile_jar    # noqa: E402
 from jdec.score import evaluate       # noqa: E402
 
@@ -940,7 +941,9 @@ def test_ir_roundtrip() -> None:
           and bad.classes == 0)
     check("nothing checked is not a pass", not bad.ok)
 
-    # 7. CLI: 0 on a clean jar, and the summary names both levels.
+    # 7. CLI: "clean" and "not everything was checked" are different verdicts.
+    #    SAMPLE ships a deliberately truncated class, so a gate that answers 0
+    #    for it is lying about what it looked at.
     import contextlib
     import io
     from jdec import cli as CL
@@ -948,10 +951,31 @@ def test_ir_roundtrip() -> None:
     with contextlib.redirect_stdout(buf):
         rc = CL.main(["ircheck", str(SAMPLE)])
     text = buf.getvalue()
-    check("ircheck exits 0 on a clean jar", rc == 0, str(rc))
+    check("ircheck does not call a jar with an unreadable class clean",
+          rc == 3, str(rc))
     check("ircheck reports both levels", "class     :" in text and "method    :" in text,
           text[-300:])
-    check("ircheck says PASS", "result    : PASS" in text, text[-200:])
+    check("the verdict says PARTIAL", "result    : PARTIAL" in text, text[-200:])
+    check("the exit reason names what was skipped", "exit 3:" in text and
+          "unreadable" in text, text[-300:])
+
+    # the parseable classes on their own are a clean jar: exit 0, PASS
+    clean = Path(tempfile.mkdtemp()) / "clean.jar"
+    with zipfile.ZipFile(SAMPLE) as zin, zipfile.ZipFile(clean, "w") as zout:
+        for name in zin.namelist():
+            if not name.endswith(".class"):
+                continue
+            try:
+                CF.parse(zin.read(name))
+            except Exception:
+                continue
+            zout.writestr(name, zin.read(name))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = CL.main(["ircheck", str(clean)])
+    text = buf.getvalue()
+    check("ircheck exits 0 when every class could be checked", rc == 0, str(rc))
+    check("ircheck says PASS there", "result    : PASS" in text, text[-200:])
 
 
 def test_toolchain_single_entry() -> None:
@@ -6445,6 +6469,185 @@ def test_replay_safety_gate() -> None:
     check("pipeline --allow-replay opts in", getattr(ns2, "allow_replay", False))
 
 
+def test_review_2026_11_01() -> None:
+    """Findings of the 2026-11-01 review: hostile bytecode, gate verdicts,
+    scoring noise that a class named `IO` or an ordinary `"internal error"`
+    string used to trigger."""
+    print("review 2026-11-01: truncated bytecode, ircheck verdict, scoring noise")
+
+    # -- 1. a cut instruction is a decode error, not an IndexError -----------
+    for blob in (b"\x10", b"\x11\x00", b"\xb2\x00"):
+        try:
+            BC.decode(blob)
+            msg = "no error"
+        except BC.BytecodeError as exc:
+            msg = str(exc)
+        except Exception as exc:  # noqa: BLE001 - this used to be IndexError
+            msg = f"{type(exc).__name__}: {exc}"
+        check(f"decode({blob!r}) reports a bytecode error",
+              "truncated instruction" in msg, msg)
+
+    # -- 2. ircheck: PASS is not the same as "looked at everything" ---------
+    from jdec import ir as IR
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        with zipfile.ZipFile(SAMPLE) as z:
+            entry = next(n for n in z.namelist() if n.endswith(".class"))
+            data = bytearray(z.read(entry))
+        cf = CF.parse(bytes(data))
+        patched = False
+        for m in cf.methods:
+            payload = AN.member_attributes(cf, m).get("Code")
+            if not payload:
+                continue
+            clen = struct.unpack_from(">I", payload, 4)[0]
+            at = bytes(data).find(payload[8:8 + clen])
+            if at < 0 or clen < 2:
+                continue
+            data[at + clen - 1] = 0x10      # bipush with no operand: truncated
+            patched = True
+            break
+        broken = root / "broken.jar"
+        with zipfile.ZipFile(broken, "w") as z:
+            z.writestr(entry, bytes(data))
+        rep = IR.audit_path(broken)
+        check("a truncated method is undecodable, not a crash",
+              patched and rep.methods_undecodable == 1,
+              f"patched={patched} undecodable={rep.methods_undecodable}")
+        check("the audit still passes as far as it looked", rep.ok,
+              str(rep.class_mismatch) + str(rep.mismatches))
+        check("but it does not claim full coverage", not rep.full_coverage)
+        check("the summary says PARTIAL", "PARTIAL" in rep.summary(), rep.summary())
+
+        ns = SimpleNamespace(input=str(broken), json=None, limit=10,
+                             allow_undecodable=False)
+        check("ircheck exits 3 when something was never checked",
+              CL.cmd_ircheck(ns) == 3)
+        ns.allow_undecodable = True
+        check("--allow-undecodable restores exit 0", CL.cmd_ircheck(ns) == 0)
+
+    # -- 3. scoring: a short class name is still a class name ---------------
+    if JAVAC is None:
+        print("  (skipped: scoring assertions need javac)")
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "src" / "demo").mkdir(parents=True)
+            java = root / "src" / "demo" / "IO.java"
+            java.write_text(
+                "package demo;\n"
+                "public class IO {\n"
+                "    private int bufferSize;\n"
+                "    public int readChunk(int requestedCount) {\n"
+                "        return requestedCount + bufferSize;\n"
+                "    }\n"
+                "}\n", encoding="utf-8")
+            subprocess.run([JAVAC, "-d", str(root / "cls"), str(java)],
+                           check=True, capture_output=True)
+            cf = CF.parse((root / "cls" / "demo" / "IO.class").read_bytes())
+            perfect = (
+                "package demo;\n"
+                "public class IO {\n"
+                "    private int bufferSize;\n"
+                "    public int readChunk(int requestedCount) {\n"
+                "        return requestedCount + bufferSize;\n"
+                "    }\n"
+                "}\n")
+            q = evaluate(perfect, cf)
+            check("a perfect recovery of class IO scores 100", q.score == 100.0,
+                  f"score={q.score} issues={q.issues}")
+            check("no class-name issue is invented",
+                  not any("class name" in i for i in q.issues), str(q.issues))
+
+            # a line-comment give-up note counts, and costs only its own line
+            q2 = evaluate("// $FF: Couldn't be decompiled\n" + perfect, cf)
+            check("a // $FF note is detected as a give-up", q2.hard_error)
+            # one comment line over a ~200-character file is ~16%: the point is
+            # that the span is the comment and not the whole file
+            check("it is measured as the comment, not the file",
+                  0.0 < q2.damaged_fraction < 0.35, str(q2.damaged_fraction))
+            check("one lost line is not a class-level failure",
+                  not q2.class_level_failure)
+            check("the report does not print 0% damage",
+                  all("(0%" not in i for i in q2.issues), str(q2.issues))
+
+            # -- 4. an ordinary message is not an engine give-up -------------
+            out = root / "out"
+            (out / "demo").mkdir(parents=True)
+            handler = out / "demo" / "Handler.java"
+            handler.write_text(
+                "package demo;\n"
+                "public class Handler {\n"
+                "    public void fail() {\n"
+                "        throw new IllegalStateException(\"internal error\");\n"
+                "    }\n"
+                "}\n", encoding="utf-8")
+            outs = {"demo/Handler": ClassOutcome(name="demo/Handler",
+                                                 rel="demo/Handler.java",
+                                                 status="ok")}
+            flagged = _scan_error_markers(out, ["demo/Handler"], outs)
+            check("a string literal is not a verdict on the class",
+                  flagged == [] and outs["demo/Handler"].status == "ok",
+                  f"{flagged} {outs['demo/Handler'].status}")
+            handler.write_text("// $FF: Couldn't be decompiled\n"
+                               "public class Handler {}\n", encoding="utf-8")
+            flagged = _scan_error_markers(out, ["demo/Handler"], outs)
+            check("a comment note still sends the class for a second opinion",
+                  flagged == ["demo/Handler"], str(flagged))
+
+            # -- 5. pass 2 does not overwrite another class' file ------------
+            dest = out / "demo" / "A.java"
+            dest.write_text("public class A {}\n", encoding="utf-8")
+            outer = ClassOutcome(name="demo/A", rel="demo/A.java", status="ok")
+            check("the outer class owns its file",
+                  _owns_file(outer, "demo/A.java", dest))
+            check("a class that produced nothing owns nothing",
+                  not _owns_file(ClassOutcome(name="demo/A", status="missing"),
+                                 "demo/A.java", dest))
+
+    # -- 6. the sandbox: deep reflection is a driver-only privilege ---------
+    from jdec import sandbox as SB
+    try:
+        SB.check_available()
+        sandbox_ok = True
+        why = ""
+    except Exception as exc:  # noqa: BLE001 - JDK 24+ has no SecurityManager
+        sandbox_ok = False
+        why = str(exc)
+    if not sandbox_ok or JAVAC is None:
+        print(f"  (skipped: sandbox assertions need JDK 9-23 + javac: {why})")
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "src" / "probe").mkdir(parents=True)
+            (root / "src" / "probe" / "Deep.java").write_text(
+                "package probe;\n"
+                "import java.lang.reflect.Field;\n"
+                "public class Deep {\n"
+                "    private int secret = 1;\n"
+                "    public static void main(String[] a) throws Exception {\n"
+                "        Field f = Deep.class.getDeclaredField(\"secret\");\n"
+                "        try { f.setAccessible(true); System.out.println(\"ALLOWED\"); }\n"
+                "        catch (SecurityException e) { System.out.println(\"DENIED\"); }\n"
+                "    }\n"
+                "}\n", encoding="utf-8")
+            subprocess.run([JAVAC, "-d", str(root / "cls"),
+                            str(root / "src" / "probe" / "Deep.java")],
+                           check=True, capture_output=True)
+            cp = os.pathsep.join([str(SB.classpath_entry()), str(root / "cls")])
+
+            def run(drivers):
+                cmd = [JAVA, *SB.jvm_args(root / "sandbox", drivers=drivers),
+                       "-cp", cp, "probe.Deep"]
+                p = subprocess.run(cmd, capture_output=True, text=True,
+                                   errors="replace", timeout=120)
+                return p.stdout.strip()
+
+            check("target code cannot setAccessible its way to Unsafe",
+                  "DENIED" in run(()))
+            check("a driver frame still can", "ALLOWED" in run(("probe.Deep",)))
+
+
 def test_rewrite_skips_comments_strings() -> None:
     """BUG round negative: source rewriters used to replace lookalike
     call sites inside comments and string literals (source pollution,
@@ -7604,6 +7807,7 @@ def main() -> int:
     test_stub_bundle_failure_is_visible()
     test_web_cross_site_guard()
     test_cli_json_and_version()
+    test_review_2026_11_01()
     test_callgraph_and_reachability()
     test_conservative_prune()
     test_decompiler_trap_pruning()
