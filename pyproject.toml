@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Multi-engine Java decompiler driver with bytecode-verified output selection"
 readme = "jdec/README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 authors = [
     {name = "jdec contributors"}
 ]
@@ -25,6 +25,7 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Topic :: Software Development :: Disassemblers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -34,6 +35,10 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/spiderf5/Jdec"
+Issues = "https://github.com/spiderf5/Jdec/issues"
 
 [project.scripts]
 jdec = "jdec.cli:main"
@@ -55,4 +60,23 @@ jdec = [
     "*.js",
     "web_assets/*",
     "engines_src/*.java"
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# Downloaded engines and generated fixtures are not source.
+extend-exclude = ["jdec/engines", "jdec/tests/build"]
+
+[tool.ruff.lint]
+# Deliberately narrow. This is the set that catches a defect rather than a
+# preference: undefined names, dead or shadowed imports, a mutable default, an
+# exception swallowed by a bare `except`, a comparison against a literal.
+# The tree already has a consistent style; reformatting 40k lines would bury
+# the semantic diffs that make a review worth reading.
+select = ["F", "E9", "B"]
+ignore = [
+    "B905",  # zip(strict=) - every call site currently has equal lengths, and
+             # the flag would turn a mismatch into a new exception path
+    "B007",  # unused loop variable is often intentional here (`for _ in ...`)
 ]

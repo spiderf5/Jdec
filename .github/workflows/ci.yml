@@ -20,9 +20,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install ruff
-      - name: Lint undefined names, unused imports/vars and f-strings
+      - name: Lint undefined names, unused imports/vars, f-strings and bugbear
+        # Rules live in pyproject.toml ([tool.ruff.lint]) so a local run and CI
+        # cannot drift: F = undefined/unused, B = bugbear, E9 = syntax errors.
         run: |
-          ruff check jdec/jdec jdec/tests --select F821,F811,F401,F841,F541
+          ruff check jdec/jdec jdec/tests java-deobf/scripts
 
   test:
     runs-on: ${{ matrix.os }}
@@ -110,3 +112,10 @@ jobs:
       - name: Probe a fixture with the wheel install
         run: |
           /tmp/jdec-wheel-venv/bin/jdec probe jdec/tests/sample.jar
+      - name: Gates must pass from a clean install
+        # The suite proves the gates work against the in-tree fixtures; this
+        # proves they work through the console script and the installed package
+        # data (the engine bridge, web assets, fingerprints.json).
+        run: |
+          /tmp/jdec-wheel-venv/bin/jdec ircheck jdec/tests/sample.jar
+          /tmp/jdec-wheel-venv/bin/jdec verify jdec/tests/sample.jar

@@ -9,6 +9,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.pytest_cache/
+.ruff_cache/
 
 # jdec: downloaded engines and build artifacts, restorable via
 #   python jdec.py engines                  (engine jars)
