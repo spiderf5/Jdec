@@ -78,6 +78,15 @@ def decode_mutf8(data: bytes) -> str:
     the exact code-unit semantics of Java's String.charAt: one Python
     code point per JVM char, including lone surrogates.
     """
+    # Fast path: identifiers, descriptors and ordinary literals are pure ASCII,
+    # where the state machine below degenerates to `chr(b)` per byte. `decode`
+    # does that at C speed; only non-ASCII payloads (encrypted pools, CJK
+    # strings) pay for the loop. Every byte < 0x80 maps to chr(b) either way -
+    # including a raw NUL - so the two paths are byte-for-byte equivalent.
+    try:
+        return data.decode("ascii")
+    except UnicodeDecodeError:
+        pass
     out: list[str] = []
     i, n = 0, len(data)
     while i < n:
@@ -238,6 +247,14 @@ class ClassFile:
     # payload being raw bytes.
     cp: list = field(default_factory=list)
     _utf8_cache: dict = field(default_factory=dict, repr=False)
+    # index -> the string that owns that slot in `_utf8_cache`. Without it,
+    # `set_utf8` had to scan the whole cache to find the key pointing at an
+    # index, which turns renaming a class into O(cp^2).
+    _utf8_owner: dict = field(default_factory=dict, repr=False)
+    # Built on the first write, not in `parse`. Read-only consumers (probe,
+    # strings, analyze, verify, ircheck) never intern a string, so decoding
+    # every Utf8 entry up front was pure overhead for them.
+    _utf8_ready: bool = field(default=False, repr=False)
 
     # ---------------------------------------------------------------- basics
 
@@ -311,17 +328,23 @@ class ClassFile:
     def set_utf8(self, index: int, value: str) -> None:
         raw = encode_mutf8(value)
         self.cp[index] = (C_UTF8, raw)
-        self._utf8_cache.pop(self._utf8_cache_get_key(index), None)
+        self._ensure_utf8()
+        old = self._utf8_owner.pop(index, None)
+        if old is not None and self._utf8_cache.get(old) == index:
+            del self._utf8_cache[old]
         self._utf8_cache[value] = index
+        self._utf8_owner[index] = value
+
+    def _ensure_utf8(self) -> None:
+        if not self._utf8_ready:
+            _build_utf8_cache(self)
 
     def _utf8_cache_get_key(self, index: int):
-        for k, v in self._utf8_cache.items():
-            if v == index:
-                return k
-        return None
+        return self._utf8_owner.get(index)
 
     def intern_utf8(self, value: str) -> int:
         """Return the index of a Utf8 entry holding `value`, appending if needed."""
+        self._ensure_utf8()
         if value in self._utf8_cache:
             idx = self._utf8_cache[value]
             if idx < len(self.cp) and self.cp[idx][0] == C_UTF8:
@@ -334,6 +357,7 @@ class ClassFile:
         self.cp.append((C_UTF8, raw))
         idx = len(self.cp) - 1
         self._utf8_cache[value] = idx
+        self._utf8_owner[idx] = value
         return idx
 
     def add_class(self, internal_name: str) -> int:
@@ -441,7 +465,9 @@ def parse(data: bytes) -> ClassFile:
             this_class=this_class, super_class=super_class, interfaces=interfaces,
             fields=fields, methods=methods, attrs_blob=data[attrs_at:o], cp=cp,
         )
-        _build_utf8_cache(cf)
+        # The Utf8 index is built on demand (ClassFile._ensure_utf8): only the
+        # rewriting paths ever intern a string, and building it here decoded
+        # every constant in every class just to throw the result away.
         return cf
     except (struct.error, IndexError) as exc:
         raise ClassFormatError(f"truncated or malformed class file: {exc}") from exc
@@ -477,6 +503,8 @@ def _read_members(data: bytes, o: int):
 
 def _build_utf8_cache(cf: ClassFile) -> None:
     # first occurrence wins; members are repointed explicitly when renamed
+    cache = cf._utf8_cache
+    owner = cf._utf8_owner
     for idx in range(1, len(cf.cp)):
         e = cf.cp[idx]
         if e and e[0] == C_UTF8:
@@ -484,7 +512,10 @@ def _build_utf8_cache(cf: ClassFile) -> None:
                 s = e[1].decode("utf-8", "replace")
             except Exception:
                 continue
-            cf._utf8_cache.setdefault(s, idx)
+            if s not in cache:
+                cache[s] = idx
+                owner[idx] = s
+    cf._utf8_ready = True
 
 
 # --------------------------------------------------------------------------

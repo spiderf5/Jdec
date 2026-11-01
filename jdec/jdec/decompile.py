@@ -578,6 +578,21 @@ def decompile(
 
     # ------------------------------------------------------- verification
     print("[5/5] verification ...")
+    # A native method has no body in the bytecode at all, so counting it as a
+    # recovery failure would be wrong. Report it separately. The accounting
+    # rides along with a pass that already parsed the class: the old version
+    # opened the jar and re-parsed all 3693 classes a third time just to count
+    # ACC_NATIVE flags.
+    native_total = native_classes = 0
+
+    def _count_native(outcome: ClassOutcome, cf) -> None:
+        nonlocal native_total, native_classes
+        n = sum(1 for m in cf.methods if m.access_flags & CF.ACC_NATIVE)
+        if n:
+            outcome.native_methods = n
+            native_total += n
+            native_classes += 1
+
     if verify_all:
         cov_sum = cov_n = 0.0
         with zipfile.ZipFile(input_path) as z:
@@ -587,6 +602,7 @@ def decompile(
                     gt = CF.parse(z.read(entries.get(name, name + ".class")))
                 except Exception:
                     continue
+                _count_native(o, gt)
                 rel = o.rel
                 if rel and (src_dir / rel).exists():
                     src = (src_dir / rel).read_text("utf-8", "replace")
@@ -607,24 +623,16 @@ def decompile(
         coverage = (cov_sum / cov_n) if cov_n else None
     else:
         coverage = None
-        for name in good:
-            if outcomes[name].status == "missing":
-                outcomes[name].status = "failed"
+        with zipfile.ZipFile(input_path) as z:
+            for name in good:
+                o = outcomes[name]
+                if o.status == "missing":
+                    o.status = "failed"
+                try:
+                    _count_native(o, CF.parse(z.read(entries.get(name, name + ".class"))))
+                except Exception:
+                    continue
 
-    # A native method has no body in the bytecode at all, so counting it as a
-    # recovery failure would be wrong. Report it separately.
-    native_total = native_classes = 0
-    with zipfile.ZipFile(input_path) as z:
-        for name in good:
-            try:
-                cf = CF.parse(z.read(entries.get(name, name + ".class")))
-            except Exception:
-                continue
-            n = sum(1 for m in cf.methods if m.access_flags & CF.ACC_NATIVE)
-            if n:
-                outcomes[name].native_methods = n
-                native_total += n
-                native_classes += 1
     if native_total:
         print(f"  {native_total} native method(s) in {native_classes} class(es) "
               f"carry no bytecode and cannot be decompiled")

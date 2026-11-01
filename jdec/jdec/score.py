@@ -20,7 +20,6 @@ signature-recovery rate, and reports label it as such.
 
 from __future__ import annotations
 
-import bisect
 import re
 from dataclasses import dataclass, field
 
@@ -112,6 +111,12 @@ _HARD_ERROR_PATTERNS = [
     )
 ]
 
+# The same vocabulary as one alternation, for scanning. Kept as a separate
+# object so `_HARD_ERROR_PATTERNS` stays the readable list (the test suite
+# iterates it to check each phrase on its own).
+_HARD_ERROR_RE = re.compile(
+    "|".join("(?:%s)" % p.pattern for p in _HARD_ERROR_PATTERNS), re.I)
+
 # bytecode mnemonics leaking into what is supposed to be Java source
 _LEFTOVER_RE = re.compile(
     r"\b(?:iload|istore|aload|astore|lload|lstore|dload|dstore|fload|fstore"
@@ -182,6 +187,10 @@ def _member_name_floor(cf: ClassFile) -> int:
     return 1 if short * 2 >= len(names) else 3
 
 
+_SCAN_SPECIAL = re.compile(r"[/\"']")
+_NOT_NEWLINE = re.compile(r"[^\r\n]")
+
+
 def _noise_spans(src: str) -> list[tuple[str, int, int]]:
     """`(kind, start, end)` for every comment and string/char literal.
 
@@ -191,10 +200,19 @@ def _noise_spans(src: str) -> list[tuple[str, int, int]]:
     `_comment_spans` keeps only comments (a give-up note is only a note when it
     sits inside one - `throw new IllegalStateException("internal error")` is
     ordinary Java, not an engine giving up).
+
+    Ordinary characters are skipped by a C-level `search` rather than stepped
+    over one at a time: Java source is mostly identifiers and punctuation, and
+    walking it character by character was the single hottest thing in scoring.
     """
     spans: list[tuple[str, int, int]] = []
-    i, n = 0, len(src)
-    while i < n:
+    n = len(src)
+    i = 0
+    while True:
+        m = _SCAN_SPECIAL.search(src, i)
+        if m is None:
+            return spans
+        i = m.start()
         c = src[i]
         nxt = src[i + 1] if i + 1 < n else ""
         if c == "/" and nxt == "/":
@@ -243,7 +261,6 @@ def _noise_spans(src: str) -> list[tuple[str, int, int]]:
             i = j
         else:
             i += 1
-    return spans
 
 
 def _comment_spans(src: str) -> list[tuple[int, int]]:
@@ -257,14 +274,27 @@ def _strip_noise(src: str) -> str:
     comment (an engine note listing the real member names) or inside a string
     literal (encrypted pool payloads), so member matching runs over this
     sanitised text. Newlines survive so `^`-anchored scans stay aligned.
+
+    The blanking replaces whole spans instead of rewriting character by
+    character: `re.sub` does it in C and the result is byte-identical, which
+    matters because every match offset downstream is derived from this string.
     """
-    out = list(src)
+    spans = _noise_spans(src)
+    if not spans:
+        return src
     n = len(src)
-    for _kind, a, b in _noise_spans(src):
-        for k in range(a, min(b, n)):
-            if out[k] not in "\r\n":
-                out[k] = " "
-    return "".join(out)
+    parts: list[str] = []
+    last = 0
+    for _kind, a, b in spans:
+        a = min(a, n)
+        b = min(b, n)
+        if b <= a:
+            continue
+        parts.append(src[last:a])
+        parts.append(_NOT_NEWLINE.sub(" ", src[a:b]))
+        last = b
+    parts.append(src[last:])
+    return "".join(parts)
 
 
 def _hard_error_spans(src: str, comments=None) -> list[tuple[int, int]]:
@@ -280,16 +310,16 @@ def _hard_error_spans(src: str, comments=None) -> list[tuple[int, int]]:
     spans = _comment_spans(src) if comments is None else comments
     if not spans:
         return []
-    starts = [a for a, _ in spans]
+    # Scan only the comment ranges, not the whole file. The verdict was always
+    # "a comment contains one of these phrases", and comments are a small
+    # fraction of a decompiled class - running the alternation over the entire
+    # source was most of the remaining cost of scoring. `search(pos, endpos)`
+    # keeps the indices absolute and stops a phrase from matching across a
+    # comment boundary, which the old bisect check rejected anyway.
     out: list[tuple[int, int]] = []
-    for p in _HARD_ERROR_PATTERNS:
-        for m in p.finditer(src):
-            k = bisect.bisect_right(starts, m.start()) - 1
-            if k < 0:
-                continue
-            a, b = spans[k]
-            if m.end() <= b and (a, b) not in out:
-                out.append((a, b))
+    for a, b in spans:
+        if _HARD_ERROR_RE.search(src, a, b) is not None:
+            out.append((a, b))
     return out
 
 

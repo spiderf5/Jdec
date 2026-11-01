@@ -113,7 +113,24 @@ def _build_lengths() -> dict[int, int]:
 _OP_LEN = _build_lengths()
 
 
-@dataclass
+def _build_len_table() -> bytes:
+    """The same table as a 256-entry byte string.
+
+    `decode` runs once per method of every class in a jar, so the per-opcode
+    `dict.get` showed up as one of the hottest calls in a profile. Indexing an
+    immutable bytes object is a single C-level operation, and the table never
+    has to be rebuilt.
+    """
+    tbl = bytearray(256)
+    for op, size in _OP_LEN.items():
+        tbl[op] = size
+    return bytes(tbl)
+
+
+_OP_LEN_TABLE = _build_len_table()
+
+
+@dataclass(slots=True)
 class Insn:
     pc: int
     op: int
@@ -174,16 +191,19 @@ def decode(code: bytes) -> list[Insn]:
     while o < n:
         pc = o
         op = code[o]
-        length = _OP_LEN.get(op)
-        if length is None:
-            raise BytecodeError(f"unknown opcode 0x{op:02x} at {pc}")
-        # Operands must fit inside the code array. A class whose last
-        # instruction is cut in half is hostile input, not a crash: every
-        # operand read below assumes this check already passed.
+        length = _OP_LEN_TABLE[op]
+        # A zero in the table means "variable length or not an opcode"; both
+        # cases re-derive the size below, and an opcode the table does not
+        # know is hostile input rather than a decode.
         if length and o + length > n:
+            # Operands must fit inside the code array. A class whose last
+            # instruction is cut in half is hostile input, not a crash: every
+            # operand read below assumes this check already passed.
             raise BytecodeError(f"truncated instruction 0x{op:02x} at {pc}")
 
-        if op == OP_WIDE:
+        if length == 1:
+            out.append(Insn(pc, op))
+        elif op == OP_WIDE:
             if o + 1 >= n:
                 raise BytecodeError(f"truncated wide at {pc}")
             sub = code[o + 1]
@@ -229,8 +249,6 @@ def decode(code: bytes) -> list[Insn]:
             out.append(Insn(pc=pc, op=op, length=length, targets=targets,
                             pad=code[o + 1:p], **extra))
 
-        elif length == 2 and op in (OP_LDC,):
-            out.append(Insn(pc=pc, op=op, arg=code[o + 1], length=length))
         elif length == 2:
             out.append(Insn(pc=pc, op=op, arg=code[o + 1], length=length))
         elif length == 3:
@@ -261,7 +279,7 @@ def decode(code: bytes) -> list[Insn]:
                             arg=struct.unpack_from(">H", code, o + 1)[0],
                             arg2=code[o + 3], length=length))
         else:
-            out.append(Insn(pc=pc, op=op, length=length))
+            raise BytecodeError(f"unknown opcode 0x{op:02x} at {pc}")
         o += length
     return out
 
