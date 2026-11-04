@@ -34,7 +34,7 @@ _MISSING_JAVA = "java not found: set JAVA_HOME to a JDK or put java on PATH"
 def default_engines_dir() -> Path:
     """Where downloaded engine jars and generated agents live.
 
-    A source checkout keeps the historical ``jdec/engines`` directory so
+    A source checkout keeps the historical ``src/engines`` directory so
     existing downloads and tests stay put. An installed wheel must never
     write to ``site-packages/engines`` (shared, read-only and unversioned),
     so it uses the per-user cache instead.

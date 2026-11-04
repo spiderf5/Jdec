@@ -6755,7 +6755,7 @@ def test_cli_json_and_version() -> None:
     check("source checkout keeps the repo engines dir",
           TC.default_engines_dir().name == "engines",
           str(TC.default_engines_dir()))
-    ver = subprocess.run([sys.executable, str(ROOT / "jdec.py"), "--version"],
+    ver = subprocess.run([sys.executable, "-m", "jdec", "--version"],
                          cwd=ROOT, capture_output=True, text=True, timeout=60)
     check("--version exits 0", ver.returncode == 0, ver.stderr[-200:])
     from jdec import __version__ as pkg_version
@@ -6764,7 +6764,7 @@ def test_cli_json_and_version() -> None:
     out = Path(tempfile.mkdtemp(prefix="jdec_reach_json_")) / "reach.json"
     try:
         r = subprocess.run(
-            [sys.executable, str(ROOT / "jdec.py"), "reach", str(SAMPLE),
+            [sys.executable, "-m", "jdec", "reach", str(SAMPLE),
              "--json", str(out)],
             cwd=ROOT, capture_output=True, text=True, timeout=180)
         check("reach --json exits 0", r.returncode == 0, r.stderr[-300:])

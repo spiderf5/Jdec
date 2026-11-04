@@ -24,7 +24,7 @@ jobs:
         # Rules live in pyproject.toml ([tool.ruff.lint]) so a local run and CI
         # cannot drift: F = undefined/unused, B = bugbear, E9 = syntax errors.
         run: |
-          ruff check jdec/jdec jdec/tests java-deobf/scripts
+          ruff check src/jdec src/tests java-deobf/scripts
 
   test:
     runs-on: ${{ matrix.os }}
@@ -69,7 +69,7 @@ jobs:
 
       - name: Run test suite
         run: |
-          python jdec/tests/run_tests.py
+          python src/tests/run_tests.py
 
   wheel-smoke:
     runs-on: ubuntu-latest
@@ -104,14 +104,14 @@ jobs:
         run: |
           test ! -d /tmp/jdec-wheel-venv/lib/python3.11/site-packages/engines
       - name: Build fixtures
-        # jdec/tests/*.jar is gitignored, so a fresh checkout has none and the
+        # src/tests/*.jar is gitignored, so a fresh checkout has none and the
         # probe below would fail with "no such file". run_tests.py builds them
         # itself; this job never runs the suite, so it must ask explicitly.
         run: |
-          python jdec/tests/build_fixtures.py
+          python src/tests/build_fixtures.py
       - name: Probe a fixture with the wheel install
         run: |
-          /tmp/jdec-wheel-venv/bin/jdec probe jdec/tests/sample.jar
+          /tmp/jdec-wheel-venv/bin/jdec probe src/tests/sample.jar
       - name: Gates must pass from a clean install
         # The suite proves the gates work against the in-tree fixtures; this
         # proves they work through the console script and the installed package
@@ -119,5 +119,5 @@ jobs:
         # flow.jar, not sample.jar: sample ships a truncated class on purpose,
         # so ircheck answers PARTIAL (exit 3) and verify reports it INVALID.
         run: |
-          /tmp/jdec-wheel-venv/bin/jdec ircheck jdec/tests/flow.jar
-          /tmp/jdec-wheel-venv/bin/jdec verify jdec/tests/flow.jar
+          /tmp/jdec-wheel-venv/bin/jdec ircheck src/tests/flow.jar
+          /tmp/jdec-wheel-venv/bin/jdec verify src/tests/flow.jar

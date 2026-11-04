@@ -14,26 +14,26 @@ dist/
 
 # jdec: downloaded engines and build artifacts, restorable via
 #   python jdec.py engines                  (engine jars)
-#   python jdec/tests/build_fixtures.py     (sample/mixin/flow/collide jars)
-jdec/engines/*.jar
-jdec/engines/ghidra/
-jdec/engines/bridge/*.class
-jdec/engines/tap/*.jar
-jdec/engines/tap/*.class
-jdec/engines/tap/classes/
-jdec/engines/tests/
-jdec/tests/build/
-jdec/tests/*.jar
+#   python src/tests/build_fixtures.py     (sample/mixin/flow/collide jars)
+src/engines/*.jar
+src/engines/ghidra/
+src/engines/bridge/*.class
+src/engines/tap/*.jar
+src/engines/tap/*.class
+src/engines/tap/classes/
+src/engines/tests/
+src/tests/build/
+src/tests/*.jar
 
 # jdec: transient run/debug outputs (decompiled trees, analysis dumps,
 # downloaded MC jars/mappings under tests/mc)
-jdec/tests/dbg*/
-jdec/tests/mc/
-jdec/tests/mcfull*/
-jdec/tests/mcout/
-jdec/tests/out*/
-jdec/tests/demo_analysis/
-jdec/tests/demo_flow/
+src/tests/dbg*/
+src/tests/mc/
+src/tests/mcfull*/
+src/tests/mcout/
+src/tests/out*/
+src/tests/demo_analysis/
+src/tests/demo_flow/
 
 # caches and mappings
 cache/
@@ -43,7 +43,7 @@ pool_work/
 # logs and crash dumps
 *.log
 logs/
-jdec/logs/
+src/logs/
 hs_err_pid*.log
 
 # CLI default output directories
@@ -62,16 +62,16 @@ out*/
 *.class
 
 # native 分析工件（样本转储与工作区，local-only；工具本身入库）
-jdec/_ghproj_rt/
-jdec/engines/frida/native/
-jdec/engines/frida/config/
-jdec/engines/frida/mappings*.tsv
-jdec/engines/frida/_smoke_out.tsv
-jdec/engines/frida/.mixin.out/
+src/_ghproj_rt/
+src/engines/frida/native/
+src/engines/frida/config/
+src/engines/frida/mappings*.tsv
+src/engines/frida/_smoke_out.tsv
+src/engines/frida/.mixin.out/
 
 # 外部研究材料（含 DMCA 敏感源码），永不入库
 study/
 # resident JDK for class v69 (installed via tsinghua adoptium mirror)
 jdk25/
 # stub-jar cache fingerprints (rebuilt from STUB_SOURCES)
-jdec/engines/*.sha256
+src/engines/*.sha256

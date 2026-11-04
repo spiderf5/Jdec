@@ -15,7 +15,7 @@ Decrypt time (this module, no JVM needed):
   data[i] = swpInv[data[i] & 0xFF]  ->  DES/CBC/PKCS5 decrypt (zero IV)
   -> SHA-256 verify  ->  split [len_le16][utf8] records.
 
-DES through the pure-Python `jdec/jdec/_des.py` module (intentional: jdec is
+DES through the pure-Python `src/jdec/_des.py` module (intentional: jdec is
 zero-dependency stdlib-only, and CNG/ctypes would be Windows-only anyway).
 
 Scan strategy: brute-force byte scan (no linear bytecode walk — immune to

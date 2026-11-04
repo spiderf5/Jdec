@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Root forwarder for jdec decompiler driver."""
+"""Repo-root entry point for a source checkout.
+
+The package lives in ``src/jdec`` (a standard src/ layout). This shim keeps
+``python jdec.py ...`` working without an install by putting ``src/`` first
+on sys.path. Installed users can use the ``jdec`` console script or
+``python -m jdec`` instead.
+"""
 
 import sys
 from pathlib import Path
@@ -13,27 +19,26 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-pkg_dir = Path(__file__).resolve().parent / "jdec"
-if str(pkg_dir) not in sys.path:
-    sys.path.insert(0, str(pkg_dir))
+_ROOT = Path(__file__).resolve().parent
+_SRC = _ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 if __name__ == "__main__":
     from jdec.cli import main
     sys.exit(main())
 else:
-    # NOTE: `jdec/` is both the project directory and the package parent,
-    # so `import jdec` from the repo root resolves to a namespace package
-    # instead of jdec/jdec/__init__.py. This loader forces the real package.
-    # The duplicate forwarder jdec/jdec.py exists for the same reason.
-    # Do not delete either until the tree moves to a standard src/ layout.
+    # `import jdec` from the repo root would otherwise resolve to this file
+    # (or to an empty namespace package) rather than the real package.
     import importlib.util
-    pkg_init = Path(__file__).resolve().parent / "jdec" / "jdec" / "__init__.py"
-    spec = importlib.util.spec_from_file_location(
-        "jdec", str(pkg_init), submodule_search_locations=[str(pkg_init.parent)]
+
+    _init = _SRC / "jdec" / "__init__.py"
+    _spec = importlib.util.spec_from_file_location(
+        "jdec", str(_init), submodule_search_locations=[str(_init.parent)]
     )
-    _real_jdec = importlib.util.module_from_spec(spec)
-    sys.modules["jdec"] = _real_jdec
-    spec.loader.exec_module(_real_jdec)
-    for _k, _v in _real_jdec.__dict__.items():
-        globals()[_k] = _v
-    __all__ = getattr(_real_jdec, "__all__", [])
+    _pkg = importlib.util.module_from_spec(_spec)
+    sys.modules["jdec"] = _pkg
+    _spec.loader.exec_module(_pkg)
+    for _key, _value in _pkg.__dict__.items():
+        globals()[_key] = _value
+    __all__ = getattr(_pkg, "__all__", [])

@@ -29,7 +29,7 @@
   退出码 0/1/2（`--strict` 升级），总报告带 Stage Status 表——**失败不再被标为成功**。
 - 安全边界：动态重放默认拒绝、显式开启、进程树终止。
 - 裁剪保守化、自愈证据分级（src-original + repair-log）。
-- 基线：**877 项核心回归全绿**（2026-10-29 实测，`python jdec/tests/run_tests.py`）；
+- 基线：**877 项核心回归全绿**（2026-10-29 实测，`python src/tests/run_tests.py`）；
   真实样本套件（`--with-mc`，需自备 `tests/mc/` 与 ZKM 样本）本轮未验证。
 
 ### 02 建设改写底座 —— 衔接点备忘
@@ -138,7 +138,7 @@ python jdec.py behave in.jar out.jar --derive --from rewritten.txt --execute \
     --cp <deps> --gate 90     # 未达门槛退出 5（与"改错了"的 1、"没结论"的 4 分开）
 ```
 
-**解释器差分（2026-10-31 第四轮）：** `jdec/interp/` 按 JVMS 双槽栈语义重写引擎
+**解释器差分（2026-10-31 第四轮）：** `src/jdec/interp/` 按 JVMS 双槽栈语义重写引擎
 （long/double 占两槽 + VOID 填充，`dup2`/`pop2`/`swap` 逐字翻译），修掉三个真实
 mis-execution：`_pop_args` 按参数序弹栈（混合 `(J, 引用)` 签名即损坏）、`if_acmp`
 被路由进 `pop_int`、`is_opaque` 看不见模型集合裸 list 里的 Opaque。证据口径：

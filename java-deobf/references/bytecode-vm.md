@@ -76,7 +76,7 @@ ASM tree API 注入（COMPUTE_FRAMES 不需要：FrameNode 随指令流重定位
 BytecodeVM 专属实现（静态反虚拟化器、水印解码器、插桩对拍工具）已从产品
 代码删除——现实目标几乎不使用该混淆器，专属工具不具通用价值；方法论保留
 于本 reference，可迁移至同构未知 VM（按 §1-§5 缩减尝试面）。原实现
-（`jdec/bvmw.py` / `bvmw_ops.py` / `bvmw_devirt.py`、`tests/bvmw/` fixture
+（`src/jdec/bvmw.py` / `bvmw_ops.py` / `bvmw_devirt.py`、`tests/bvmw/` fixture
 与对拍工具、`python jdec.py bvmw` CLI）可从 git 历史找回；验证数据与
 开发日志存工作区 memory。`probe` 对 `BytecodeVM` 的归因指纹（数据驱动，
 在 `fingerprints.json`）保留。
@@ -84,9 +84,9 @@ BytecodeVM 专属实现（静态反虚拟化器、水印解码器、插桩对拍
 其中的通用原语已抽出并以通用形态回归产品（`run_tests.py` 有 javac
 fixture 回归）：
 
-- `jdec/jdec/jint.py` — Java 原语算术精确仿真（i32/i64 包装、>>> 无符号
+- `src/jdec/jint.py` — Java 原语算术精确仿真（i32/i64 包装、>>> 无符号
   移位、rotl32、运算符优先级坑），移植任何 Java 解密器/mixer 的前置件；
-- `jdec/jdec/clinit_sim.py` — clinit 建表的符号栈求值器（数组模型、
+- `src/jdec/clinit_sim.py` — clinit 建表的符号栈求值器（数组模型、
   wide 展开、valueOf 直通、hooks 机制承载保护器私有解包 API、
   unknown_ops 诚实上报不完整走查）——任何"clinit 静态建表"型保护的
   静态解包引擎。

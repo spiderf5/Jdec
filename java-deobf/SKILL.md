@@ -129,7 +129,7 @@ python jdec.py decompile X.jar -o out --verify-all
 
 ### 4.7 沉淀
 
-识别新混淆器：向 `scripts/fingerprints.json` 的 `obfuscators` 追加 `name` / `keywords` / `tool`，运行 `scripts/self_test.py` 验证。keywords 一律小写——匹配前会统一转小写，含大写字母的条目永不命中（self_test 会拒绝并做常量池命中端到端校验）。`jdec/jdec/fingerprints.json` 是包内回退副本，必须与本副本逐字节一致（self_test 自动比对）；jdec 的 `probe` 优先读本副本。控制流阈值与目标生态相关，应以同源未混淆制品建立基线后再调整。
+识别新混淆器：向 `scripts/fingerprints.json` 的 `obfuscators` 追加 `name` / `keywords` / `tool`，运行 `scripts/self_test.py` 验证。keywords 一律小写——匹配前会统一转小写，含大写字母的条目永不命中（self_test 会拒绝并做常量池命中端到端校验）。`src/jdec/fingerprints.json` 是包内回退副本，必须与本副本逐字节一致（self_test 自动比对）；jdec 的 `probe` 优先读本副本。控制流阈值与目标生态相关，应以同源未混淆制品建立基线后再调整。
 
 ## 5. 无 jdec 时的降级路径
 
@@ -141,10 +141,10 @@ python scripts/deobf_scan.py <jar/class/目录> --text
 
 ## 6. jdec 的维护
 
-- 校验命令唯一：`python jdec/tests/run_tests.py`（基线随功能演进由运行器打印；`--with-mc` 含真实样本用例，样本缺失自动跳过）。
+- 校验命令唯一：`python src/tests/run_tests.py`（基线随功能演进由运行器打印；`--with-mc` 含真实样本用例，样本缺失自动跳过）。
 - 缺陷修复流程：复现（失败测试或命令）→ 最小修复 → 真实样本回归。位置/配对类并发缺陷 fixture 可能无法捕获（单桶完成顺序恰好一致）。
 - 修改 `classfile.py` 后必须运行 round-trip 断言：parse→serialize 字节级一致，否则重映射会静默损坏所有类。
-- fixture jar 由 `jdec/tests/build_fixtures.py` 经 javac 构建（含 sample.jar）；缺失时自动构建，构建失败跳过该组测试而非计为失败。
+- fixture jar 由 `src/tests/build_fixtures.py` 经 javac 构建（含 sample.jar）；缺失时自动构建，构建失败跳过该组测试而非计为失败。
 
 ## 7. 提交说明
 

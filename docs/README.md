@@ -212,7 +212,7 @@ demo/legacy/OldStyle|pick|java.lang.String|
 - 每条用例跑在自己的线程里，3 秒没结果记该用例不可用，不会拖死整批
 - 会**执行目标代码**（`Class.forName(..., true)` 会跑 `<clinit>`，字符串解密器就在
   这一步），所以必须显式 `--execute`，否则退出码 3
-- 重放 JVM 默认套 Java 沙箱（`jdec/sandbox.py`）：写入只允许在本次运行目录内，
+- 重放 JVM 默认套 Java 沙箱（`src/jdec/sandbox.py`）：写入只允许在本次运行目录内，
   网络、进程执行、native 库加载和 `System.exit` 被拒；深度反射（`setAccessible`）
   只允许从 driver 帧发起——它是通往 `sun.misc.Unsafe` 的门，而 Unsafe 能反写沙箱
   自己的 `root` 字段。目标代码要反射自己，得由 driver 方法代发，或 `--no-sandbox`。
@@ -238,7 +238,7 @@ python jdec.py behave in.jar out.jar --derive --from rewritten.txt --execute \
 要起线程的方法在这里本来就调不起来，把它算进分母会让门槛取决于目标恰好做什么。
 
 **双引擎对拍与并集覆盖率**（`--engine both`）：JVM 引擎（真 JVM 反射调用）覆盖不动的
-方法，解释器引擎（`jdec/interp/`，纯 Python 按 JVMS 语义执行）往往能补上——两台
+方法，解释器引擎（`src/jdec/interp/`，纯 Python 按 JVMS 语义执行）往往能补上——两台
 "机器"看得见的故障模式不同，**并集**才是对拍强度。两引擎各跑同一组用例，各出一份
 判定，最后打印：
 
@@ -436,7 +436,7 @@ python jdec.py strings client.jar --grep api         # 只留含某个词的
 
 静态还原强混淆（如 ZKM 27 的三层链：indy 引导 session key → 常量折叠引擎 →  
 DES）逐版本易变，不划算。原则：**让混淆器自己解，只盯着出口**。按成本  
-递增分四层；`engines/tap/` 覆盖第一层（解密器重放）与运行时捕获挂钩  
+递增分四层；`src/engines/tap/` 覆盖第一层（解密器重放）与运行时捕获挂钩  
 （StringsSpy 家族），更深层的 agent 按目标适配（方法论见 skill  
 `references/dynamic-analysis.md`）：
 
@@ -650,13 +650,13 @@ Minecraft 1.20.4 客户端（7787 个类，Java 17，官方混淆）：
 ## 测试
 
 ```bash
-python jdec/tests/run_tests.py             # 核心
-python jdec/tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 jdec/tests/mc/ 样本）
+python src/tests/run_tests.py             # 核心
+python src/tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 src/tests/mc/ 样本）
 ```
 
 **真实样本外置**：工具树里不放真实混淆样本。`--with-mc` 里的 ZKM 归因测试
 会依次在 `JDEC_SAMPLE_DIR` 环境变量、jdec 上一级目录、`D:/MC/samples/` 找
-指定的真实 ZKM 27 样本 jar（文件名见 `jdec/tests/run_tests.py`）；单个 ZKM 用例
+指定的真实 ZKM 27 样本 jar（文件名见 `src/tests/run_tests.py`）；单个 ZKM 用例
 缺样本会跳过。但 `tests/mc/client_1.20.4.jar` 与 `mojang_1.20.4.txt` 缺失时，
 `--with-mc` 会**先跑完核心套件并打印汇总**，再以退出码 2 说明缺哪两个文件——
 它不会静默地"只少跑几项"。
@@ -666,16 +666,16 @@ python jdec/tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 jde
 mixin 注解里的目标能被提取并过映射翻译、  
 所有方法都能解码到指令流末尾、ZKM 结构指纹该报的报、不该报的不报。
 
-mixin / flow / collide 相关的用例依赖 `jdec/tests/mixin.jar`、`jdec/tests/flow.jar`、  
-`jdec/tests/collide.jar`，由 `jdec/tests/samples/` 下的源码编出来（只用 javac，不依赖  
+mixin / flow / collide 相关的用例依赖 `src/tests/mixin.jar`、`src/tests/flow.jar`、  
+`src/tests/collide.jar`，由 `src/tests/samples/` 下的源码编出来（只用 javac，不依赖  
 Mixin 库——注解的*形状*才是 jdec 要读的东西）。collide 是一对只靠大小写  
 区分的孪生类，验证 Windows 上 `Widget` 不会拿到 `widget` 的内容：
 
 ```bash
-python jdec/tests/build_fixtures.py     # 重新编译 fixture jar
+python src/tests/build_fixtures.py     # 重新编译 fixture jar
 ```
 
-`jdec/tests/flow.jar` 里有两个角色：`Decryptor` 照着 ZKM 字符串加密的形状写，  
+`src/tests/flow.jar` 里有两个角色：`Decryptor` 照着 ZKM 字符串加密的形状写，  
 javac 能诚实地编出来；`Guarded` 是普通 try/catch，测试会**故意把它的异常处理器  
 改成向后跳**——javac 不生成这种形状，要验证检测器只能自己造证据。
 

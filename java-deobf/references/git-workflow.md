@@ -52,7 +52,7 @@ type 取值：`feat` / `fix` / `refactor` / `perf` / `test` / `docs` / `chore` /
 
 1. `git diff` 逐个文件看一遍，确认没有夹带无关改动、调试代码、临时文件
 2. 确认没有把密钥、`.env`、大文件、构建产物加进去
-3. 确认校验命令全部通过（本仓库唯一命令：`python jdec/tests/run_tests.py`；
+3. 确认校验命令全部通过（本仓库唯一命令：`python src/tests/run_tests.py`；
    改判定类逻辑时另做真实样本回归）
 4. 在提交信息里写清改动原因与验证命令（不要追加过程性报告）
 5. 只 `git add` 该提交的文件，不要用 `git add .` 一次全加

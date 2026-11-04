@@ -109,17 +109,17 @@ def scan_smoke(target):
 
 
 def check_twin(errors):
-    """jdec/jdec/fingerprints.json 必须与 skill 副本逐字节一致。
+    """src/jdec/fingerprints.json 必须与 skill 副本逐字节一致。
 
     probe 优先读 skill 副本（单一来源）；包内副本只是 skill 缺席时的回退。
     两份分叉时，按 SKILL.md 沉淀规程改 skill 副本对 jdec 侧静默无效。
     """
     path = deobf_scan.CONFIG_PATH
-    twin = Path(__file__).resolve().parents[2] / "jdec" / "jdec" / "fingerprints.json"
+    twin = Path(__file__).resolve().parents[2] / "src" / "jdec" / "fingerprints.json"
     if not path.is_file() or not twin.is_file():
         return  # 仓库布局不完整（如 skill 单独安装）时无从比对
     if path.read_bytes() != twin.read_bytes():
-        errors.append("jdec/jdec/fingerprints.json 与 skill 副本内容不一致"
+        errors.append("src/jdec/fingerprints.json 与 skill 副本内容不一致"
                       "（probe 优先读 skill 副本，两份必须同步）")
 
 

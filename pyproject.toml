@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "jdec"
 dynamic = ["version"]
 description = "Multi-engine Java decompiler driver with bytecode-verified output selection"
-readme = "jdec/README.md"
+readme = "docs/README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
@@ -44,13 +44,13 @@ Issues = "https://github.com/spiderf5/Jdec/issues"
 jdec = "jdec.cli:main"
 
 [tool.setuptools]
-package-dir = {"" = "jdec"}
+package-dir = {"" = "src"}
 
 [tool.setuptools.dynamic]
 version = {attr = "jdec._version.__version__"}
 
 [tool.setuptools.packages.find]
-where = ["jdec"]
+where = ["src"]
 include = ["jdec*"]
 
 [tool.setuptools.package-data]
@@ -66,7 +66,7 @@ jdec = [
 line-length = 100
 target-version = "py310"
 # Downloaded engines and generated fixtures are not source.
-extend-exclude = ["jdec/engines", "jdec/tests/build"]
+extend-exclude = ["src/engines", "src/tests/build"]
 
 [tool.ruff.lint]
 # Deliberately narrow. This is the set that catches a defect rather than a
