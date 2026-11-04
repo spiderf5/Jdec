@@ -6494,6 +6494,40 @@ def test_max_stack_dataflow() -> None:
           f"max_stack={rl.max_stack}")
 
 
+
+def test_benchmark_is_reproducible() -> None:
+    """The generated benchmark must stay a usable, honest gate."""
+    print("benchmark: a generated fixture keeps the union gate reproducible")
+    import contextlib
+    import io
+    import benchmark
+
+    if JAVAC is None:
+        print("  (skipped: needs a JDK)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "report.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = benchmark.main(["--json", str(out)])
+        check("the generated benchmark passes", rc == 0, f"rc={rc}")
+        if not out.is_file():
+            check("a report is written", False, "no report")
+            return
+        data = json.loads(out.read_text(encoding="utf-8"))
+        comp = data["comparison"]
+        check("every generated method is judged",
+              comp["union_judged"] == data["methods"], str(comp)[:200])
+        check("identity comparison reports no differences",
+              comp["diffs"] == 0, str(comp)[:200])
+        check("the negative control catches a changed constant",
+              data.get("negative_control_detected") is True,
+              str(data.get("negative_control", {}))[:200])
+        check("the report names the isolation backend",
+              data["environment"]["isolation_backend"] in ("manager", "process"),
+              str(data["environment"]))
+        check("the report records the exact command",
+              "--engine both" in comp["command"], comp["command"][:200])
+
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
     if _no_engines():
@@ -7878,6 +7912,7 @@ def main() -> int:
     test_behaviour_is_preserved()
     test_sandbox_isolation()
     test_isolation_backends()
+    test_benchmark_is_reproducible()
     test_frame_generation()
     test_ir_transforms()
     test_pipeline_gate()

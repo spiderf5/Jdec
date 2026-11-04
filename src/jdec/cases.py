@@ -348,11 +348,14 @@ def _cases_for(cls: str, name: str, params: list[str], per_param: int) -> list[C
 
 def derive(jar: Path, rewritten=None, *, per_param: int = 4,
            sandbox: bool = False) -> Derivation:
-    """Generate cases for `rewritten` methods (or every method when None).
+    """Generate cases for the methods named in `rewritten`.
 
     `rewritten` is `[(internal/class/Name, method, descriptor)]`, exactly what
     `deflat` / `devirt` report in `stats["rewritten"]`. Only those classes are
-    opened, which is what keeps this cheap on a 3740-class jar.
+    opened, which is what keeps this cheap on a 3740-class jar. Passing None
+    or an empty list yields no cases at all: `behave --derive` without --from
+    answers "no verdict" by design. To cover a whole jar, build a method list
+    with `src/tests/benchmark.py:method_rows()` and pass it via --from.
     """
     want: dict[str, list[tuple[str, str]]] = {}
     der = Derivation()

@@ -663,7 +663,7 @@ python src/tests/run_tests.py             # 核心
 python src/tests/run_tests.py --with-mc   # 额外跑真实 MC jar（需要 src/tests/mc/ 样本）
 ```
 
-**真实样本外置**：工具树里不放真实混淆样本。`--with-mc` 里的 ZKM 归因测试
+**真实样本外置**：工具树里不放真实混淆样本。可复现的替代口径、内置生成式基准与 83.0% 的逐字测量步骤见 [REPRODUCE.md](REPRODUCE.md)。`--with-mc` 里的 ZKM 归因测试
 会依次在 `JDEC_SAMPLE_DIR` 环境变量、jdec 上一级目录、`D:/MC/samples/` 找
 指定的真实 ZKM 27 样本 jar（文件名见 `src/tests/run_tests.py`）；单个 ZKM 用例
 缺样本会跳过。但 `tests/mc/client_1.20.4.jar` 与 `mojang_1.20.4.txt` 缺失时，
