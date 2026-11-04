@@ -1,0 +1,13 @@
+# Canonical LF in the index and in every checkout. With core.autocrlf=true on
+# Windows, git otherwise rewrites working-tree line endings and a harmless
+# formatting pass shows up as a whole-file diff. dynamic-analysis.md used to
+# carry 59 stray CRs before its two-space Markdown hard breaks.
+* text=auto eol=lf
+
+# Markdown hard breaks intentionally end with two spaces; do not report them
+# as whitespace errors in `git diff --check`.
+*.md whitespace=-blank-at-eol
+
+*.jar   binary
+*.class binary
+*.png   binary
