@@ -21,12 +21,12 @@ from __future__ import annotations
 import base64
 import os
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 import zipfile
 
 from . import bsm as BM
+from .sandbox import run_replay
 
 DRIVER_JAVA = (Path(__file__).parent / "recover_driver_template.java").read_text(encoding="utf-8")
 
@@ -441,40 +441,6 @@ class ReplayNotAllowed(RuntimeError):
     """动态重放被安全闸门拒绝（默认拒绝，需显式 allow_exec）。"""
 
 
-def run_replay(cmd: list[str], timeout: int, **popen_kw) -> subprocess.CompletedProcess:
-    """Run a replay JVM; on timeout kill the WHOLE process tree.
-
-    subprocess.run(只杀直接子进程) leaves grandchildren alive when the JVM
-    spawned helpers; the replay executes untrusted target code, so the kill
-    must cover the tree. Returns CompletedProcess with a `timed_out` attribute.
-    """
-    popen_kw.setdefault("stdout", subprocess.PIPE)
-    popen_kw.setdefault("stderr", subprocess.PIPE)
-    proc = subprocess.Popen(cmd, **popen_kw)
-    timed_out = False
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True)
-        else:
-            try:
-                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL the group
-            except Exception:
-                proc.kill()
-        try:
-            out, err = proc.communicate(timeout=30)
-        except Exception:
-            out, err = b"", b""
-    r = subprocess.CompletedProcess(cmd, 1 if timed_out else proc.returncode,
-                                    out if out is not None else "",
-                                    err if err is not None else "")
-    r.timed_out = timed_out  # type: ignore[attr-defined]
-    return r
-
-
 def ingest_frida_tsv(tsv_path: Path) -> dict[tuple[str, str], str]:
     """把外部 Frida 动态转储 TSV 吸收为 (cipher, seed) -> plain 映射。
 
@@ -718,8 +684,8 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         except SBX.SandboxError as exc:
             print(f"sandbox : {exc}")
             return 1
-        print(f"sandbox : java-level isolation under {sandbox_root} "
-              f"(writes confined; network/exec/native/exit denied)")
+        print(f"isolation: {SBX.plan(java).backend} backend under "
+              f"{sandbox_root} ({SBX.plan(java).note})")
 
     target_for_cp = jar
     if sandbox:

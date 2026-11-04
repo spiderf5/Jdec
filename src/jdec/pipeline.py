@@ -331,6 +331,7 @@ def run_pipeline(
     cp_file: Path | None = None,
     allow_replay: bool = False,
     strict: bool = False,
+    no_sandbox: bool = False,
 ) -> PipelineResult:
     """Execute end-to-end deobfuscation and triage pipeline."""
     t0 = time.time()
@@ -549,7 +550,8 @@ def run_pipeline(
                 rec_dir = work_dir / "recover"
                 rc_code = RC.recover(original_jar, rec_dir, timeout=timeout,
                                      with_stubs=with_stubs, cp=cp, cp_file=cp_file,
-                                     java=java_bin, allow_exec=True)
+                                     java=java_bin, allow_exec=True,
+                                     sandbox=not no_sandbox)
                 rec_tsv = rec_dir / "recovered.tsv"
                 if rec_tsv.is_file():
                     st_rw = RC.rewrite_sources(src_dir, rec_tsv)
@@ -583,7 +585,8 @@ def run_pipeline(
                 java_bin = EN.find_java() or "java"
                 h_res = PL.harvest(pool_spec, harvest_tsv, pool_dir, timeout=timeout,
                                    with_stubs=with_stubs, cp=pool_cp,
-                                   cp_file=cp_file, java=java_bin, allow_exec=True)
+                                   cp_file=cp_file, java=java_bin,
+                                   allow_exec=True, sandbox=not no_sandbox)
                 if harvest_tsv.is_file():
                     tmp_pool = work_dir / "src_pool"
                     st_apply = PL.apply(src_dir, harvest_tsv, tmp_pool)

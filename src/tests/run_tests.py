@@ -2589,6 +2589,55 @@ def _jar_from(classes: Path, out: Path, extra: dict[str, bytes] | None = None) -
     return out
 
 
+
+def test_isolation_backends() -> None:
+    """Losing the SecurityManager must degrade, not disable, replay isolation."""
+    print("sandbox: the Java manager is optional, the process layer is not")
+    from jdec import sandbox as SBX
+
+    if EN.find_java() is None:
+        print("  (skipped: needs a JDK)")
+        return
+    real_major = SBX.java_major
+    try:
+        SBX.java_major = lambda java=None: 24
+        SBX.check_available()
+        chosen = SBX.plan()
+        check("JDK 24 selects the process backend",
+              chosen.backend == SBX.PROCESS, str(chosen))
+        args = SBX.jvm_args(Path(tempfile.gettempdir()) / "jdec_sbx_plan")
+        check("no SecurityManager is installed on JDK 24",
+              not any(a.startswith("-Djava.security.manager=") for a in args),
+              str(args))
+        check("the work root is still pinned",
+              any(a.startswith("-Djdec.sandbox.root=") for a in args), str(args))
+        check("no manager classpath is added", SBX.classpath_entry() is None)
+        try:
+            SBX.plan(backend="manager")
+            check("an explicit manager backend is refused on JDK 24", False,
+                  "no error raised")
+        except SBX.SandboxError:
+            check("an explicit manager backend is refused on JDK 24", True)
+    finally:
+        SBX.java_major = real_major
+
+    env = SBX.child_env({
+        "PATH": "/bin", "JAVA_HOME": "/jdk", "SYSTEMROOT": "C:////Windows",
+        "GITHUB_TOKEN": "secret", "AWS_SECRET_ACCESS_KEY": "secret",
+        "JAVA_TOOL_OPTIONS": "-Xmx1m", "HTTPS_PROXY": "http://proxy",
+        "MY_APP_TOKEN": "secret", "TZ": "UTC",
+    })
+    check("credentials and JVM-injection vars do not reach the replay JVM",
+          not any(k in env for k in (
+              "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_APP_TOKEN",
+              "JAVA_TOOL_OPTIONS", "HTTPS_PROXY")), str(sorted(env)))
+    check("the JVM can still start",
+          env.get("PATH") == "/bin" and env.get("JAVA_HOME") == "/jdk"
+          and env.get("SYSTEMROOT") == "C:////Windows", str(env))
+    check("unrelated variables survive", env.get("TZ") == "UTC", str(env))
+    check("the process backend is not a manager backend",
+          SBX.PROCESS != SBX.MANAGER)
+
 def test_sandbox_isolation() -> None:
     """Replay must not be able to write outside the run root."""
     print("sandbox: the replay JVM cannot escape its write root")
@@ -2599,6 +2648,9 @@ def test_sandbox_isolation() -> None:
         print("  (skipped: needs a JDK)")
         return
     try:
+        if SBX.plan().backend != SBX.MANAGER:
+            print("  (skipped: no SecurityManager backend on this JDK)")
+            return
         SBX.check_available()
     except SBX.SandboxError as exc:
         print(f"  (skipped: {exc})")
@@ -6467,6 +6519,12 @@ def test_replay_safety_gate() -> None:
     check("auto defaults to allow_replay=False", not getattr(ns, "allow_replay", True))
     ns2 = parser.parse_args(["pipeline", "x.jar", "--allow-replay"])
     check("pipeline --allow-replay opts in", getattr(ns2, "allow_replay", False))
+    ns3 = parser.parse_args(["auto", "x.jar", "--no-sandbox"])
+    check("auto can opt out of replay isolation", getattr(ns3, "no_sandbox", False))
+    ns4 = parser.parse_args(["pipeline", "x.jar", "--no-sandbox"])
+    check("pipeline can opt out of replay isolation", getattr(ns4, "no_sandbox", False))
+    ns5 = parser.parse_args(["auto", "x.jar"])
+    check("auto keeps isolation on by default", not getattr(ns5, "no_sandbox", True))
 
 
 def test_review_2026_11_01() -> None:
@@ -6609,9 +6667,9 @@ def test_review_2026_11_01() -> None:
     from jdec import sandbox as SB
     try:
         SB.check_available()
-        sandbox_ok = True
-        why = ""
-    except Exception as exc:  # noqa: BLE001 - JDK 24+ has no SecurityManager
+        sandbox_ok = SB.plan().backend == SB.MANAGER
+        why = "" if sandbox_ok else "no SecurityManager backend on this JDK"
+    except Exception as exc:  # noqa: BLE001 - no usable JVM
         sandbox_ok = False
         why = str(exc)
     if not sandbox_ok or JAVAC is None:
@@ -7819,6 +7877,7 @@ def main() -> int:
     test_deflat_parallel_matches_serial()
     test_behaviour_is_preserved()
     test_sandbox_isolation()
+    test_isolation_backends()
     test_frame_generation()
     test_ir_transforms()
     test_pipeline_gate()

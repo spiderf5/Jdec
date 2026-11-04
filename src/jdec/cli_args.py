@@ -457,6 +457,10 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--allow-replay", action="store_true",
                             help="enable dynamic replay string decryption - EXECUTES code "
                                  "from the target jar on this machine; opt-in, default off")
+        parser.add_argument("--no-sandbox", action="store_true",
+                            help="run replay without isolation (unsafe on untrusted jars); "
+                                 "by default the JVM sandbox is applied, with a "
+                                 "process-level fallback on JDK 24+")
         parser.add_argument("--strict", action="store_true",
                             help="CI mode: exit 2 on any stage failure or partial result "
                                  "(default exit codes: 0=success, 1=partial, 2=failed)")

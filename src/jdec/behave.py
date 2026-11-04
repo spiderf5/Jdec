@@ -711,6 +711,7 @@ def compare(original: Path, rewritten: Path, cases: list[Case],
     every case lands in `unusable` — "not tested" again. The entries go into
     both loaders, so the two sides still differ only in the jar under test.
     """
+    from . import sandbox as SBX
     rep = BehaveReport(original=str(original), rewritten=str(rewritten))
     if not cases:
         return rep
@@ -728,21 +729,20 @@ def compare(original: Path, rewritten: Path, cases: list[Case],
         jvm_opts: list[str] = []
         cp_entries = [drv]
         if sandbox:
-            from . import sandbox as SBX
             jvm_opts = SBX.jvm_args(Path(td) / "sandbox", java=exe,
                                     drivers=(DRIVER_CLASS,))
-            cp_entries.append(SBX.classpath_entry(java=exe))
+            entry = SBX.classpath_entry(java=exe)
+            if entry is not None:
+                cp_entries.append(entry)
             original = SBX.plain_jar(Path(original), Path(td) / "input")
             rewritten = SBX.plain_jar(Path(rewritten), Path(td) / "input")
         cp = TC.path_sep().join(str(x) for x in cp_entries)
         cmd = [exe, *jvm_opts, "-cp", cp, DRIVER_CLASS, str(spec),
                str(Path(original).resolve()), str(Path(rewritten).resolve())]
         cmd += [str(Path(c).resolve()) for c in classpath]
-        import subprocess
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  errors="replace", timeout=timeout)
-        except subprocess.TimeoutExpired:
+        proc = SBX.run_replay(cmd, timeout, text=True, errors="replace",
+                              harden=sandbox)
+        if getattr(proc, "timed_out", False):
             raise TC.ToolchainError(
                 f"the behaviour driver timed out after {timeout}s") from None
         rep.driver_output = (proc.stderr or "")[-4000:]

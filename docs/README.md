@@ -212,15 +212,24 @@ demo/legacy/OldStyle|pick|java.lang.String|
 - 每条用例跑在自己的线程里，3 秒没结果记该用例不可用，不会拖死整批
 - 会**执行目标代码**（`Class.forName(..., true)` 会跑 `<clinit>`，字符串解密器就在
   这一步），所以必须显式 `--execute`，否则退出码 3
-- 重放 JVM 默认套 Java 沙箱（`src/jdec/sandbox.py`）：写入只允许在本次运行目录内，
-  网络、进程执行、native 库加载和 `System.exit` 被拒；深度反射（`setAccessible`）
-  只允许从 driver 帧发起——它是通往 `sun.misc.Unsafe` 的门，而 Unsafe 能反写沙箱
-  自己的 `root` 字段。目标代码要反射自己，得由 driver 方法代发，或 `--no-sandbox`。
-  `--no-sandbox` 显式关闭沙箱。
-  JDK 24+ 已移除 SecurityManager，需要 JDK 9–23。native 代码不受 Java 沙箱约束，
-  `loadLibrary` 默认拒绝，所以它进不了这层边界。`recover` / `pool harvest` 同样
-  默认开启同一沙箱。沙箱下 mock agent 不注入（JPLIS 无法在 SecurityManager 下
-  attach），stub 类仍在 classpath；需要该 agent 的目标用 `--no-sandbox`。
+- 重放默认隔离（`src/jdec/sandbox.py`），按 JDK 自动选后端，**SecurityManager 不再是硬依赖**：
+  - **manager（JDK 9–23）**：Java `SecurityManager` 把写入限定在本次运行目录内，
+    拒绝网络、进程执行、native 库加载和 `System.exit`；深度反射（`setAccessible`）
+    只允许从 driver 帧发起——它是通往 `sun.misc.Unsafe` 的门，而 Unsafe 能反写沙箱
+    自己的 `root` 字段。目标代码要反射自己，得由 driver 方法代发。
+  - **process（JDK 24+）**：SecurityManager 随 JEP 486 移除后，重放命令不再直接失败，
+    而是降级为进程级隔离——独立工作目录、裁剪过的子进程环境（凭据、代理、
+    `JAVA_TOOL_OPTIONS` 不传入）、独立进程组、超时杀整棵进程树。**这一档没有逐操作
+    拒绝**：写盘、网络、native 与 `System.exit` 都不再被拦，只用于可信 jar。
+  - 外层统一用 `run_replay` 的整树终止（Windows `taskkill /T` / POSIX `killpg`）；
+    `behave` 以前只用 `subprocess.run`，现在三条重放路径一致。
+  - `JDEC_ISOLATION=manager|process` 可强制后端；`--no-sandbox` 是完全关闭隔离的显式
+    开关，`behave` / `recover` / `pool harvest` / `auto` / `pipeline` 都支持。
+  - **两层都不是 OS/容器边界**：不可信 native 载荷仍需容器或低权限用户。
+  - manager 档下 mock agent 不注入（JPLIS 无法在 SecurityManager 下 attach），stub 类
+    仍在 classpath；需要该 agent 的目标用 process 档或 `--no-sandbox`。
+  - process 档不产生 `sandbox: ` 拒绝证据，`denied` 恒为 0、`--nodeny-gate` 失去意义；
+    下文三个语料的数字都在 manager 档（HotSpot 21）测得，换后端不可直接比较。
 - 沙箱下 `--derive` 会把只碰受控 API 的方法也纳入：文件、网络、进程、并发、线程。
   两侧被同样拒绝的异常算证据，但计入 throw，不计入 value。
 
@@ -686,8 +695,9 @@ javac 能诚实地编出来；`Guarded` 是普通 try/catch，测试会**故意�
 ## 专项试用版（03）
 
 **范围**：控制流去平坦化（goto 洪水 / 不可约 goto / 异常处理器后跳）+ 常量折叠/不透明
-谓词；动态重放默认套 Java 沙箱（写入限定、无网络/进程执行/native/exit，JDK 9–23）。
-Java 级边界，不是 OS/容器级；native 由 `loadLibrary` 拒绝进入。
+谓词；动态重放默认隔离：JDK 9–23 是 Java 沙箱 + 进程级，JDK 24+ 只有进程级
+（详见上文）。两层都不是 OS/容器级边界；manager 档由 `loadLibrary` 拒绝进入 native。
+下表数字均在 manager 档（HotSpot 21）测得。
 
 **三个独立/试用语料**（2026-10-31，HotSpot 21，`--engine both`，沙箱开）：
 
@@ -711,11 +721,15 @@ python jdec.py behave X.jar out.jar --derive --from rw.txt --execute \
 ```
 
 **已知边界**：throw 是弱证据（只证明到失败点之前一致）；签名/自解压容器会被归一化；
-沙箱不支持 JDK 24+；native 不在边界内；Flux 是用户授权的试用样本，子集口径如上。
+JDK 24+ 只有进程级隔离、无逐操作拒绝；native 不在边界内；Flux 是用户授权的试用样本，
+子集口径如上。本节三个语料的数字是 manager 档（HotSpot 21）的实测，换后端后
+`denied` 与 union 口径会变，不可直接对比。
 
 ## 边界
 
 - C/C++ 原生程序不在射程内，那个只能到汇编和伪代码。
 - 反混淆只能还原**名字**，控制流混淆、字符串加密还原不了。
 - Minecraft 26.1 起官方不再混淆，新版本不需要映射表。
+- 动态重放（`behave` / `recover` / `pool harvest` / `auto --allow-replay`）会真跑目标
+  代码；进程级隔离不是 OS 边界，对付不可信 native 载荷请用容器或低权限用户。
 - 只用于分析你自己拥有或已授权的程序。

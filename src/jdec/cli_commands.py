@@ -1208,6 +1208,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
             no_deflat=args.no_deflat,
             no_recover=args.no_recover,
             allow_replay=getattr(args, "allow_replay", False),
+            no_sandbox=getattr(args, "no_sandbox", False),
             strict=getattr(args, "strict", False),
             with_stubs=getattr(args, "with_stubs", True),
             no_natives=args.no_natives,

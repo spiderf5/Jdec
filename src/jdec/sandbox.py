@@ -17,19 +17,33 @@ driver method, not on its own: the driver is the frame the check looks at.
 Native code is outside a Java sandbox. `loadLibrary` is denied so a jar cannot
 enter it; hostile native payloads still need an OS/container boundary.
 
-JDK 9-23 only: the SecurityManager was removed in JDK 24. Callers must pass
-`--no-sandbox` on a newer JVM, which is a deliberate opt-out, not a fallback.
+The Java layer is an enhancement, not a hard dependency: SecurityManager was
+removed in JDK 24 (JEP 486). Two backends are selected automatically:
+
+  * `manager` (JDK 9-23): the Java checks above, plus the process-level layer.
+  * `process` (JDK 24+ or any JDK without a manager): process-level isolation
+    only - a dedicated work dir, a trimmed child environment, its own process
+    group and whole-tree termination on timeout. There is NO per-operation
+    denial of writes/network/native calls in this mode, so it is only safe for
+    trusted jars. `--no-sandbox` remains a full, explicit opt-out.
+
+Neither backend is an OS/container boundary: a hostile native payload still
+needs a container or an unprivileged user. That is a deployment decision, not
+something a Java flag can promise.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import re
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import NamedTuple
 
 from . import engines as EN
 from . import toolchain as TC
@@ -191,12 +205,12 @@ _PLAIN_JARS: dict[tuple, Path] = {}
 
 
 def plain_jar(path: Path, dest_dir: Path | None = None) -> Path:
-    """Return a jar URLClassLoader can open under the sandbox.
+    """Return a jar a replay classloader can open reliably.
 
     A self-extracting installer starts with a native stub, so the file is a
     valid zip for `zipfile`/`JarFile` but URLClassPath cannot resolve classes
-    from it once a SecurityManager is installed. Repack the entries into a
-    plain jar; an ordinary jar is returned unchanged.
+    from it once the sandbox is installed. Repacking also normalises inputs
+    for the process backend; an ordinary jar is returned unchanged.
     """
     path = Path(path)
     try:
@@ -229,11 +243,108 @@ def plain_jar(path: Path, dest_dir: Path | None = None) -> Path:
 
 
 class SandboxError(TC.ToolchainError):
-    """The JVM cannot provide the Java-level sandbox (or javac is missing)."""
+    """Replay cannot run under the requested isolation backend."""
 
 
 _CACHE: Path | None = None
 _MAJOR: dict[str, int] = {}
+
+MANAGER = "manager"
+PROCESS = "process"
+_BACKENDS = (MANAGER, PROCESS)
+
+# Names whose value should never reach a process that executes target code.
+_SENSITIVE_SUFFIX = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PASSWD",
+                     "_CREDENTIAL", "_CREDENTIALS", "_APIKEY")
+_SENSITIVE_EXACT = {
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN", "GH_TOKEN", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS", "JAVA_OPTIONS", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+}
+# Windows needs these to start any process at all; keep them regardless of the
+# filtering rules below.
+_ENV_KEEP = {
+    "PATH", "JAVA_HOME", "HOME", "USER", "LANG", "LC_ALL", "TZ", "TMPDIR",
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP",
+    "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES",
+    "PROGRAMDATA", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+}
+
+
+class IsolationPlan(NamedTuple):
+    backend: str
+    major: int
+    note: str
+
+
+def container_available() -> str | None:
+    """A container CLI, if one exists. Reserved for an OS-level backend."""
+    for name in ("docker", "podman"):
+        exe = shutil.which(name)
+        if exe:
+            return exe
+    return None
+
+
+def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy the environment without credentials, proxies or JVM-injection vars.
+
+    This is defence in depth for a process that runs code from the jar under
+    analysis, not an isolation boundary: the child can still read files the
+    user can read. It stops accidental credential disclosure and stops an
+    inherited JAVA_TOOL_OPTIONS from silently changing the replay JVM.
+    """
+    env = dict(base if base is not None else os.environ)
+    for key in list(env):
+        up = key.upper()
+        if up in _ENV_KEEP:
+            continue
+        if (up in _SENSITIVE_EXACT or up.endswith(_SENSITIVE_SUFFIX)
+                or up.startswith(("AWS_", "GCP_", "AZURE_"))):
+            env.pop(key, None)
+    return env
+
+
+def run_replay(cmd: list[str], timeout: int, *, harden: bool = True,
+               **popen_kw) -> subprocess.CompletedProcess:
+    """Run a replay JVM; on timeout kill the WHOLE process tree.
+
+    subprocess.run only kills the direct child, leaving grandchildren alive.
+    With ``harden`` the child also gets a trimmed environment and its own
+    process group, so ``os.killpg`` / ``taskkill /T`` cannot reach the caller.
+    Returns a CompletedProcess with a ``timed_out`` attribute.
+    """
+    popen_kw.setdefault("stdout", subprocess.PIPE)
+    popen_kw.setdefault("stderr", subprocess.PIPE)
+    if harden:
+        popen_kw.setdefault("env", child_env())
+        if os.name == "nt":
+            popen_kw.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+            popen_kw.setdefault("start_new_session", True)
+    proc = subprocess.Popen(cmd, **popen_kw)
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True)
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL the group
+            except Exception:
+                proc.kill()
+        try:
+            out, err = proc.communicate(timeout=30)
+        except Exception:
+            out, err = b"", b""
+    r = subprocess.CompletedProcess(cmd, 1 if timed_out else proc.returncode,
+                                    out if out is not None else "",
+                                    err if err is not None else "")
+    r.timed_out = timed_out  # type: ignore[attr-defined]
+    return r
 
 
 def _cache_dir() -> Path:
@@ -284,53 +395,77 @@ def java_major(java: str | None = None) -> int:
     return major
 
 
-def check_available(java: str | None = None) -> None:
+def plan(java: str | None = None, backend: str | None = None) -> IsolationPlan:
+    """Choose an isolation backend for this JVM.
+
+    ``manager`` still gives per-operation denials on JDK 9-23. JDK 24+ has no
+    SecurityManager, so it falls back to the process layer instead of making
+    every replay command fail. Containers are never selected implicitly: they
+    need an image and a mount policy supplied by the operator.
+    """
     major = java_major(java)
-    if major < 9:
+    if backend is None:
+        backend = os.environ.get("JDEC_ISOLATION") or None
+    if backend is not None and backend not in _BACKENDS:
         raise SandboxError(
-            f"JDK {major} has no SecurityManager-based sandbox; JDK 9-23 required")
-    if major >= 24:
-        raise SandboxError(
-            "the SecurityManager was removed in JDK 24; replay on JDK 9-23, "
-            "or pass --no-sandbox to run without isolation")
-    manager_path()
+            f"unknown isolation backend: {backend} (expected manager or process)")
+    chosen = backend or (MANAGER if 9 <= major <= 23 else PROCESS)
+    if chosen == MANAGER:
+        if not 9 <= major <= 23:
+            raise SandboxError(
+                f"JDK {major} cannot run the SecurityManager backend; "
+                f"use --isolation process")
+        manager_path()
+        return IsolationPlan(MANAGER, major,
+                             "Java SecurityManager + process-level isolation")
+    return IsolationPlan(PROCESS, major,
+                         "process-level isolation only; no per-operation denial")
+
+
+def check_available(java: str | None = None) -> None:
+    """Fail only when replay cannot run at all; JDK 24+ is no longer a failure."""
+    plan(java)
 
 
 def jvm_args(root: Path, java: str | None = None, drivers=(),
-             tmp: Path | None = None) -> list[str]:
-    """JVM options that install the sandbox, with writes rooted at `root`.
+             tmp: Path | None = None, backend: str | None = None) -> list[str]:
+    """JVM options for the chosen backend, with writes rooted at `root`.
 
-    `drivers` names the replay driver classes that may call System.exit;
-    every other class in the process is denied that permission. `tmp` is
-    java.io.tmpdir and must stay inside `root` (defaults to it).
+    `drivers` names the replay driver classes that may call System.exit; it is
+    only meaningful for the manager backend. `tmp` is java.io.tmpdir and must
+    stay inside `root` (defaults to it).
     """
-    check_available(java)
+    chosen = plan(java, backend)
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     tmp = Path(tmp).resolve() if tmp is not None else root
     if not (tmp == root or str(tmp).startswith(str(root) + os.sep)):
         raise SandboxError(f"java.io.tmpdir must be inside the sandbox root: {tmp}")
     tmp.mkdir(parents=True, exist_ok=True)
-    args = [
-        f"-Djava.security.manager={MANAGER_CLASS}",
-        f"-Djdec.sandbox.root={root}",
-        f"-Djava.io.tmpdir={tmp}",
-    ]
-    if drivers:
-        args.append("-Djdec.sandbox.drivers=" + ",".join(drivers))
+    args = [f"-Djdec.sandbox.root={root}", f"-Djava.io.tmpdir={tmp}"]
+    if chosen.backend == MANAGER:
+        args.insert(0, f"-Djava.security.manager={MANAGER_CLASS}")
+        if drivers:
+            args.append("-Djdec.sandbox.drivers=" + ",".join(drivers))
+    else:
+        print("isolation: JDK has no SecurityManager; process-level isolation "
+              "only - writes, network, native calls and exit are NOT denied. "
+              "Run trusted jars only.", file=sys.stderr)
     return args
 
 
-def classpath_entry(java: str | None = None) -> Path:
-    """Directory to add to the JVM classpath so the manager can be loaded."""
-    return manager_path()
+def classpath_entry(java: str | None = None,
+                    backend: str | None = None) -> Path | None:
+    """Classpath dir for the manager, or None when no manager is installed."""
+    return manager_path() if plan(java, backend).backend == MANAGER else None
 
 
 def argfile_lines(root: Path, java: str | None = None, drivers=(),
-                  tmp: Path | None = None) -> str:
+                  tmp: Path | None = None, backend: str | None = None) -> str:
     """`jvm_args` as lines for a `java @argsfile`; spaces are quoted."""
     out = []
-    for arg in jvm_args(root, java=java, drivers=drivers, tmp=tmp):
+    for arg in jvm_args(root, java=java, drivers=drivers, tmp=tmp,
+                        backend=backend):
         if " " in arg and "=" in arg:
             key, value = arg.split("=", 1)
             arg = f'{key}="{value}"'
