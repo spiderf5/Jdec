@@ -276,10 +276,15 @@ def compare_method(left_jar, right_jar, row: tuple[str, str, str],
                     left_out.value = left_out.value or Obj(cls, {})
                     right_out.value = right_out.value or Obj(cls, {})
             else:
+                # A plain None receiver makes any aload_0 / getfield fail, so
+                # instance methods were never judged by the interpreter. Both
+                # sides get the same zero-state stand-in: it is deterministic
+                # and any call on it still goes through the model layer.
+                receiver = Obj(cls, {})
                 left_out = left_it.invoke(
-                    cls, name, desc, None, args)
+                    cls, name, desc, receiver, args)
                 right_out = right_it.invoke(
-                    cls, name, desc, None, right_args)
+                    cls, name, desc, receiver, right_args)
             verdict, reason = _verdict(
                 left_out, right_out, left_heap, right_heap,
                 compare_statics=not (init_results[0] or init_results[1]))

@@ -130,7 +130,7 @@ _BOX_VALUES = {
     "Ljava/lang/Short;": ("@h:0", "@h:1", "@null"),
 }
 
-MAX_ARITY = 8
+MAX_ARITY = 10
 
 
 @dataclass

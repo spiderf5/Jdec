@@ -6589,6 +6589,26 @@ def test_offline_engine_bundle() -> None:
           and ns.json == "r.json" and ns.mirror == "https://m.invalid/m2",
           str(ns))
 
+
+def test_union_denominator_guard() -> None:
+    """Widening derivation must not quietly change the 411-method denominator."""
+    print("behave: the union denominator stays the --from method list")
+    import inspect
+    from jdec import cases as CS
+    from jdec import cli_commands as CC
+
+    rows = [("a/A", "m", "(I)V"), ("a/A", "m", "(J)V"), ("a/B", "n", "()V")]
+    cov = CS.coverage(rows, [])
+    check("coverage dedupes overloads by (class, method)",
+          cov["total"] == 2, str(cov))
+    src = inspect.getsource(CC.cmd_behave)
+    check("the union denominator still comes from interp rows",
+          "(r.row[0], r.row[1]) for r in interp_rep.rows" in src)
+    check("the gate still compares against the requested threshold",
+          "pct + 1e-9 < args.union_gate" in src)
+    check("MAX_ARITY widens derivation only", CS.MAX_ARITY == 10,
+          str(CS.MAX_ARITY))
+
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
     if _no_engines():
@@ -7975,6 +7995,7 @@ def main() -> int:
     test_isolation_backends()
     test_benchmark_is_reproducible()
     test_offline_engine_bundle()
+    test_union_denominator_guard()
     test_frame_generation()
     test_ir_transforms()
     test_pipeline_gate()

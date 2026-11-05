@@ -71,6 +71,8 @@ public final class Core {
     public static String join(String a, String b) { return a + "/" + b; }
     public static char pick(String s, int i) { return s.charAt(i % s.length()); }
     public static int positive(int x) { return x < 0 ? -x : x; }
+    private int seed = 5;
+    public int bump(int x) { return this.seed + x; }
 }
 """
 
@@ -139,11 +141,11 @@ def method_rows(jar: Path) -> list[str]:
 
 
 def run_gate(original: Path, rewritten: Path, rows_file: Path,
-             cp: list[str]) -> dict:
+             cp: list[str], gate: float = 0) -> dict:
     from jdec import cli as CL
     cmd = ["behave", str(original), str(rewritten), "--derive",
            "--from", str(rows_file), "--execute", "--engine", "both",
-           "--union-gate", "0"]
+           "--union-gate", str(gate)]
     for entry in cp:
         cmd += ["--cp", entry]
     buf = io.StringIO()
@@ -200,6 +202,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="extra classpath entry (repeatable); part of the "
                         "measurement, see docs/REPRODUCE.md")
     p.add_argument("--json", type=Path, default=None, help="write the full report here")
+    p.add_argument("--union-gate", type=float, default=0, metavar="PCT",
+                   help="coverage gate passed to behave (default 0; the 02 "
+                        "retest uses 90)")
     p.add_argument("--workdir", type=Path, default=None,
                    help="keep the generated fixture in this directory")
     args = p.parse_args(argv)
@@ -248,14 +253,16 @@ def main(argv: list[str] | None = None) -> int:
                      "docs/REPRODUCE.md records that recipe and the 83.0% / "
                      "90% decision."),
         }
-        identity = run_gate(original, rewritten, rows_file, args.cp)
+        identity = run_gate(original, rewritten, rows_file, args.cp,
+                            args.union_gate)
         report["comparison"] = identity
         verdict_ok = (identity["exit_code"] == 0
                       and identity["diffs"] == 0
                       and bool(identity["union_judged"]))
 
         if not external:
-            negative = run_gate(original, mutant, rows_file, args.cp)
+            negative = run_gate(original, mutant, rows_file, args.cp,
+                                args.union_gate)
             detected = negative["exit_code"] == 1 and bool(negative["diffs"])
             report["negative_control"] = negative
             report["negative_control_detected"] = detected

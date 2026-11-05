@@ -28,7 +28,8 @@ python src/tests/benchmark.py --json bench.json    # 附完整报告
 python src/tests/benchmark.py --workdir out/bench  # 保留生成的 fixture
 ```
 
-当前基线（HotSpot 21 / manager 后端）：13 个生成方法，union 13/13 判定、
+当前基线（HotSpot 21 / manager 后端）：14 个生成方法（含 1 个实例方法，
+验证解释器的 stand-in 接收者），union 14/14 判定、
 0 差异；负控必须报 DIFF。**100% 是设计结果**，因为 fixture 全是纯函数——它证明
 的是管线连通与门禁不恒真，不是「能判定任意字节码」。
 
