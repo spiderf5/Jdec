@@ -8,11 +8,13 @@ name against cli_commands when the command actually runs.
 from __future__ import annotations
 
 import argparse
+import os
+from pathlib import Path
 
 from . import toolchain as TC
 from ._version import __version__
 
-DEFAULT_ENGINES_DIR = TC.default_engines_dir()
+DEFAULT_ENGINES_DIR = Path(os.environ.get("JDEC_ENGINES_DIR") or TC.default_engines_dir())
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -147,6 +149,16 @@ def build_parser() -> argparse.ArgumentParser:
     se = sub.add_parser("engines", help="download / check decompiler engines")
     se.add_argument("--with-ghidra", action="store_true",
                     help="download and prepare Ghidra Headless native engine into engines/ghidra")
+    se.add_argument("--from-dir", default=None, metavar="DIR",
+                    help="install from a pre-staged offline engine bundle")
+    se.add_argument("--offline", action="store_true",
+                    help="never touch the network; copy from --from-dir or report missing")
+    se.add_argument("--mirror", default=None, metavar="URL",
+                    help="Maven mirror base URL (also JDEC_MAVEN_MIRROR)")
+    se.add_argument("--verify-only", action="store_true",
+                    help="only verify a bundle's sha1/size/zip integrity, no install")
+    se.add_argument("--json", default=None, metavar="PATH",
+                    help="write a machine-readable bundle/engine report")
     se.set_defaults(handler="cmd_engines")
 
     ss = sub.add_parser("strings",

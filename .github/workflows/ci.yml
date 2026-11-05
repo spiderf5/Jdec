@@ -121,3 +121,66 @@ jobs:
         run: |
           /tmp/jdec-wheel-venv/bin/jdec ircheck src/tests/flow.jar
           /tmp/jdec-wheel-venv/bin/jdec verify src/tests/flow.jar
+
+  offline-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build wheel and install into a clean venv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip wheel . -w dist --no-deps
+          python -m venv /tmp/jdec-offline-venv
+          /tmp/jdec-offline-venv/bin/pip install dist/jdec-*.whl
+      - name: Build an offline engine bundle (network allowed here, once)
+        # This is the only networked step of the offline path. Everything
+        # after it runs with a dead proxy, so a stray download fails loudly.
+        run: |
+          python scripts/verify_engine_bundle.py --build "$RUNNER_TEMP/jdec-engines" | tee bundle.txt
+          grep -q 'overall   : OK' bundle.txt
+          python scripts/verify_engine_bundle.py --verify "$RUNNER_TEMP/jdec-engines" | tee verify.txt
+          grep -q 'overall   : OK' verify.txt
+      - name: A tampered jar must fail verification
+        run: |
+          cp -r "$RUNNER_TEMP/jdec-engines" "$RUNNER_TEMP/jdec-engines-bad"
+          printf x >> "$RUNNER_TEMP/jdec-engines-bad/cfr-0.152.jar"
+          if python scripts/verify_engine_bundle.py --verify "$RUNNER_TEMP/jdec-engines-bad"; then
+            echo "tampered bundle was accepted" >&2
+            exit 1
+          fi
+      - name: Install engines with the network cut
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: ""
+          JDEC_OFFLINE: "1"
+        run: |
+          CACHE="$RUNNER_TEMP/jdec-offline-cache"
+          /tmp/jdec-offline-venv/bin/jdec --engines-dir "$CACHE" engines \
+              --offline --from-dir "$RUNNER_TEMP/jdec-engines" | tee engines.txt
+          grep -q 'CFR 0.152.*available' engines.txt
+          grep -q 'Vineflower 1.11.1.*available' engines.txt
+          grep -q 'Procyon 0.6.0.*available' engines.txt
+          test ! -d /tmp/jdec-offline-venv/lib/python3.11/site-packages/engines
+      - name: Gates pass from the offline install
+        # flow.jar, not sample.jar: sample ships a truncated class on purpose.
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: ""
+          JDEC_OFFLINE: "1"
+        run: |
+          python src/tests/build_fixtures.py
+          CACHE="$RUNNER_TEMP/jdec-offline-cache"
+          /tmp/jdec-offline-venv/bin/jdec --engines-dir "$CACHE" ircheck src/tests/flow.jar
+          /tmp/jdec-offline-venv/bin/jdec --engines-dir "$CACHE" verify src/tests/flow.jar

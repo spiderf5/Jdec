@@ -22,6 +22,11 @@ from pathlib import Path
 
 MAVEN = "https://repo1.maven.org/maven2"
 
+
+def maven_base() -> str:
+    """Base URL for engine downloads; JDEC_MAVEN_MIRROR allows an internal mirror."""
+    return (os.environ.get("JDEC_MAVEN_MIRROR") or MAVEN).rstrip("/")
+
 # Maven Central publishes an official .sha1 per artifact (verified against the
 # local copies 2026-10-07).  A download - and every cached copy, forever - is
 # held to these values, so a truncated or silently swapped jar can never be
@@ -39,6 +44,41 @@ def _sha1(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
+def _intact(path: Path, want_hash: str | None) -> bool:
+    """A cached jar is usable only if its size and pinned sha1 still match."""
+    try:
+        if not path.is_file() or path.stat().st_size <= 10_000:
+            return False
+        return not want_hash or _sha1(path.read_bytes()) == want_hash
+    except OSError:
+        return False
+
+
+def verify_bundle(engines_dir: Path) -> dict:
+    """Verify a pre-staged offline bundle. Purely local, never touches the net.
+
+    Returns {"ok": bool, "files": {name: ok|missing|mismatch|corrupt}}.
+    `available()` deliberately only checks size and the zip directory, so this
+    sha1 check is the thing that makes an offline bundle trustworthy.
+    """
+    files: dict[str, str] = {}
+    for fname, want in _SHA1.items():
+        jar = Path(engines_dir) / fname
+        if not jar.is_file():
+            files[fname] = "missing"
+            continue
+        try:
+            if jar.stat().st_size <= 10_000 or _sha1(jar.read_bytes()) != want:
+                files[fname] = "mismatch"
+                continue
+            with zipfile.ZipFile(jar) as z:
+                z.namelist()
+            files[fname] = "ok"
+        except (OSError, zipfile.BadZipFile):
+            files[fname] = "corrupt"
+    return {"ok": all(v == "ok" for v in files.values()), "files": files}
+
+
 def cp_sep() -> str:
     """Classpath separator for the platform the JVM runs on.
 
@@ -48,17 +88,19 @@ def cp_sep() -> str:
     """
     return ";" if os.name == "nt" else ":"
 
-# engine key -> (file name, maven path or None)
+# engine key -> (file name, path relative to maven_base()), so a mirror can be
+# selected at call time instead of being frozen into an f-string at import.
 _ARTIFACTS: dict[str, list[tuple[str, str]]] = {
-    "cfr": [("cfr-0.152.jar", f"{MAVEN}/org/benf/cfr/0.152/cfr-0.152.jar")],
+    "cfr": [("cfr-0.152.jar", "org/benf/cfr/0.152/cfr-0.152.jar")],
     "vineflower": [
-        ("vineflower-1.11.1.jar", f"{MAVEN}/org/vineflower/vineflower/1.11.1/vineflower-1.11.1.jar")
+        ("vineflower-1.11.1.jar",
+         "org/vineflower/vineflower/1.11.1/vineflower-1.11.1.jar")
     ],
     "procyon": [
         ("procyon-compilertools-0.6.0.jar",
-         f"{MAVEN}/org/bitbucket/mstrobel/procyon-compilertools/0.6.0/procyon-compilertools-0.6.0.jar"),
+         "org/bitbucket/mstrobel/procyon-compilertools/0.6.0/procyon-compilertools-0.6.0.jar"),
         ("procyon-core-0.6.0.jar",
-         f"{MAVEN}/org/bitbucket/mstrobel/procyon-core/0.6.0/procyon-core-0.6.0.jar"),
+         "org/bitbucket/mstrobel/procyon-core/0.6.0/procyon-core-0.6.0.jar"),
     ],
 }
 
@@ -235,34 +277,50 @@ def ensure_procyon_bridge(engines_dir: Path, quiet: bool = False) -> bool:
     return True
 
 
-def ensure_engines(engines_dir: Path, want: list[str] | None = None, quiet: bool = False) -> list[str]:
-    """Download missing engine jars. Returns the list of unavailable engines."""
-    import urllib.request
+def ensure_engines(engines_dir: Path, want: list[str] | None = None,
+                   quiet: bool = False, *, offline: bool = False,
+                   source_dir: Path | None = None) -> list[str]:
+    """Make engine jars available. Returns the list of unavailable engines.
 
+    With ``offline=True`` no network request is made (``urllib`` is not even
+    imported): jars already in ``engines_dir`` are kept, otherwise they are
+    copied from ``source_dir`` and anything still absent is reported missing.
+    ``JDEC_OFFLINE=1`` enables this for callers with no CLI flag (decompile,
+    pipeline, scorecard).
+    """
+    offline = offline or os.environ.get("JDEC_OFFLINE") == "1"
+    src = Path(source_dir) if source_dir else None
     engines_dir.mkdir(parents=True, exist_ok=True)
     missing: list[str] = []
     for key in want or list(ENGINES):
-        for fname, url in _ARTIFACTS.get(key, []):
+        for fname, rel in _ARTIFACTS.get(key, []):
             dest = engines_dir / fname
             want_hash = _SHA1.get(fname)
-            if dest.exists():
-                intact = dest.stat().st_size > 10_000
-                if intact and want_hash:
-                    intact = _sha1(dest.read_bytes()) == want_hash
-                if intact:
+            if _intact(dest, want_hash):
+                continue
+            if dest.exists() and not quiet:
+                print(f"  ! {fname} failed verification, replacing ...")
+            # available() only checks size and the zip directory, so a jar with
+            # the wrong sha1 must not be left behind whichever mode we are in.
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                missing.append(key)
+                break
+            if offline:
+                candidate = (src / fname) if src else None
+                if candidate and _intact(candidate, want_hash):
+                    shutil.copy2(candidate, dest)
+                    if not quiet:
+                        print(f"  installed {fname} from {src}")
                     continue
-                # truncated or tampered cached copy: refuse and re-fetch
-                if not quiet:
-                    print(f"  ! {fname} failed verification, re-downloading ...")
-                try:
-                    dest.unlink()
-                except OSError:
-                    missing.append(key)
-                    break
+                missing.append(key)
+                break
             if not quiet:
                 print(f"  downloading {fname} ...")
             try:
-                with urllib.request.urlopen(url, timeout=180) as r:
+                import urllib.request
+                with urllib.request.urlopen(f"{maven_base()}/{rel}", timeout=180) as r:
                     data = r.read()
                 if want_hash and _sha1(data) != want_hash:
                     if not quiet:

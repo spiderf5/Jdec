@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import tempfile
 import zipfile
@@ -495,6 +496,17 @@ def cmd_behave(args: argparse.Namespace) -> int:
 
 def cmd_engines(args: argparse.Namespace) -> int:
     d = Path(args.engines_dir)
+    offline = getattr(args, "offline", False)
+    from_dir = getattr(args, "from_dir", None)
+    verify_only = getattr(args, "verify_only", False)
+    report_path = getattr(args, "json", None)
+    mirror = getattr(args, "mirror", None)
+    if mirror:
+        os.environ["JDEC_MAVEN_MIRROR"] = mirror
+    if getattr(args, "with_ghidra", False) and offline:
+        print("Ghidra is not part of the offline bundle: "
+              "--with-ghidra cannot be combined with --offline")
+        return 2
     if getattr(args, "with_ghidra", False):
         gh = GE.find_ghidra(engines_dir=d)
         if not gh:
@@ -505,7 +517,24 @@ def cmd_engines(args: argparse.Namespace) -> int:
                 print(f"Failed to download Ghidra: {exc}")
         else:
             print(f"Ghidra is already present at: {gh}")
-    missing = EN.ensure_engines(d)
+
+    bundle = None
+    if verify_only or from_dir:
+        source = Path(from_dir) if from_dir else d
+        bundle = EN.verify_bundle(source)
+        for fname, state in bundle["files"].items():
+            print(f"  {fname:<40} {state}")
+        print(f"bundle    : {'OK' if bundle['ok'] else 'INVALID'} ({source})")
+    if verify_only:
+        report = {"engines_dir": str(d), "verify_only": True,
+                  "bundle": bundle, "offline": offline}
+        if report_path:
+            Path(report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
+            print(f"json      : {report_path}")
+        return 0 if bundle and bundle["ok"] else 1
+
+    missing = EN.ensure_engines(
+        d, offline=offline, source_dir=Path(from_dir) if from_dir else None)
     print(f"engines dir: {d}")
     unavailable = []
     for key, eng in EN.ENGINES.items():
@@ -516,6 +545,11 @@ def cmd_engines(args: argparse.Namespace) -> int:
     gh = GE.find_ghidra(engines_dir=d)
     gh_status = f"available ({gh.name})" if gh else "MISSING (pass --with-ghidra to download)"
     print(f"  {'Ghidra Headless':<24} {gh_status}")
+    report = {"engines_dir": str(d), "offline": offline, "bundle": bundle,
+              "missing": missing, "unavailable": unavailable}
+    if report_path:
+        Path(report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"json      : {report_path}")
     if missing:
         print(f"could not fetch: {', '.join(missing)}")
     if unavailable:

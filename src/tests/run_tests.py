@@ -6528,6 +6528,67 @@ def test_benchmark_is_reproducible() -> None:
         check("the report records the exact command",
               "--engine both" in comp["command"], comp["command"][:200])
 
+
+def test_offline_engine_bundle() -> None:
+    """An offline engine bundle is verifiable and never reaches the network."""
+    print("engines: an offline bundle verifies without downloading")
+    import shutil
+    from jdec import cli as CL
+    from jdec import engines as EN
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        empty = root / "empty"
+        rep = EN.verify_bundle(empty)
+        check("an empty bundle is not OK", rep["ok"] is False, str(rep))
+        check("every pinned jar is reported missing",
+              len(rep["files"]) == 4
+              and all(v == "missing" for v in rep["files"].values()), str(rep))
+
+        out = root / "offline"
+        missing = EN.ensure_engines(out, offline=True, quiet=True)
+        check("offline mode reports all three engines missing",
+              len(missing) == 3, str(missing))
+        check("offline mode downloads nothing",
+              not list(out.glob("*.jar")), str(list(out.iterdir())))
+
+        if all((ENGINES_DIR / n).is_file() for n in EN._SHA1):
+            good = root / "good"
+            good.mkdir()
+            for name in EN._SHA1:
+                shutil.copy2(ENGINES_DIR / name, good / name)
+            check("a real bundle verifies", EN.verify_bundle(good)["ok"] is True,
+                  str(EN.verify_bundle(good)))
+            bad = root / "bad"
+            shutil.copytree(good, bad)
+            first = next(iter(EN._SHA1))
+            with (bad / first).open("ab") as fh:
+                fh.write(b"x")
+            check("a tampered jar fails verification",
+                  EN.verify_bundle(bad)["files"][first] == "mismatch",
+                  str(EN.verify_bundle(bad)))
+        else:
+            print("  (skipped: real engine jars not present)")
+
+    old = os.environ.get("JDEC_MAVEN_MIRROR")
+    os.environ["JDEC_MAVEN_MIRROR"] = "https://mirror.invalid/m2/"
+    try:
+        check("JDEC_MAVEN_MIRROR is applied",
+              EN.maven_base() == "https://mirror.invalid/m2", EN.maven_base())
+    finally:
+        if old is None:
+            os.environ.pop("JDEC_MAVEN_MIRROR", None)
+        else:
+            os.environ["JDEC_MAVEN_MIRROR"] = old
+
+    ns = CL.build_parser().parse_args(
+        ["engines", "--offline", "--from-dir", "bundle", "--verify-only",
+         "--json", "r.json", "--mirror", "https://m.invalid/m2"])
+    check("offline flags parse",
+          ns.offline and ns.verify_only and ns.from_dir == "bundle"
+          and ns.json == "r.json" and ns.mirror == "https://m.invalid/m2",
+          str(ns))
+
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
     if _no_engines():
@@ -7913,6 +7974,7 @@ def main() -> int:
     test_sandbox_isolation()
     test_isolation_backends()
     test_benchmark_is_reproducible()
+    test_offline_engine_bundle()
     test_frame_generation()
     test_ir_transforms()
     test_pipeline_gate()
