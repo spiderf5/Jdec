@@ -140,4 +140,14 @@ ROADMAP 新增节，**状态列是否推进仍需另行拍板**；未达标则�
 百分比与更新后的剩余归因，`docs/REACHABILITY_02.md` 给出条件式结论，02 仍
 「进行中」、04 仍「未开始」，不标 ✅。
 
-**实测记录**：_待本轮重测后回填（未执行前保持空白，不填推测数字）_。
+**实测记录（2026-11-04，HotSpot 21 / manager 后端 / git `035ba13`）**：
+JavaFX 21-`win` 三个 jar（sha1 见仓库外 `jdec_javafx/javafx_manifest.json`）；
+`deflat` 产出 411 个改写方法、3693 类 verify 全过；
+`union 342/411 = 83.2%`、`union nodeny 341/411 = 83.0%`（与历史基线一致）、
+`union value 143/411 = 34.8%`；**1 个真实差异**；
+`--union-gate 90` 打印 `342/411 = 83.2% (threshold 90%)`，退出码 **1**
+（diff 优先于门槛的 5）。**未达标**，还差 28 个判定，且本轮能力改造净增 0。
+完整报告见仓库外 `jdec_hmcl/hmcl_bench.json`（含命令、环境、stdout 全文），
+归因与结论见 `docs/REACHABILITY_02.md`。因版本/classifier 与历史记录
+（从未写死）可能不同，且出现 1 个差异，本次结果标注为该口径下的实测值，
+**不宣称「0 差异」，也不宣称 02 达标**。
