@@ -4977,8 +4977,15 @@ def test_multimodule_enhancements() -> None:
     check("telegram bot detected", "telegram" in ST.classify("https://api.telegram.org/bot123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"))
     check("c2 staging detected", "c2-staging" in ST.classify("https://pastebin.com/raw/xyz123"))
     check("crypto address detected", "crypto" in ST.classify("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"))
-    blob = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="
+    import base64
+    blob = base64.b64encode(bytes(range(64))).decode()
     check("encrypted blob detected", "encrypted-blob" in ST.classify(blob))
+    # A base64 string that decodes to plain printable text is encoded text,
+    # not ciphertext. The old pattern tagged these (and long FQCNs) as blobs.
+    printable = ("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkw"
+                 "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=")
+    check("base64-encoded printable text is not an encrypted blob",
+          "encrypted-blob" not in ST.classify(printable))
     sd = ST.StringDump(rows=[("ClsA", "s1", ["webhook", "url"]), ("ClsB", "s2", ["webhook"])])
     tc = sd.tag_counts()
     check("tag_counts computed", tc.get("webhook") == 2 and tc.get("url") == 1, str(tc))
@@ -7005,6 +7012,70 @@ def test_benchmark_report_hygiene() -> None:
         check("half-specified external mode is rejected", exc.code == 2,
               str(exc.code))
 
+
+def test_stage04_acceptance_harness() -> None:
+    """The 04 acceptance layer: independent goldens and per-mechanism controls."""
+    print("stage 04: acceptance evidence and corrected fingerprints")
+    import io
+    import contextlib
+    import goldens as G
+    import stage04 as S
+    from jdec import strings as ST
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = S.selfcheck()
+    check("the acceptance selfcheck passes", rc == 0, buf.getvalue()[:200])
+    check("eight mechanism acceptance specs are registered",
+          len(S.SPECS) == 8, str(len(S.SPECS)))
+    check("every spec declares support, boundary and its own negative control",
+          all(x["support"] and x["not_covered"] and x["negative"]
+              for x in S.SPECS))
+
+    flow = ROOT / "tests" / "flow.jar"   # ROOT here is src/
+    check("the independent class reader parses method names",
+          "dispatch" in G.methods_of(flow, "demo/flow/GotoFlood"))
+    check("independent class count matches the zip directory",
+          G.jar_facts(flow)["class_count"] == G.zip_facts(flow)["class_count"])
+    check("an internal class name is not an encrypted blob",
+          "encrypted-blob" not in ST.classify(
+              "org/spongepowered/asm/lib/tree/AbstractInsnNode"))
+
+    # Two fingerprints were producing false positives on real corpora.
+    fp = json.loads((ROOT.parent / "src/jdec/fingerprints.json")
+                    .read_text(encoding="utf-8"))
+    zkm = next(x for x in fp["obfuscators"]
+               if x["name"] == "ZKM 27 enhanced 字符串加密（DES）")
+    sentinel = next(x for x in fp["obfuscators"] if x["name"] == "Sentinel")
+    check("ZKM 27 needs two exclusive markers",
+          zkm.get("min_keywords", 1) >= 2
+          and all("ivparameterspec" not in k.lower() for k in zkm["keywords"]))
+    check("Sentinel is research-only, never an automatic attribution",
+          sentinel.get("auto_attribute") is False)
+    twin = (ROOT.parent / "java-deobf/scripts/fingerprints.json").read_bytes()
+    check("the skill fingerprint twin is byte-identical",
+          twin == (ROOT.parent / "src/jdec/fingerprints.json").read_bytes())
+
+    report = ROOT.parent / "docs" / "STAGE04_REPORT.json"
+    if report.is_file():
+        data = json.loads(report.read_text(encoding="utf-8"))
+        check("the committed acceptance report matches the registry",
+              data["total"] == len(S.SPECS)
+              and [m["id"] for m in data["mechanisms"]]
+              == [x["id"] for x in S.SPECS], str(data.get("total")))
+        check("every mechanism passed its cross-checks",
+              all(m["verdict"] == "PASS" for m in data["mechanisms"]),
+              str([m["id"] for m in data["mechanisms"]
+                   if m["verdict"] != "PASS"]))
+        check("every mechanism has golden facts and its own negative metrics",
+              all(m["golden"] and "negative_metrics" in m
+                  for m in data["mechanisms"]))
+        check("the negative corpus is publicly reproducible",
+              "junit:junit:4.13.2" in str(data["corpus_sources"]))
+        check("the acceptance report is not self-certifying",
+              data.get("acceptance_evidence_complete") is True
+              and "stage_04_threshold_met" not in data)
+
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
     if _no_engines():
@@ -8397,6 +8468,7 @@ def main() -> int:
     test_engines_cli_consistency()
     test_support_matrix_per_corpus_gate()
     test_benchmark_report_hygiene()
+    test_stage04_acceptance_harness()
     test_nativedb_bundle()
     test_support_matrix_selfcheck()
     test_frame_generation()

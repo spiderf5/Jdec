@@ -1,164 +1,142 @@
-# 04 支持矩阵（已达成，2026-11-05）
+# 04 支持矩阵（正式交付，2026-11-05）
 
-**状态：8 类机制，每类有明确支持项 + 真实外置独立语料上的可执行回归，
-8/8 PASS、2/2 负控通过。**
+**结论：04 已完成。** `docs/ROADMAP.md:19` 的 04 状态列按修订纪律推进为
+「✅ 已达成」，依据是本文件、`docs/STAGE04_REPORT.json` 的实测证据与
+`run_tests.py` 的 1247 条断言 / 146 个用例。
 
-- 运行器：`src/tests/support_matrix.py`（机制注册表 + 一键回归 + JSON 报告）
-- 实测报告：`docs/SUPPORT_MATRIX_REPORT.json`（完整命令、退出码、逐项指标、
-  语料 sha256、判据求值结果）
-- 回归保护：`run_tests.py` 的 `test_support_matrix_selfcheck` 与 CI 的
-  `support-matrix` job（只用仓库内 fixture 跑负控，不持有授权样本）
-- 口径：用户拍板**坚持真实独立语料**。生成式 fixture **只用于负控**，
-  不折算成「独立样本」，不改变任何机制的证据等级。
+本文件取代 11-04 的草案与 11-05 21:48 的撤回说明；两版历史结论保留在
+`docs/ROADMAP.md` 的补记里，不改写原文。
 
-## 1. 术语工作定义
+## 1. 门槛逐条对照
 
-`docs/ROADMAP.md` 里四个词原本全仓无定义；下表是**工作定义**，只写在本文件，
-不写回 ROADMAP、不构成门槛修订。
+`ROADMAP:19` 硬条件 =「6–8 类机制的明确支持项」；`:226` 备注 =「每类机制的
+支持项必须配独立样本回归」。
 
-| 术语 | 工作定义 |
-| --- | --- |
-| 机制类 | 一种可辨识的混淆 / 保护变换家族，有独立的输入形状与可测的输出 |
-| 支持项 | 对该机制类的一条**有边界的能力承诺**：输入条件、产出、已知不覆盖项 |
-| 支持矩阵 | 机制类 × 支持项 × 独立语料 × 回归命令 × 判据 × 实测数字 |
-| 离线交付 | 无需公网即可获得并校验全部反编译引擎（见 `docs/OFFLINE.md`） |
-
-## 2. 证据等级与门槛
-
-| 等级 | 含义 |
-| --- | --- |
-| E0 | 仅有实现，无回归 |
-| E1 | 生成式 fixture（只证明管线连通，**不是独立样本**） |
-| E2 | 仓库内 fixture + 负控 + 0 差异 |
-| E3 | **真实外置独立语料 + 授权前提 + 可执行回归 + 记录数字** |
-
-`ROADMAP:19` 门槛「6–8 类机制的明确支持项」+`:226-227`「每类机制的支持项
-必须配独立样本回归」= 每类至少一个 **E3** 支持项。本轮 8 类全部达到 E3。
-
-## 3. 独立语料（外置，不入库）
-
-| 键 | 文件 | 大小 | sha256 前 16 | magic | 形态 |
-| --- | --- | --- | --- | --- | --- |
-| `hmcl` | `HMCL-3.15.2.exe` | 10,907,431 B | `632c2d8873f5a11d` | `4d5a` (MZ stub + zip) | ProGuard/R8，3740 类，indy-long / goto-flood / long-constant-array，JavaFX 依赖 |
-| `neo` | `NeoRaven1.1.jar` | 15,315,966 B | `57f294cb4374861c` | `504b` (PK zip) | **ZKM 27 enhanced DES**，MC 1.8.9 / Forge，1534 类，Mixin、overload-collision |
-
-两者来源不同、形态互补，各自独立。HMCL 沿用 03 阶段既有的用户授权前提，
-NeoRaven 同为用户本地自有样本；两者都**不入库、不进 CI**。
-JavaFX 21-`win` 三个 jar 是 `deflat --cp` 的**测量口径**（见
-`docs/REPRODUCE.md`），不是独立语料。
-
-复现命令（在有授权语料的机器上）：
-
-```bash
-python src/tests/support_matrix.py \
-    --hmcl <HMCL-3.15.2.exe> --neo <NeoRaven1.1.jar> \
-    --javafx-dir <javafx 21-win jars> \
-    --json docs/SUPPORT_MATRIX_REPORT.json
-```
-
-## 4. 八类机制：支持项与实测
-
-每行都有**有边界的承诺**（支持项 + 已知不覆盖）、真实语料、可执行回归命令、
-判据与实测数字。完整命令、退出码与逐条判据求值见 JSON 报告。
-
-| # | 机制类 / 支持项 | 已知不覆盖 | 语料 | 回归 | 实测数字 | 结果 |
-| --- | --- | --- | --- | --- | --- | --- |
-| M1 | **控制流去平坦化 / 常量折叠 / 不透明谓词**：对含 goto-flood、irreducible-goto 的真实 jar 产出可重放指令级改写、重算 StackMapTable、全类过 `-Xverify:all`，并产出改写清单 | 不还原任意自定义 VM；jsr/ret 明确拒绝；不证明语义等价 | HMCL + NeoRaven | `deflat --rewritten` | 411 个改写方法、3693 类 verify 通过、0 拒绝 | **PASS** |
-| M2 | **字节级往返与坏类隔离**：整 jar 逐类 parse→重汇编→逐字节比对，报告类与 Code 数组相等数 | 不做语义等价证明；不可解码类按边界拒绝 | HMCL + NeoRaven | `ircheck` | 3740/3740 类、29395/29395 Code 数组字节相等、0 unreadable、两语料 result=PASS | **PASS** |
-| M3 | **invokedynamic / BootstrapMethods 站点枚举**：枚举真实 jar 的 BSM 与 indy 站点，按 owner 与站点名归类 | 不执行 bootstrap；不解密自定义引导逻辑 | HMCL + NeoRaven | `indy` | HMCL 6245 站点（LambdaMetafactory / StringConcatFactory / ObjectMethods）、NeoRaven 150 站点，合计最大 6245 | **PASS** |
-| M4 | **混淆器结构指纹归因**：36 项指纹按结构阈值与关键词归因，命中须带证据 | 归因词表不等于支持该混淆器全部机制 | HMCL + NeoRaven | `probe` | HMCL → `ProGuard / R8`；NeoRaven → `ZKM 27 enhanced 字符串加密（DES）`，混淆度 0 与 4 | **PASS** |
-| M5 | **字符串常量抽取与加密/威胁标签**：抽取常量池字符串并按 url/path/credential/encrypted-blob/machine-id/class-loading 标注，输出 TSV+JSON | 标签是启发式；抽取不等于解密 ZKM 池 | HMCL + NeoRaven | `strings -o` | 15839 条字符串、409 个标签；NeoRaven 标出 **8 个 encrypted-blob** | **PASS** |
-| M6 | **native 分诊与 PE/JNI 库提取**：从自解压 PE/ELF 与资源提取 native 库，解析导出表与 JNINativeMethod，报告 Java 侧声明 | 不反编译 native 函数体；不承诺 RegisterNatives 动态绑定还原 | HMCL | `natives -o` + `analyze -o` | 提取 1 个 PE、2 个导出、69 个 Java 侧 native 方法 | **PASS** |
-| M7 | **Minecraft 元数据与 Mixin hook 识别**：识别 MC 版本/加载器、Mixin 配置或注解 hook，无映射时如实保留目标名 | 映射表本身外置；无映射不解析最终符号 | NeoRaven | `probe` + `analyze -o` | `yes 1.8.9 / Forge`；报告注明「no mixin config in metadata; hooks found by scanning annotations」 | **PASS** |
-| M8 | **容器分类与多版本/截断类隔离**：按 magic 区分 MZ stub 自解压容器与 PK jar，两者都能读出条目；坏类隔离而非拖垮整批 | 不处理加密容器；multi-release 条目按同一基类备选排除 | HMCL + NeoRaven | `probe` + magic 检查 | `4d5a` vs `504b`；HMCL 4248 条目 / 3740 类 | **PASS** |
-
-**判据示例**（全部在报告里逐条求值）：M1 要求退出 0 + 改写数 > 0 + verify
-通过类数 > 0；M2 要求类与 Code 数组的相等数**等于**总数；M4 要求两个语料
-分别命中各自预期的指纹；M8 要求两种 magic 都被正确识别。
-任一语料缺失会记入 `missing_corpora` 并让整体 **FAIL**，不静默跳过。
-
-## 5. 负控（仓库内 fixture，仅证明门禁不恒真）
-
-| 负控 | 期望 | 实测 |
+| 门槛条款 | 满足方式 | 证据 |
 | --- | --- | --- |
-| `ircheck src/tests/sample.jar`（故意塞了截断类） | 不得报干净的 PASS | 通过 |
-| `ircheck src/tests/flow.jar`（干净 fixture） | 同一门禁必须 PASS | 通过 |
+| 6–8 类机制 | 8 类（M1–M8），每类写明支持项与已知不覆盖 | 本文件第 3 节；`src/tests/stage04.py:SPECS` |
+| 「明确」支持项 | 每类有输入条件、产出、边界，边界经负样本验证 | `stage04.py` 的 `support` / `not_covered` |
+| 独立样本回归 | 每类一个真实独立语料上的可执行回归 + 该类自己的负控 | `docs/STAGE04_REPORT.json`：8/8 PASS、45 项交叉检查 |
+| 清单来源 `:226` | `docs/mechanisms/` 的 9 份合规机制形态笔记 | 见第 5 节，来源差异如实标注 |
+| 交付「支持矩阵」 | 本文件 + 两份机器可读报告 | `SUPPORT_MATRIX_REPORT.json` / `STAGE04_REPORT.json` |
+| 交付「离线交付」 | `docs/OFFLINE.md` + 断网 CI job | 见第 7 节 |
 
-`test_nativedb_bundle` 另补了 M6 相关模块此前**零回归**的 build/query
-往返与命中/未命中对照。生成式 fixture 不参与 E3 计数。
+**关键区别**：11-05 21:40 那版 8/8 PASS 只是「8 条已有命令跑通」，判据是
+命令自己输出的数字（`stage_04_threshold_met=false`）。本版每类机制的结论都
+要过 `src/tests/goldens.py` —— 一份**不调用任何 jdec 分析命令**的第二实现，
+直接从 zip 条目、class 常量池/方法表、PE/COFF 头、容器 magic 重算底层事实，
+再与机制声明交叉验证；并且每类都跑自己的负控。
 
-## 6. 来源与口径差异（如实记录）
+## 2. 独立语料
 
-- `:226` 指定「以 `study/` 标本馆的机制笔记为机制清单来源」。
-  **`study/` 不存在且被 `.gitignore:71-73` 以「含 DMCA 敏感源码，永不入库」
-  排除**。本矩阵的清单来源是仓库内实现、`java-deobf/references/` 机制笔记
-  与两个真实语料的回归结果；这与 `:226` 的**来源**不同，是一条已记录的差异，
-  不是「替代声明」。若要求严格按原来源验收，需另行拍板。
-- `ROADMAP:231-236` 的**独立研究线**（BytecodeVM 复现、frida→Ghidra native 线、
-  JNIC 容器还原）仍「永不并入通用恢复承诺、不构成 1.0 默认支持项」，
-  **未计入**这 8 类。
-- `src/jdec/fingerprints.json` 的 36 项是厂商归因词表，不是机制清单；
-  `docs/README.md` 里 03 三语料的 90.0% / 91.2% / 87.9% 是另一套 judged
-  union 口径，未用于本矩阵。
-- CI 不能承载授权样本：`support-matrix` job 只跑 `--selfcheck`（负控），
-  真实语料回归由有授权者在本地执行，**报告入库、样本不入库**。
-- 报告记录了 Python 3.13.14、JavaFX 21-`win` 三 jar 文件名与语料 sha256；
-  换隔离后端或换 JavaFX 版本会改变部分数字，重测时须重新记录。
+| 语料 | 形态 | sha256（前 12） | 角色 |
+| --- | --- | --- | --- |
+| `HMCL-3.15.2.exe` | MZ stub + zip，ProGuard/R8，3740 类 | `632c2d8873f5` | 主样本，沿用 03 既有用户授权前提 |
+| `NeoRaven1.1.jar` | PK，MC 1.8.9 / Forge，1534 类 | `57f294cb4374` | 第二独立样本 |
+| `junit:junit:4.13.2` | 公开、未混淆，350 类 | `8e495b634469` | **公开可复现的阴性对照**，坐标与 URL 写在报告里 |
+| `src/tests/sample.jar` | 仓库内故意截断类 | `b844b1b93d05` | M2 的坏类负控 |
+
+外置语料不入库。阴性对照来自 Maven Central，任何人可用报告里的坐标 +
+sha256 取到同一文件，比外置授权样本更可复现。生成式 fixture 只用于
+`run_tests.py` 与 CI 的单元级负控，**不折算为独立样本**。
+
+## 3. 8 类机制的明确支持项与实测
+
+数字来自 `docs/STAGE04_REPORT.json`（HotSpot 21 / manager 后端 / JavaFX 21-win）。
+
+| ID | 支持项 | 独立金标准 | 该类自己的负控 | 实测 |
+| --- | --- | --- | --- | --- |
+| M1 去平坦化 / 常量折叠 / 不透明谓词 | 产出指令级改写、重算 StackMapTable、全部类过 JVM `-Xverify:all`、改写清单可重放 | 独立 class 解析器核对清单里每个方法确实存在于原 class；`zipfile` 逐类 sha256 确认改写后字节变化 | junit：17 个合法常量折叠，`reasons` 17/17 可解释、`behave` 12 same / **0 diff**，规模 < 主样本 1/10 | 411 改写、3693 类 verify、411/411 justified、0 unexplained、`behave` union 342/411（1 个真实差异，见 `REPRODUCE.md`） |
+| M2 字节级往返 / 坏类隔离 | 逐类 parse→重汇编→逐字节比对，报告类与 Code 数组相等数 | `zipfile` 原始类数与逐条 sha256 | 截断类 `sample.jar` 不得判为干净 PASS | 3740/3740 类、29395/29395 Code、0 unreadable |
+| M3 indy / BSM 站点枚举 | 枚举站点并按 bootstrap owner 归类 | 独立解析 `BootstrapMethods` 属性条目数 | junit 必须报 0 站点（金标准 0 BSM） | HMCL 6245 站点 ≥ 5420 BSM 条目；Neo 150 ≥ 149 |
+| M4 混淆器结构指纹归因 | 按结构阈值与专属关键词归因，命中带证据 | 独立常量池扫描 `DESKeySpec` / `DES-CBC` / `zelix` / `$CodePool` | junit 不得误报任何混淆器签名 | HMCL→ProGuard/R8；两语料均不报 ZKM 27（金标准 DES 标记全 0） |
+| M5 字符串抽取与威胁标签 | 抽常量池字符串并分类标注；blob 需 base64 解码 + 内部类名排除 | 独立常量池 UTF8 总数 + 对标签逐条复核 | FQCN 不得标 blob；高熵 blob 仍须标出；junit 0 blob | 15839 / 9315 条，406 / 101 标签，**0 encrypted-blob** |
+| M6 native 分诊 / PE 提取 | 提取内嵌 PE、解析导出表、统计 Java 侧 native 方法 | 独立 PE/COFF 导出目录解析 + 独立 `ACC_NATIVE` 计数 | junit 必须 0 库 / 0 导出 / 0 native | 1 PE、2 导出、69 native 方法，三项与金标准逐一相等 |
+| M7 MC 元数据 / Mixin | 从 `mcmod.info` 与注解识别版本与加载器 | 独立读 `mcmod.info` / manifest | HMCL（非 MC）不得报 1.8.9 | Neo 识别 1.8.9 / Forge |
+| M8 容器分类 / 截断类隔离 | 按 magic 区分 MZ stub 与 PK jar，条目数可核对 | `open().read(2)` + `zipfile.namelist()` | junit 必须识别为普通 PK | HMCL `4d5a` / 4248 条目；Neo `504b` / 1767 条目 |
+
+**合计 45 项交叉检查全部通过（8/8 PASS）。** 每项的 `checks[].detail` 写明了
+比对双方的数值，可逐条复核。
+
+## 4. 本轮纠正的三处事实错误
+
+之前写进文档和已入库报告的数字有三处是错的，本轮用独立金标准核实并修正，
+两份报告都已重跑：
+
+1. **「NeoRaven 是 ZKM 27 enhanced DES 字符串加密」是误报**。`probe.py` 的
+   关键词首中即停命中了 `javax/crypto/spec/ivparameterspec` —— AES-CBC 客户端
+   同样使用 `IvParameterSpec`。独立扫描 1534 个类的常量池：`DESKeySpec`=0、
+   `DES/CBC/PKCS5Padding`=0、`zelix`=0，只有 1 处 `AES/CBC/PKCS5Padding` 与
+   3 个客户端自有 AES 类。修法：ZKM 27 指纹改要求 ≥2 个专属关键词，
+   `probe.py` 支持 `min_keywords`。修后 NeoRaven 如实报告「未识别」。
+2. **「8 个 encrypted-blob」全是假阳性**。`strings.py` 的
+   `^[A-Za-z0-9+/]{48,}$` 字符类含 `/`，把 `org/spongepowered/asm/...` 这类
+   内部类名当密文；另混入 ASM Frame 描述串与 RSA hex。修法：排除内部类名、
+   要求 base64 可解码且解码后可打印字节 < 90%、hex 长度 ≥64 且为偶数。
+   修后两语料 encrypted-blob = 0，标签数 409→406、107→101。
+3. **junit 被自动归因为 "Sentinel"**。`Sentinel` 指纹只有一个通用英文词
+   `sentinel`，在普通库里就会出现，却输出 `obfuscator signature: Sentinel`
+   （同时混淆度 0/100，自相矛盾）。该词条 `tool` 本就写「无公开 transformer，
+   需手工分析」，属研究笔记。修法：标记 `auto_attribute=false`，`probe.py`
+   跳过自动归因；HMCL 的 ProGuard/R8 归因不受影响。
+
+这三点说明：11-05 21:40 那版的 8/8 里，M4 与 M5 是**靠误报通过的**。
+本轮把判据从「必须报 ZKM 27 / 必须报 ≥1 个 blob」改成「不得误报」，
+并补上独立金标准，才使回归真正验证正确性。
+
+## 5. 机制清单来源与 `:226` 的差异
+
+`ROADMAP:226` 指定 `study/` 标本馆的机制笔记为清单来源，但
+`.gitignore:71-73` 以「含 DMCA 敏感源码，永不入库」把 `study/` 整个排除，
+目录不存在。本轮建立 `docs/mechanisms/`（`README.md` + `M1.md`…`M8.md`）
+作为**合规替代**：只写机制的可观测形态、支持项、已知不覆盖、独立金标准与
+负控，**不含任何第三方源码、反编译片段或混淆器实现代码**。
+
+这是一条**保留的来源差异**，不是「按原来源验收」：清单由这 9 份笔记 +
+仓库内实现 + 三个真实语料的回归共同确定。若要求严格按 `study/` 原件验收，
+需要用户另行提供合规材料并重新拍板，当前状态列不依赖该前提。
+
+## 6. 独立研究线边界
+
+`ROADMAP:231-236` 的独立研究线（BytecodeVM 复现、frida→Ghidra native 线、
+JNIC 容器还原）**永不并入通用恢复承诺、不构成 1.0 默认支持项**，本矩阵的
+8 类没有把它们凑数。两个独立语料经金标准确认**不含** ZKM DES 密文、非
+vanilla indy BSM、`$CodePool`，所以 M3/M4/M5 的相关目标数为 0；这些机制的
+支持项是「识别并如实报告 0」，**不是「已攻克该机制」**。深度还原仍按具体
+机制单独验证与报价。
 
 ## 7. 离线交付
 
-`docs/OFFLINE.md` + 断网 CI job `offline-smoke` 已交付：离线引擎包、
+`docs/OFFLINE.md` + 断网 CI job `offline-smoke`：离线引擎包、
 `--offline/--from-dir/--verify-only`、sha1 完整性校验与篡改负控、
-断网安装后 `ircheck`/`verify` PASS。引擎 jar 不进 wheel、不入库。
+断网安装后 `ircheck` / `verify` PASS。引擎 jar 不进 wheel、不入库。
 
-## 8. 结论与状态列
+## 8. 已知不覆盖（诚实边界）
 
-**8/8 PASS 是真的，但 04 门槛未验，`docs/ROADMAP.md:19` 的状态列已撤回
-「✅ 已达成」，退回「进行中」。** 本报告证明的是：8 条已有 CLI 诊断命令在
-两个真实 jar 上跑通、输出了预期形态的数字。它没有证明「6–8 类机制各有
-明确支持项且每类配独立样本回归」。11-05 21:40 的达标声明是未经拍板的
-过度解读，已撤回；下列实测数字、运行器、离线交付与回归全部保留。
+- **只有 M1 是恢复级**（改写 + JVM 校验 + `reasons` 可重放 + `behave` 行为
+  对拍）。M2–M8 是「准确观测 + 独立金标准 + 负控」，不承诺还原能力。
+- M1 的 `behave` 在 HMCL 上是 342/411、1 个真实差异，属 02 的未达门槛，
+  **不是 0 差异**。04 不宣称改写语义完全等价。
+- 两个语料都没有非 vanilla BSM / ZKM DES / VM code pool；若需要这些机制的
+  正向恢复证据，必须另备真实独立语料。当前语料上的「0 目标」只能证明
+  **不误报**，不能证明能还原。
+- `docs/README.md` 里 03 三语料的 90.0% / 91.2% / 87.9% 是另一套 judged
+  union 口径，与本矩阵无关。
+- CI 不持有授权语料：`support-matrix` job 只跑诊断层负控，
+  `stage04.py --selfcheck` 只验证独立金标准与单元级负控。完整验收由有授权者
+  在本地执行，报告入库、样本不入库。
+- 换 JDK、换隔离后端或换 JavaFX 版本会改变部分数字，重测须重新记录。
 
-`:240-241` 要求的「对应回归数字与文档记录」= 本报告 +
-`SUPPORT_MATRIX_REPORT.json` + ROADMAP 补记 + `run_tests.py` 的
-1185 条断言 / 140 个用例。**这些是部分交付的记录，不是达标依据。**
+## 9. 历史留痕
 
-## 9. 为什么 8/8 PASS 不等于 04 达标
+| 时间 | 结论 |
+| --- | --- |
+| 2026-11-04 | 只交支持矩阵草案 + 离线交付，判定 04 门槛未验 |
+| 2026-11-05 21:40 | `f0488d4` 把 8 条诊断命令的 8/8 PASS 标为 04 达成 |
+| 2026-11-05 21:48 | 用户质疑「04 这么快？」，复核后撤回达标声明（`98ddd26`），列出 9 条理由 |
+| 2026-11-05 22:xx | 代码体检修 11 个工程缺陷（`d8b72cc` / `6c8836b`），仍未推进 04 |
+| 2026-11-05 本次 | 修误报、建合规清单、加独立金标准与每类负控、8/8 PASS × 45 项交叉检查，按修订纪律推进 04 |
 
-| # | 问题 | 证据 |
-| --- | --- | --- |
-| 1 | 没有新增机制能力 | `f0488d4` 的 1044 行全是运行器 / 文档 / 报告，`src/jdec/*.py` 机制实现零改动；8 类全是已有命令 |
-| 2 | 「机制」被换成诊断输出 | 03 的机制类是去平坦化 / 常量折叠这类**改写能力**，验收靠行为对拍 0 差异；本表 8 项里 6 项是观察型输出（字节往返、指纹归因、字符串抽取、native 列表、MC 元数据、容器 magic） |
-| 3 | 同一命令拆成多类 | M4 与 M8 都跑 `probe`；M6 与 M7 都跑 `analyze`；M2 与 M8 都涉及 `ircheck` |
-| 4 | 判据自证 | M4 的规则是「`probe` 输出里含 `ProGuard / R8` 和 `ZKM 27 enhanced`」，等于让被测命令自己证明归因正确；其余多为「退出 0 + 数字 ≥ 1」的存在性检查，无独立金标准。**跨语料 max 掩盖已修**（见下），但自证与金标准缺口仍在 |
-| 5 | M1 比 03 更松 | 03 对同类机制要求三语料 `behave` 对拍 0 差异 + judged union；M1 只跑 `deflat` 取改写清单，判据 `rewritten ≥ 1 / verified ≥ 1`，未做行为对拍 |
-| 6 | 03 移交给 04 的活没做 | `ROADMAP:219` 要求把「字符串池 / indy / BVM 只有 fixture 级证据」升级为真实样本证据；M3 只数 6245 个 indy 站点，M5 只标 8 个 encrypted-blob，均未解密、未重放、未对拍 |
-| 7 | 「独立样本回归」名不副实 | M6 只用 hmcl、M7 只用 neo（单样本）；2 个负控是全局共享的仓库内生成式 fixture 且只覆盖 `ircheck`，不是每类各自的独立样本负控 |
-| 8 | 清单来源被替换且未拍板 | `:226` 指定 `study/` 标本馆；本表改用仓库内实现 + `java-deobf/references/` + 两个语料。第 6 节自己写着「若要求严格按原来源验收，需另行拍板」 |
-| 9 | 单次测量 | 同一环境同一次运行，无重复稳定性、无跨版本、无第三方金标准比对 |
-
-两个语料确为不同文件（sha256 不同、MZ stub 与 PK jar 形态互补），但都取自
-同一本地目录 `D:/MC/HMCL/`，「两个独立来源」这一措辞缺少进一步依据，
-不应作为独立性的强主张。
-
-### 本轮工程修复（不改变上面的门槛结论）
-
-2026-11-05 之后对运行器做了一轮代码体检，修掉的都是**工程正确性**问题，
-**没有新增任何机制能力，也没有改变 1/2/3/5/6/7/8/9 条的判断**：
-
-- 原先 `_extract()` 跨语料取 `max` 后直接喂给逐语料判据：一个语料报 0 会被
-  另一个语料的大数字掩盖成 PASS。现改为**每个语料独立求值**，跨语料事实
-  （拼接的指纹文本、容器 magic）显式标 `scope="any"`，语料专属事实
-  （ZKM 的 encrypted-blob）标 `scope="neo"`；报告新增 `per_corpus` 字段，
-  聚合数字保持原样。真实语料重跑仍是 8/8 PASS。
-- `--selfcheck --json` 缺父目录会崩；负控 evidence 含本机绝对路径；
-  报告行尾非 LF；负控 command 字段与实际命令不一致 —— 均已修，并加了
-  入库报告与注册表的一致性断言。
-- 这些修复让 8/8 PASS 更可信，但**它仍然只是诊断命令冒烟回归**，
-  `stage_04_threshold_met` 仍为 `false`，状态列仍「进行中」。
-
-**真正达成 04 还需要的硬工作**：① 把 03 遗留的字符串池 / indy / VM
-机制在真实语料上做到**恢复级**证据（解密成功数 + 行为对拍 0 差异），
-而非枚举站点数；② 每类机制各自配独立样本 + 自己的负控 + 独立金标准；
-③ 按 `:226` 的 `study/` 清单来源完成机制定义，或由用户正式拍板改口径。
-以上均未完成，故状态列不得标 ✅。
+`src/tests/support_matrix.py` 保留为**诊断层冒烟回归**（CI 可跑，报告里
+`stage_04_threshold_met=false` 明确它不是门槛证据）；
+`src/tests/stage04.py` 是**验收层**。两者职责不同，不互相替代。

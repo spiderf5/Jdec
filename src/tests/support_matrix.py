@@ -66,6 +66,12 @@ class Rule:
             return values.get(self.key, "") == self.equals
         if self.kind == "contains":
             return bool(self.equals) and self.equals in str(values.get(self.key, ""))
+        if self.kind == "absent":
+            return bool(self.equals) and self.equals not in str(
+                values.get(self.key, ""))
+        if self.kind == "max":
+            value = values.get(self.key, 0)
+            return isinstance(value, int) and value <= self.minimum
         if self.kind == "pair_equal":
             if "/" not in self.key:
                 return False
@@ -155,14 +161,16 @@ MECHANISMS: tuple[MechanismSpec, ...] = (
                  _rx("structure", r"structure\s+: (.+)")),
         rules=(Rule("all_zero_rc"),
                Rule("contains", "signature", equals="ProGuard / R8", scope="any"),
-               Rule("contains", "signature", equals="ZKM 27 enhanced", scope="any")),
-        rule_text="退出 0；HMCL 命中 ProGuard/R8、NeoRaven 命中 ZKM 27 enhanced",
+               Rule("absent", "signature", equals="ZKM 27 enhanced", scope="any")),
+        rule_text="退出 0；HMCL 命中 ProGuard/R8；两语料均不得误报 ZKM 27 "
+                  "（独立金标准确认常量池无 DESKeySpec / DES-CBC / zelix）",
     ),
     MechanismSpec(
         id="M5", name="字符串常量抽取与加密/威胁标签",
         support="从真实 jar 的常量池抽取字符串并按 url/path/credential/"
                 "encrypted-blob/machine-id/class-loading 分类标注，输出 TSV+JSON",
-        not_covered="标签是启发式；抽取不等于解密 ZKM 池，需 pool/recover 另行重放",
+        not_covered="标签是启发式；抽取不等于解密字符串池；两语料经独立金标准"
+                    "确认无 DES 密文，encrypted-blob = 0 是正确结果，不是能力证明",
         corpora=("hmcl", "neo"),
         steps=(("strings", "{jar}", "-o", "{out}/{key}_strings"),),
         metrics=(_rx("strings", r"strings\s+: (\d+) total"),
@@ -170,8 +178,9 @@ MECHANISMS: tuple[MechanismSpec, ...] = (
                  _rx("encrypted_blob", r"encrypted-blob: (\d+)")),
         rules=(Rule("all_zero_rc"), Rule("min", "strings", 1),
                Rule("min", "tagged", 1),
-               Rule("min", "encrypted_blob", 1, scope="neo")),
-        rule_text="退出 0；字符串数与标签数 > 0；ZKM 语料标出 encrypted-blob",
+               Rule("max", "encrypted_blob", 0, scope="any")),
+        rule_text="退出 0；字符串数与标签数 > 0；独立金标准确认无 DES 密文的语料"
+                  "不得标出 encrypted-blob（旧规则的 8 个全是内部类名假阳性）",
     ),
     MechanismSpec(
         id="M6", name="native 分诊与 PE/JNI 库提取",

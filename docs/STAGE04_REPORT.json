@@ -1,0 +1,725 @@
+{
+  "schema": 1,
+  "stage": "04",
+  "generated_at": "2026-11-05T15:38:47.500977+00:00",
+  "python": "3.13.14",
+  "threshold": "6-8 mechanism classes with explicit support items, each backed by an independent sample regression",
+  "corpus_sources": {
+    "hmcl": {
+      "coordinate": "HMCL-3.15.2.exe (local, authorised)",
+      "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+    },
+    "neo": {
+      "coordinate": "NeoRaven1.1.jar (local, authorised)",
+      "sha256": "57f294cb4374861c7ee1c68e887f0bdcd09c0182545f80412ed2091a3ff6e022"
+    },
+    "junit": {
+      "coordinate": "junit:junit:4.13.2",
+      "url": "https://repo1.maven.org/maven2/junit/junit/4.13.2/junit-4.13.2.jar",
+      "sha256": "8e495b634469d64fb8acfa3495a065cbacc8a0fff55ce1e31007be4c16dc57d3",
+      "role": "public, reproducible NEGATIVE corpus"
+    },
+    "truncated": {
+      "coordinate": "src/tests/sample.jar",
+      "sha256": "b844b1b93d05430118ac636b55fd50da85374e859ec620ec04fd885bc7483494",
+      "role": "in-repo truncated-class negative control"
+    }
+  },
+  "javafx_entries": [
+    "javafx-base-21-win.jar",
+    "javafx-controls-21-win.jar",
+    "javafx-graphics-21-win.jar"
+  ],
+  "mechanisms": [
+    {
+      "id": "M1",
+      "name": "控制流去平坦化 / 常量折叠 / 不透明谓词",
+      "support": "对含 goto-flood / irreducible-goto 的真实 jar 产出指令级改写，重算 StackMapTable，改写后全部类通过 JVM -Xverify:all；产出改写清单",
+      "not_covered": "不证明语义等价（行为对拍属 02，当前 union 83.2%、1 个差异）；不处理自定义 VM 字节码；无 goto-flood 的 jar 报告 0 改写",
+      "primary_corpus": "hmcl",
+      "negative_corpus": "junit",
+      "metrics": {
+        "rewritten": 411,
+        "verified": 3693,
+        "justified": 411,
+        "unexplained": 0,
+        "same": 215,
+        "diff": 1,
+        "union": 342
+      },
+      "exit_codes": [
+        0,
+        0,
+        1
+      ],
+      "commands": [
+        "jdec deflat <HMCL> -o <WORKDIR>\\hmcl_deflat.jar --rewritten <WORKDIR>\\hmcl_rw.txt --cp javafx-base-21-win.jar --cp javafx-controls-21-win.jar --cp javafx-graphics-21-win.jar",
+        "jdec reasons <HMCL> <WORKDIR>\\hmcl_deflat.jar",
+        "jdec behave <HMCL> <WORKDIR>\\hmcl_deflat.jar --derive --from <WORKDIR>\\hmcl_rw.txt --execute --engine both --cp javafx-base-21-win.jar --cp javafx-controls-21-win.jar --cp javafx-graphics-21-win.jar"
+      ],
+      "golden": {
+        "magic": "4d5a",
+        "entries": 4248,
+        "class_count": 3740,
+        "readable": 3740,
+        "utf8_count": 313905,
+        "unique_utf8": 63304,
+        "native_methods": 69,
+        "bsm_entries": 5420,
+        "pe_export_count": 2,
+        "pe_exports": [
+          "AmdPowerXpressRequestHighPerformance",
+          "NvOptimusEnablement"
+        ],
+        "mc": {
+          "has_mcmod": false,
+          "mentions_forge": false,
+          "mentions_189": false,
+          "metadata_files": []
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+      },
+      "negative_metrics": {
+        "rewritten": 17,
+        "verified": 304,
+        "justified": 17,
+        "unexplained": 0,
+        "same": 12,
+        "diff": 0,
+        "union": 17
+      },
+      "negative_exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0, 1)",
+          "ok": true,
+          "detail": "[0, 0, 1]"
+        },
+        {
+          "label": "改写方法数 > 0",
+          "ok": true,
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+        },
+        {
+          "label": "JVM verify 通过类数 > 0",
+          "ok": true,
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+        },
+        {
+          "label": "改写清单里的方法独立存在于原 class 文件",
+          "ok": true,
+          "detail": "verified=411 missing=0 []"
+        },
+        {
+          "label": "改写后的 class 字节确实变化",
+          "ok": true,
+          "detail": "changed=281"
+        },
+        {
+          "label": "阴性对照的改写全部可被 journal 解释",
+          "ok": true,
+          "detail": "{'rewritten': 17, 'verified': 304, 'justified': 17, 'unexplained': 0, 'same': 12, 'diff': 0, 'union': 17}"
+        },
+        {
+          "label": "阴性对照行为对拍 0 差异",
+          "ok": true,
+          "detail": "same=12 diff=0"
+        },
+        {
+          "label": "阴性对照改写规模显著小于混淆语料",
+          "ok": true,
+          "detail": "17 vs 411"
+        },
+        {
+          "label": "主样本改写全部可被 journal 解释",
+          "ok": true,
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+        },
+        {
+          "label": "主样本行为对拍产出 union 判定",
+          "ok": true,
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M2",
+      "name": "字节级往返与坏类隔离",
+      "support": "逐类 parse→重汇编→逐字节比对，报告类与 Code 数组相等数；不可读类被隔离而不是拖垮整批",
+      "not_covered": "不做语义等价证明；jsr/ret 与不可解码类按边界拒绝",
+      "primary_corpus": "hmcl",
+      "negative_corpus": "truncated",
+      "metrics": {
+        "classes": 3740,
+        "unreadable": 0,
+        "cls_ok": 3740,
+        "cls_total": 3740,
+        "code_ok": 29395,
+        "code_total": 29395
+      },
+      "exit_codes": [
+        0
+      ],
+      "commands": [
+        "jdec ircheck <HMCL> --limit 2"
+      ],
+      "golden": {
+        "magic": "4d5a",
+        "entries": 4248,
+        "class_count": 3740,
+        "readable": 3740,
+        "utf8_count": 313905,
+        "unique_utf8": 63304,
+        "native_methods": 69,
+        "bsm_entries": 5420,
+        "pe_export_count": 2,
+        "pe_exports": [
+          "AmdPowerXpressRequestHighPerformance",
+          "NvOptimusEnablement"
+        ],
+        "mc": {
+          "has_mcmod": false,
+          "mentions_forge": false,
+          "mentions_189": false,
+          "metadata_files": []
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+      },
+      "negative_metrics": {
+        "classes": 10,
+        "unreadable": 1,
+        "cls_ok": 10,
+        "cls_total": 10,
+        "code_ok": 45,
+        "code_total": 45
+      },
+      "negative_exit_codes": [
+        3
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]"
+        },
+        {
+          "label": "class 计数等于 zipfile 原始类数",
+          "ok": true,
+          "detail": "3740 vs 3740"
+        },
+        {
+          "label": "类字节往返全等且分母等于原始类数",
+          "ok": true,
+          "detail": "{'classes': 3740, 'unreadable': 0, 'cls_ok': 3740, 'cls_total': 3740, 'code_ok': 29395, 'code_total': 29395}"
+        },
+        {
+          "label": "Code 数组往返全等",
+          "ok": true,
+          "detail": "{'classes': 3740, 'unreadable': 0, 'cls_ok': 3740, 'cls_total': 3740, 'code_ok': 29395, 'code_total': 29395}"
+        },
+        {
+          "label": "无不可读类",
+          "ok": true,
+          "detail": "unreadable=0 readable=3740"
+        },
+        {
+          "label": "截断类负控不得判为干净 PASS",
+          "ok": true,
+          "detail": "rc=[3] metrics={'classes': 10, 'unreadable': 1, 'cls_ok': 10, 'cls_total': 10, 'code_ok': 45, 'code_total': 45}"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M3",
+      "name": "invokedynamic / BootstrapMethods 站点枚举",
+      "support": "枚举真实 jar 的 indy 站点并按 bootstrap owner 归类，站点数经独立 BootstrapMethods 属性计数交叉验证",
+      "not_covered": "不执行 bootstrap、不解密 recipe；两个独立语料的 BSM 全是 JDK vanilla（LambdaMetafactory / StringConcatFactory / ObjectMethods），非 vanilla 目标数为 0；自定义引导还原属独立研究线",
+      "primary_corpus": "hmcl",
+      "negative_corpus": "junit",
+      "metrics": {
+        "sites": 6245
+      },
+      "exit_codes": [
+        0
+      ],
+      "commands": [
+        "jdec indy <HMCL>"
+      ],
+      "golden": {
+        "magic": "4d5a",
+        "entries": 4248,
+        "class_count": 3740,
+        "readable": 3740,
+        "utf8_count": 313905,
+        "unique_utf8": 63304,
+        "native_methods": 69,
+        "bsm_entries": 5420,
+        "pe_export_count": 2,
+        "pe_exports": [
+          "AmdPowerXpressRequestHighPerformance",
+          "NvOptimusEnablement"
+        ],
+        "mc": {
+          "has_mcmod": false,
+          "mentions_forge": false,
+          "mentions_189": false,
+          "metadata_files": []
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+      },
+      "negative_metrics": {
+        "sites": 0
+      },
+      "negative_exit_codes": [
+        0
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]"
+        },
+        {
+          "label": "站点数 ≥ 独立 BootstrapMethods 属性条目数",
+          "ok": true,
+          "detail": "sites=6245 bsm=5420"
+        },
+        {
+          "label": "阴性对照无 indy 站点",
+          "ok": true,
+          "detail": "neg_sites=0 neg_bsm=0"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M4",
+      "name": "混淆器结构指纹归因",
+      "support": "按结构阈值与专属关键词归因，命中必须带证据；ZKM 27 需 ≥2 个专属标记，避免 AES-CBC 的 IvParameterSpec 误报",
+      "not_covered": "归因词表不等于支持该混淆器的全部机制；不承诺还原；对不含混淆器标记的真实 jar 必须如实报告未识别",
+      "primary_corpus": "hmcl",
+      "negative_corpus": "junit",
+      "metrics": {},
+      "exit_codes": [
+        0
+      ],
+      "commands": [
+        "jdec probe <HMCL>"
+      ],
+      "golden": {
+        "magic": "4d5a",
+        "entries": 4248,
+        "class_count": 3740,
+        "readable": 3740,
+        "utf8_count": 313905,
+        "unique_utf8": 63304,
+        "native_methods": 69,
+        "bsm_entries": 5420,
+        "pe_export_count": 2,
+        "pe_exports": [
+          "AmdPowerXpressRequestHighPerformance",
+          "NvOptimusEnablement"
+        ],
+        "mc": {
+          "has_mcmod": false,
+          "mentions_forge": false,
+          "mentions_189": false,
+          "metadata_files": []
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+      },
+      "negative_metrics": {},
+      "negative_exit_codes": [
+        0
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]"
+        },
+        {
+          "label": "金标准确认该语料无 ZKM DES 专属标记",
+          "ok": true,
+          "detail": "{'DESKeySpec': 0, 'DES/CBC': 0, 'zelix': 0, '$CodePool': 0}"
+        },
+        {
+          "label": "无 DES 标记时不得归因 ZKM 27",
+          "ok": true,
+          "detail": "file           : HMCL-3.15.2.exe\nentries        : 4248  (classes 3740, resources 508)\nbytecode       : Java 17 x2174, Java 8 x1478, Java 9 x34, Java 6"
+        },
+        {
+          "label": "HMCL 归因 ProGuard / R8",
+          "ok": true,
+          "detail": "file           : HMCL-3.15.2.exe\nentries        : 4248  (classes 3740, resources 508)\nbytecode       : Java 17 x2174, Java 8 x1478, Java 9 x34, Java 6"
+        },
+        {
+          "label": "ZKM 27 指纹要求 ≥2 个专属标记",
+          "ok": true,
+          "detail": "['des/cbc/pkcs5padding', 'deskeyspec', 'zelix']"
+        },
+        {
+          "label": "阴性对照不误报混淆器",
+          "ok": true,
+          "detail": "file           : junit-4.13.2.jar\nentries        : 389  (classes 350, resources 39)\nbytecode       : Java 5 x350\nobfuscation    : 0/100\ntop packages  "
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M5",
+      "name": "字符串常量抽取与威胁标签",
+      "support": "抽取常量池字符串并按 url / path / credential / exec / class-loading 等分类；encrypted-blob 需通过 base64 解码与 内部类名排除，标签经独立复核无假阳性",
+      "not_covered": "标签是启发式；抽取不等于解密 ZKM 池；两语料经金标准确认无 DES 密文，故 encrypted-blob 为 0 属正确结果而非能力证明",
+      "primary_corpus": "hmcl",
+      "negative_corpus": "junit",
+      "metrics": {
+        "strings": 15839,
+        "tagged": 406
+      },
+      "exit_codes": [
+        0
+      ],
+      "commands": [
+        "jdec strings <HMCL> -o <WORKDIR>/hmcl_strings"
+      ],
+      "golden": {
+        "magic": "4d5a",
+        "entries": 4248,
+        "class_count": 3740,
+        "readable": 3740,
+        "utf8_count": 313905,
+        "unique_utf8": 63304,
+        "native_methods": 69,
+        "bsm_entries": 5420,
+        "pe_export_count": 2,
+        "pe_exports": [
+          "AmdPowerXpressRequestHighPerformance",
+          "NvOptimusEnablement"
+        ],
+        "mc": {
+          "has_mcmod": false,
+          "mentions_forge": false,
+          "mentions_189": false,
+          "metadata_files": []
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+      },
+      "negative_metrics": {
+        "strings": 439
+      },
+      "negative_exit_codes": [
+        0
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]"
+        },
+        {
+          "label": "抽取到字符串常量",
+          "ok": true,
+          "detail": "{'strings': 15839, 'tagged': 406}"
+        },
+        {
+          "label": "字符串数不超过独立常量池 UTF8 总数",
+          "ok": true,
+          "detail": "15839 <= 313905"
+        },
+        {
+          "label": "内部类名不得标为 encrypted-blob（单元负控）",
+          "ok": true,
+          "detail": "org/spongepowered/asm/lib/tree/AbstractInsnNode"
+        },
+        {
+          "label": "真高熵 blob 仍能被标出（单元正控）",
+          "ok": true,
+          "detail": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd"
+        },
+        {
+          "label": "独立复核后无 encrypted-blob 假阳性",
+          "ok": true,
+          "detail": "tagged_blobs=0"
+        },
+        {
+          "label": "阴性对照无加密 blob",
+          "ok": true,
+          "detail": "scanned    : 350 classes (0 unreadable)\nstrings    : 439 total, 439 written\ntsv        : <WORKDIR>\\neg_junit_strings\\str"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M6",
+      "name": "native 分诊与 PE/JNI 库提取",
+      "support": "从 MZ 自解压容器提取内嵌 PE，独立解析导出表，统计 Java 侧 ACC_NATIVE 方法并与导出名交叉验证",
+      "not_covered": "不反编译 native 函数体；不还原 RegisterNatives 动态绑定；无 native 的纯 Java jar 必须报告 0",
+      "primary_corpus": "hmcl",
+      "negative_corpus": "junit",
+      "metrics": {
+        "libs": 1,
+        "exports": 2,
+        "native_methods": 69
+      },
+      "exit_codes": [
+        0,
+        0
+      ],
+      "commands": [
+        "jdec natives <HMCL> -o <WORKDIR>/hmcl_natives",
+        "jdec analyze <HMCL> -o <WORKDIR>/hmcl_analyze"
+      ],
+      "golden": {
+        "magic": "4d5a",
+        "entries": 4248,
+        "class_count": 3740,
+        "readable": 3740,
+        "utf8_count": 313905,
+        "unique_utf8": 63304,
+        "native_methods": 69,
+        "bsm_entries": 5420,
+        "pe_export_count": 2,
+        "pe_exports": [
+          "AmdPowerXpressRequestHighPerformance",
+          "NvOptimusEnablement"
+        ],
+        "mc": {
+          "has_mcmod": false,
+          "mentions_forge": false,
+          "mentions_189": false,
+          "metadata_files": []
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+      },
+      "negative_metrics": {
+        "libs": 0
+      },
+      "negative_exit_codes": [
+        0,
+        0
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0, 0]"
+        },
+        {
+          "label": "PE 导出数等于独立 PE/COFF 解析结果",
+          "ok": true,
+          "detail": "2 vs 2 ['AmdPowerXpressRequestHighPerformance', 'NvOptimusEnablement']"
+        },
+        {
+          "label": "Java 侧 native 方法数等于独立 ACC_NATIVE 计数",
+          "ok": true,
+          "detail": "69 vs 69"
+        },
+        {
+          "label": "提取到内嵌 PE 库",
+          "ok": true,
+          "detail": "{'libs': 1, 'exports': 2, 'native_methods': 69}"
+        },
+        {
+          "label": "纯 Java 阴性对照报告 0 native",
+          "ok": true,
+          "detail": "neg_native=0 neg_metrics={'libs': 0}"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M7",
+      "name": "Minecraft 元数据与 Mixin hook 识别",
+      "support": "从 mcmod.info / 注解独立识别 MC 版本与加载器，扫描 Mixin hook 并在无映射时保留目标名",
+      "not_covered": "映射表外置，离线不解析 hook 最终符号；非 MC 语料必须报告未识别，不得误报版本",
+      "primary_corpus": "neo",
+      "negative_corpus": "hmcl",
+      "metrics": {},
+      "exit_codes": [
+        0,
+        0
+      ],
+      "commands": [
+        "jdec probe <NEO>",
+        "jdec analyze <NEO> -o <WORKDIR>/neo_analyze"
+      ],
+      "golden": {
+        "magic": "504b",
+        "entries": 1767,
+        "class_count": 1534,
+        "readable": 1534,
+        "utf8_count": 149738,
+        "unique_utf8": 34568,
+        "native_methods": 0,
+        "bsm_entries": 149,
+        "pe_export_count": 0,
+        "pe_exports": [],
+        "mc": {
+          "has_mcmod": true,
+          "mentions_forge": false,
+          "mentions_189": true,
+          "metadata_files": [
+            "mcmod.info"
+          ]
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "57f294cb4374861c7ee1c68e887f0bdcd09c0182545f80412ed2091a3ff6e022"
+      },
+      "negative_metrics": {},
+      "negative_exit_codes": [
+        0,
+        0
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0, 0]"
+        },
+        {
+          "label": "金标准 mcmod.info 含 1.8.9，机制报告一致",
+          "ok": true,
+          "detail": "file           : NeoRaven1.1.jar\nentries        : 1767  (classes 1534, resources 233)\nbytecode       : Java 8 x957, Java 6 x485, Java 5 x92\nobfuscation    : 4/100\nminecraft      : "
+        },
+        {
+          "label": "金标准确认存在 mcmod.info",
+          "ok": true,
+          "detail": "['mcmod.info']"
+        },
+        {
+          "label": "非 MC 的 HMCL 负控不得报 1.8.9",
+          "ok": true,
+          "detail": "file           : HMCL-3.15.2.exe\nentries        : 4248  (classes 3740, resources 508)\nbytecode       : Java 17 x2174, Java 8 x1478, Java 9 x34, Java 6"
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M8",
+      "name": "容器分类与截断类隔离",
+      "support": "按文件 magic 区分 MZ 自解压 stub 与 PK jar，条目数经 zipfile 原始目录独立核对",
+      "not_covered": "不处理加密容器；multi-release 条目按同一基类备选排除",
+      "primary_corpus": "hmcl",
+      "negative_corpus": "junit",
+      "metrics": {
+        "entries": 4248
+      },
+      "exit_codes": [
+        0
+      ],
+      "commands": [
+        "jdec probe <HMCL>"
+      ],
+      "golden": {
+        "magic": "4d5a",
+        "entries": 4248,
+        "class_count": 3740,
+        "readable": 3740,
+        "utf8_count": 313905,
+        "unique_utf8": 63304,
+        "native_methods": 69,
+        "bsm_entries": 5420,
+        "pe_export_count": 2,
+        "pe_exports": [
+          "AmdPowerXpressRequestHighPerformance",
+          "NvOptimusEnablement"
+        ],
+        "mc": {
+          "has_mcmod": false,
+          "mentions_forge": false,
+          "mentions_189": false,
+          "metadata_files": []
+        },
+        "des_markers": {
+          "DESKeySpec": 0,
+          "DES/CBC": 0,
+          "zelix": 0,
+          "$CodePool": 0
+        },
+        "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+      },
+      "negative_metrics": {
+        "entries": 389
+      },
+      "negative_exit_codes": [
+        0
+      ],
+      "checks": [
+        {
+          "label": "机制退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]"
+        },
+        {
+          "label": "条目数等于 zipfile 原始目录条目数",
+          "ok": true,
+          "detail": "4248 vs 4248"
+        },
+        {
+          "label": "容器 magic 与独立读取一致",
+          "ok": true,
+          "detail": "4d5a"
+        },
+        {
+          "label": "阴性对照为普通 PK jar",
+          "ok": true,
+          "detail": "504b 389"
+        }
+      ],
+      "verdict": "PASS"
+    }
+  ],
+  "note": "Ground truth is recomputed by src/tests/goldens.py from zip/class/PE bytes, never read from a jdec analysis command. Negative controls are per mechanism.",
+  "passed": 8,
+  "total": 8,
+  "verdict": "PASS",
+  "acceptance_evidence_complete": true
+}

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-11-05T14:26:14.709668+00:00",
+  "generated_at": "2026-11-05T15:35:11.130785+00:00",
   "python": "3.13.14",
   "mode": "full",
   "javafx_entries": [
@@ -281,7 +281,7 @@
       ],
       "metrics": {
         "score": 4,
-        "signature": "obfuscator signature: ProGuard / R8 | obfuscator signature: ZKM 27 enhanced 字符串加密（DES）",
+        "signature": "obfuscator signature: ProGuard / R8",
         "structure": "goto-flood; indy-long; irreducible-goto; long-constant-array | goto-flood; indy-long; irreducible-goto; overload-collision",
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
@@ -302,7 +302,6 @@
         "neo": {
           "metrics": {
             "score": 4,
-            "signature": "obfuscator signature: ZKM 27 enhanced 字符串加密（DES）",
             "structure": "goto-flood; indy-long; irreducible-goto; overload-collision",
             "magic_hmcl": "4d5a",
             "magic_neo": "504b"
@@ -312,7 +311,7 @@
           ]
         }
       },
-      "rule": "退出 0；HMCL 命中 ProGuard/R8、NeoRaven 命中 ZKM 27 enhanced",
+      "rule": "退出 0；HMCL 命中 ProGuard/R8；两语料均不得误报 ZKM 27 （独立金标准确认常量池无 DESKeySpec / DES-CBC / zelix）",
       "rules": [
         {
           "kind": "all_zero_rc",
@@ -331,7 +330,7 @@
           "holds": true
         },
         {
-          "kind": "contains",
+          "kind": "absent",
           "key": "signature",
           "minimum": 0,
           "equals": "ZKM 27 enhanced",
@@ -345,7 +344,7 @@
       "id": "M5",
       "name": "字符串常量抽取与加密/威胁标签",
       "support": "从真实 jar 的常量池抽取字符串并按 url/path/credential/encrypted-blob/machine-id/class-loading 分类标注，输出 TSV+JSON",
-      "not_covered": "标签是启发式；抽取不等于解密 ZKM 池，需 pool/recover 另行重放",
+      "not_covered": "标签是启发式；抽取不等于解密字符串池；两语料经独立金标准确认无 DES 密文，encrypted-blob = 0 是正确结果，不是能力证明",
       "corpora": [
         "hmcl",
         "neo"
@@ -364,8 +363,7 @@
       ],
       "metrics": {
         "strings": 15839,
-        "tagged": 409,
-        "encrypted_blob": 8,
+        "tagged": 406,
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
       },
@@ -373,7 +371,7 @@
         "hmcl": {
           "metrics": {
             "strings": 15839,
-            "tagged": 409,
+            "tagged": 406,
             "magic_hmcl": "4d5a",
             "magic_neo": "504b"
           },
@@ -384,8 +382,7 @@
         "neo": {
           "metrics": {
             "strings": 9315,
-            "tagged": 107,
-            "encrypted_blob": 8,
+            "tagged": 101,
             "magic_hmcl": "4d5a",
             "magic_neo": "504b"
           },
@@ -394,7 +391,7 @@
           ]
         }
       },
-      "rule": "退出 0；字符串数与标签数 > 0；ZKM 语料标出 encrypted-blob",
+      "rule": "退出 0；字符串数与标签数 > 0；独立金标准确认无 DES 密文的语料不得标出 encrypted-blob（旧规则的 8 个全是内部类名假阳性）",
       "rules": [
         {
           "kind": "all_zero_rc",
@@ -421,11 +418,11 @@
           "holds": true
         },
         {
-          "kind": "min",
+          "kind": "max",
           "key": "encrypted_blob",
-          "minimum": 1,
+          "minimum": 0,
           "equals": "",
-          "scope": "neo",
+          "scope": "any",
           "holds": true
         }
       ],

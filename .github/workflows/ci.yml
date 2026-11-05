@@ -214,3 +214,7 @@ jobs:
           set -euo pipefail
           python src/tests/support_matrix.py --selfcheck --json matrix-selfcheck.json
           python -c "import json; d=json.load(open('matrix-selfcheck.json')); assert d['verdict']=='PASS' and d['stage_04_threshold_met'] is False and len(d['negative_controls'])==2"
+      # The 04 acceptance runner needs external corpora; CI proves only that
+      # its independent goldens and unit-level controls still work.
+      - name: Stage 04 acceptance selfcheck
+        run: python src/tests/stage04.py --selfcheck
