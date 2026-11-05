@@ -316,10 +316,14 @@ def run_replay(cmd: list[str], timeout: int, *, harden: bool = True,
     """
     popen_kw.setdefault("stdout", subprocess.PIPE)
     popen_kw.setdefault("stderr", subprocess.PIPE)
+    text_mode = bool(popen_kw.get("text") or popen_kw.get("encoding")
+                     or popen_kw.get("universal_newlines"))
+    empty = "" if text_mode else b""
     if harden:
         popen_kw.setdefault("env", child_env())
         if os.name == "nt":
-            popen_kw.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
+            popen_kw.setdefault("creationflags",
+                                subprocess.CREATE_NEW_PROCESS_GROUP)
         else:
             popen_kw.setdefault("start_new_session", True)
     proc = subprocess.Popen(cmd, **popen_kw)
@@ -328,24 +332,48 @@ def run_replay(cmd: list[str], timeout: int, *, harden: bool = True,
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True)
-        else:
-            try:
-                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL the group
-            except Exception:
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=30)
+            elif harden:
+                # start_new_session=True means pgid == pid, so this cannot
+                # reach the caller even if the group leader already exited.
+                os.killpg(os.getpgid(proc.pid), 9)
+            else:
+                # Without its own session the child shares OUR process group.
+                # killpg here would SIGKILL the caller (and the CI runner).
                 proc.kill()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         try:
             out, err = proc.communicate(timeout=30)
         except Exception:
-            out, err = b"", b""
+            out, err = empty, empty
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        # communicate() normally closes these; make sure a failed cleanup
+        # does not leave pipe handles open behind a CompletedProcess.
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except Exception:
+                pass
     r = subprocess.CompletedProcess(cmd, 1 if timed_out else proc.returncode,
-                                    out if out is not None else "",
-                                    err if err is not None else "")
+                                    out if out is not None else empty,
+                                    err if err is not None else empty)
     r.timed_out = timed_out  # type: ignore[attr-defined]
     return r
-
 
 def _cache_dir() -> Path:
     key = hashlib.sha256(MANAGER_SOURCE.encode("utf-8")).hexdigest()[:12]

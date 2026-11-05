@@ -44,8 +44,8 @@ macOS `~/Library/Caches/jdec/engines`）。**绝不写 site-packages**。
 # 只校验，不安装（纯本地，不开 socket）
 jdec engines --verify-only --from-dir /path/to/jdec-engines --json report.json
 
-# 从离线包安装到默认引擎目录
-jdec --engines-dir <每用户缓存> engines --offline --from-dir /path/to/jdec-engines
+# 从离线包安装到默认引擎目录（--from-dir 本身即隐含离线安装）
+jdec --engines-dir <每用户缓存> engines --from-dir /path/to/jdec-engines
 
 # 或者让 JDEC_OFFLINE 对所有调用点生效（decompile / pipeline / scorecard）
 export JDEC_OFFLINE=1
@@ -63,15 +63,20 @@ jdec ircheck target.jar
 | `JDEC_ENGINES_DIR` | 覆盖默认引擎目录（wheel 安装时仍不得指向 site-packages） |
 | `JDEC_MAVEN_MIRROR` | `--build`/在线下载时替换 Maven 基址 |
 
-`--offline` 与 `--with-ghidra` 同时给会**显式报错退出 2**，不会静默跳过或下载。
+`--from-dir` 隐含 `--offline`：指定离线包却仍从 Maven 下载是原先的不一致
+行为，现已修正。`--with-ghidra` 与 `--offline` 或 `--verify-only` 同时给都会
+**显式报错退出 2**，不会静默跳过或下载。`--json` 会自动创建父目录，报告统一
+为 UTF-8 / LF。安装失败（missing / unavailable / Ghidra 下载失败）返回 1，
+不再出现「打印 could not fetch 却退出 0」。
 
 ## 完整性
 
 `engines.available()` 只查文件大小和 zip 中央目录，**不查 sha1**。
 `engines.verify_bundle()` 与 `--verify-only` 会逐个校验 sha1 + size + zip 目录，
 返回 `ok / missing / mismatch / corrupt`；任何一个不是 `ok` 就退出 1。
-离线安装时若目标目录里已有 sha1 不符的 jar，会先删掉再从包里复制，
-避免 `available()` 把被篡改的 jar 误判为可用。
+替换采用「先取得并校验合格替代品，再写临时文件 + `os.replace` 原子替换」：
+下载或离线源失败时**保留原 jar 并记入 missing**，不再静默删除一个本来能用的
+引擎。sha1 改用 1 MiB 分块计算，峰值内存从约 5.9 MB 降到 1 MB。
 
 改一个字节的负控：
 
@@ -95,7 +100,8 @@ Ghidra Headless 是第四个、独立下载的引擎（`ghidra_engine.py` 有自
    `verify_engine_bundle.py --build` 生成离线包，`--verify` 校验。
 2. **断网段**：`HTTP_PROXY` / `HTTPS_PROXY` 指向 `http://127.0.0.1:9`、
    `NO_PROXY=""`、`JDEC_OFFLINE=1`，然后
-   `jdec engines --offline --from-dir ...` → 三条 `grep available` →
+   `jdec engines --offline --from-dir ... --json engines.json` →
+   结构化断言（missing / unavailable 为空且 bundle.ok）→
    `test ! -d <venv>/.../site-packages/engines` →
    `jdec ircheck src/tests/flow.jar` + `jdec verify src/tests/flow.jar`。
 

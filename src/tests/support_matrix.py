@@ -41,25 +41,37 @@ from jdec import container as CT  # noqa: E402
 
 @dataclass
 class Rule:
-    """A declarative pass rule evaluated against extracted metrics."""
+    """A declarative pass rule evaluated against extracted metrics.
+
+    ``scope`` decides which corpora a rule must hold for. ``all`` (default)
+    checks every declared corpus independently, ``any`` checks the aggregate
+    once, and a corpus key such as ``neo`` restricts the check to that corpus.
+    Rules whose evidence is inherently cross-corpus (joined signature text,
+    container magic injected after extraction) use ``any``.
+    """
 
     kind: str
     key: str = ""
     minimum: int = 0
     equals: str = ""
+    scope: str = "all"
 
     def holds(self, values: dict, rcs: list[int]) -> bool:
         if self.kind == "all_zero_rc":
-            return all(rc == 0 for rc in rcs)
+            return bool(rcs) and all(rc == 0 for rc in rcs)
         if self.kind == "min":
-            return values.get(self.key, 0) >= self.minimum
+            value = values.get(self.key, 0)
+            return isinstance(value, int) and value >= self.minimum
         if self.kind == "equals":
             return values.get(self.key, "") == self.equals
         if self.kind == "contains":
-            return self.equals in str(values.get(self.key, ""))
+            return bool(self.equals) and self.equals in str(values.get(self.key, ""))
         if self.kind == "pair_equal":
-            a, b = self.key.split("/")
-            return values.get(a, -1) == values.get(b, -2) and values.get(a, 0) > 0
+            if "/" not in self.key:
+                return False
+            a, b = self.key.split("/", 1)
+            va, vb = values.get(a, -1), values.get(b, -2)
+            return va == vb and va > 0
         if self.kind == "magic":
             return values.get(self.key) == self.equals
         return False
@@ -142,8 +154,8 @@ MECHANISMS: tuple[MechanismSpec, ...] = (
                  _rx("signature", r"signatures\s+: (.+)"),
                  _rx("structure", r"structure\s+: (.+)")),
         rules=(Rule("all_zero_rc"),
-               Rule("contains", "signature", equals="ProGuard / R8"),
-               Rule("contains", "signature", equals="ZKM 27 enhanced")),
+               Rule("contains", "signature", equals="ProGuard / R8", scope="any"),
+               Rule("contains", "signature", equals="ZKM 27 enhanced", scope="any")),
         rule_text="退出 0；HMCL 命中 ProGuard/R8、NeoRaven 命中 ZKM 27 enhanced",
     ),
     MechanismSpec(
@@ -157,7 +169,8 @@ MECHANISMS: tuple[MechanismSpec, ...] = (
                  _rx("tagged", r"tagged\s+: (\d+) literal"),
                  _rx("encrypted_blob", r"encrypted-blob: (\d+)")),
         rules=(Rule("all_zero_rc"), Rule("min", "strings", 1),
-               Rule("min", "tagged", 1), Rule("min", "encrypted_blob", 1)),
+               Rule("min", "tagged", 1),
+               Rule("min", "encrypted_blob", 1, scope="neo")),
         rule_text="退出 0；字符串数与标签数 > 0；ZKM 语料标出 encrypted-blob",
     ),
     MechanismSpec(
@@ -202,8 +215,8 @@ MECHANISMS: tuple[MechanismSpec, ...] = (
                  _rx("file", r"file\s+: (.+)")),
         rules=(Rule("all_zero_rc"), Rule("min", "entries", 1),
                Rule("min", "classes", 1),
-               Rule("magic", "magic_hmcl", equals="4d5a"),
-               Rule("magic", "magic_neo", equals="504b")),
+               Rule("magic", "magic_hmcl", equals="4d5a", scope="any"),
+               Rule("magic", "magic_neo", equals="504b", scope="any")),
         rule_text="退出 0；按 magic 区分 MZ 自解压 stub (4d5a) 与普通 PK jar (504b)，"
                   "两者都能读出条目与类数",
     ),
@@ -245,9 +258,14 @@ def _extract(text: str, metrics: tuple[tuple[str, str], ...]) -> dict:
 
 
 def _corpus_info(path: Path) -> dict:
-    data = path.read_bytes()
-    return {"name": path.name, "size": len(data),
-            "sha256": hashlib.sha256(data).hexdigest()}
+    """Hash in 1 MiB chunks: these corpora are 10-15 MB each."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return {"name": path.name, "size": size, "sha256": digest.hexdigest()}
 
 
 def run_mechanism(spec: MechanismSpec, corpora: dict, out: Path,
@@ -256,14 +274,18 @@ def run_mechanism(spec: MechanismSpec, corpora: dict, out: Path,
     rcs: list[int] = []
     commands: list[str] = []
     kinds: dict[str, str] = {}
+    per_texts: dict[str, list[str]] = {}
+    per_rcs: dict[str, list[int]] = {}
     for key in spec.corpora:
         jar = corpora.get(key)
         if not jar:
             continue
         kinds[key] = str(CT.kind_of(Path(jar)))
-        cp = []
+        cp: list[str] = []
         for entry in javafx:
             cp += ["--cp", entry]
+        per_texts[key] = []
+        per_rcs[key] = []
         for step in spec.steps:
             argv: list[str] = []
             for part in step:
@@ -274,6 +296,8 @@ def run_mechanism(spec: MechanismSpec, corpora: dict, out: Path,
             rc, text = _capture(argv)
             rcs.append(rc)
             texts.append(text)
+            per_rcs[key].append(rc)
+            per_texts[key].append(text)
             # The report is committed; never leak local absolute paths.
             safe: list[str] = []
             for part in argv:
@@ -287,29 +311,61 @@ def run_mechanism(spec: MechanismSpec, corpora: dict, out: Path,
             commands.append("jdec " + " ".join(safe))
     combined = "\n".join(texts)
     values = _extract(combined, spec.metrics)
+    # magic_* keys are injected AFTER _extract: they are file facts, not
+    # stdout metrics, so rules reading them must declare scope="any".
+    extras: dict[str, str] = {}
     for key in spec.corpora:
         jar = corpora.get(key)
         if jar:
             with Path(jar).open("rb") as fh:
-                values[f"magic_{key}"] = fh.read(2).hex()
-            kinds[key] = f"{kinds.get(key, '?')}/0x{values[f'magic_{key}']}"
-    passed = bool(rcs) and all(r.holds(values, rcs) for r in spec.rules)
+                extras[f"magic_{key}"] = fh.read(2).hex()
+            kinds[key] = f"{kinds.get(key, '?')}/0x{extras[f'magic_{key}']}"
+    values.update(extras)
+
+    per_values: dict[str, dict] = {}
+    for key, ctexts in per_texts.items():
+        pv = _extract("\n".join(ctexts), spec.metrics)
+        pv.update(extras)
+        per_values[key] = pv
+
+    # `_extract` keeps the MAX per metric for the report. Feeding that
+    # aggregate into a per-corpus rule let one corpus with a big number hide
+    # a zero on another, so rules are now evaluated against each corpus's own
+    # metrics. `any` rules keep the aggregate for genuinely cross-corpus facts.
+    complete = len(per_rcs) == len(spec.corpora)
+    holds: list[bool] = []
+    for rule in spec.rules:
+        if rule.scope == "any":
+            ok = rule.holds(values, rcs)
+        elif rule.scope in per_rcs:
+            ok = rule.holds(per_values[rule.scope], per_rcs[rule.scope])
+        else:
+            ok = bool(per_rcs) and all(
+                rule.holds(per_values[k], rs) for k, rs in per_rcs.items())
+        holds.append(ok)
+    passed = complete and bool(rcs) and all(holds)
     return {
         "id": spec.id, "name": spec.name, "support": spec.support,
         "not_covered": spec.not_covered, "corpora": list(spec.corpora),
         "container_kinds": kinds, "commands": commands,
-        "exit_codes": rcs, "metrics": values, "rule": spec.rule_text,
+        "exit_codes": rcs, "metrics": values,
+        "per_corpus": {k: {"metrics": per_values[k], "exit_codes": per_rcs[k]}
+                       for k in per_rcs},
+        "rule": spec.rule_text,
         "rules": [{"kind": r.kind, "key": r.key, "minimum": r.minimum,
-                   "equals": r.equals, "holds": r.holds(values, rcs)}
-                  for r in spec.rules],
+                   "equals": r.equals, "scope": r.scope, "holds": ok}
+                  for r, ok in zip(spec.rules, holds)],
         "verdict": "PASS" if passed else ("SKIP" if not rcs else "FAIL"),
     }
 
-
-def _sanitise(text: str, repo: Path) -> str:
+def _sanitise(text: str, repo: Path, out: Path | None = None) -> str:
     """Reports are committed; CLI transcripts must not carry local paths."""
-    return text.replace(str(repo), "<REPO>").replace(
+    clean = text.replace(str(repo), "<REPO>").replace(
         str(repo).replace("\\", "/"), "<REPO>")
+    if out is not None:
+        clean = clean.replace(str(out), "<WORKDIR>").replace(
+            str(out).replace("\\", "/"), "<WORKDIR>")
+    return clean
 
 
 SCOPE_NOTE = (
@@ -330,19 +386,19 @@ def negative_controls(repo: Path, out: Path) -> list[dict]:
         rc, text = _capture(["ircheck", str(sample), "--limit", "2"])
         results.append({
             "name": "a truncated class must not be reported as a clean PASS",
-            "command": "jdec ircheck src/tests/sample.jar",
+            "command": "jdec ircheck src/tests/sample.jar --limit 2",
             "exit_code": rc,
             "passed": rc != 0 or "PASS" not in text,
-            "evidence": _sanitise(text[-300:], repo),
+            "evidence": _sanitise(text[-300:], repo, out),
         })
     flow = repo / "src/tests/flow.jar"
     if flow.is_file():
         rc, text = _capture(["ircheck", str(flow), "--limit", "2"])
         results.append({
             "name": "a clean fixture must still pass the same gate",
-            "command": "jdec ircheck src/tests/flow.jar",
+            "command": "jdec ircheck src/tests/flow.jar --limit 2",
             "exit_code": rc, "passed": rc == 0 and "PASS" in text,
-            "evidence": _sanitise(text[-300:], repo),
+            "evidence": _sanitise(text[-300:], repo, out),
         })
     return results
 
@@ -392,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             report["scope"] = SCOPE_NOTE
             report["stage_04_threshold_met"] = False
             if args.json:
+                args.json.parent.mkdir(parents=True, exist_ok=True)
                 args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False),
                                      encoding="utf-8", newline="\n")
             print(f"selfcheck: {sum(n['passed'] for n in neg)}/{len(neg)} controls passed")

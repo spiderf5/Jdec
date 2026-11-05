@@ -494,6 +494,15 @@ def cmd_behave(args: argparse.Namespace) -> int:
                  or value_failed) else 0
 
 
+def _write_json_report(path, payload) -> None:
+    """Write a CLI JSON report; create parents and pin LF / UTF-8."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                      encoding="utf-8", newline="\n")
+    print(f"json      : {path}")
+
+
 def cmd_engines(args: argparse.Namespace) -> int:
     d = Path(args.engines_dir)
     offline = getattr(args, "offline", False)
@@ -501,13 +510,23 @@ def cmd_engines(args: argparse.Namespace) -> int:
     verify_only = getattr(args, "verify_only", False)
     report_path = getattr(args, "json", None)
     mirror = getattr(args, "mirror", None)
+    with_ghidra = getattr(args, "with_ghidra", False)
     if mirror:
         os.environ["JDEC_MAVEN_MIRROR"] = mirror
-    if getattr(args, "with_ghidra", False) and offline:
+    # --from-dir says "install from a pre-staged bundle". Without this the
+    # bundle was only printed for verification and the jars were still
+    # downloaded from Maven, contradicting the flag's help text.
+    offline = offline or from_dir is not None
+    if with_ghidra and offline:
         print("Ghidra is not part of the offline bundle: "
               "--with-ghidra cannot be combined with --offline")
         return 2
-    if getattr(args, "with_ghidra", False):
+    if with_ghidra and verify_only:
+        print("--verify-only is a local integrity check: "
+              "--with-ghidra cannot be combined with it")
+        return 2
+    ghidra_failed = False
+    if with_ghidra:
         gh = GE.find_ghidra(engines_dir=d)
         if not gh:
             print("Ghidra not found in engines directory; downloading ...")
@@ -515,6 +534,7 @@ def cmd_engines(args: argparse.Namespace) -> int:
                 GE.download_ghidra(d)
             except Exception as exc:
                 print(f"Failed to download Ghidra: {exc}")
+                ghidra_failed = True
         else:
             print(f"Ghidra is already present at: {gh}")
 
@@ -529,8 +549,7 @@ def cmd_engines(args: argparse.Namespace) -> int:
         report = {"engines_dir": str(d), "verify_only": True,
                   "bundle": bundle, "offline": offline}
         if report_path:
-            Path(report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
-            print(f"json      : {report_path}")
+            _write_json_report(report_path, report)
         return 0 if bundle and bundle["ok"] else 1
 
     missing = EN.ensure_engines(
@@ -548,8 +567,7 @@ def cmd_engines(args: argparse.Namespace) -> int:
     report = {"engines_dir": str(d), "offline": offline, "bundle": bundle,
               "missing": missing, "unavailable": unavailable}
     if report_path:
-        Path(report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(f"json      : {report_path}")
+        _write_json_report(report_path, report)
     if missing:
         print(f"could not fetch: {', '.join(missing)}")
     if unavailable:
@@ -557,8 +575,9 @@ def cmd_engines(args: argparse.Namespace) -> int:
         # there but the engine is not usable, so this must not report success.
         print(f"unusable: {', '.join(unavailable)} "
               "(Procyon needs javac to build its bridge)")
-        return 1
-    return 0
+    # A failed fetch / download is not a success either, even if an older jar
+    # happens to still be present and available().
+    return 1 if (missing or unavailable or ghidra_failed) else 0
 
 
 def _resolve_input(path: Path) -> tuple[Path, Path | None]:

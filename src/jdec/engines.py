@@ -44,12 +44,22 @@ def _sha1(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
+def _sha1_file(path: Path) -> str:
+    """Digest a jar in 1 MiB chunks instead of materialising all 5.9 MB."""
+    import hashlib
+    digest = hashlib.sha1()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _intact(path: Path, want_hash: str | None) -> bool:
     """A cached jar is usable only if its size and pinned sha1 still match."""
     try:
         if not path.is_file() or path.stat().st_size <= 10_000:
             return False
-        return not want_hash or _sha1(path.read_bytes()) == want_hash
+        return not want_hash or _sha1_file(path) == want_hash
     except OSError:
         return False
 
@@ -68,7 +78,7 @@ def verify_bundle(engines_dir: Path) -> dict:
             files[fname] = "missing"
             continue
         try:
-            if jar.stat().st_size <= 10_000 or _sha1(jar.read_bytes()) != want:
+            if jar.stat().st_size <= 10_000 or _sha1_file(jar) != want:
                 files[fname] = "mismatch"
                 continue
             with zipfile.ZipFile(jar) as z:
@@ -242,7 +252,10 @@ def ensure_procyon_bridge(engines_dir: Path, quiet: bool = False) -> bool:
         engines_dir / "ProcyonBridge.java",
     ]
     src = next((p for p in candidates if p.is_file()), candidates[0])
-    cls = engines_dir / "ProcyonBridge.class"
+    # The build below writes to bridge/ and available() reads from bridge/;
+    # checking engines_dir/ProcyonBridge.class meant this never short-circuited
+    # and every ensure_engines() call re-ran javac.
+    cls = engines_dir / "bridge" / "ProcyonBridge.class"
     if not src.is_file():
         return cls.is_file()
     if cls.is_file():
@@ -287,6 +300,11 @@ def ensure_engines(engines_dir: Path, want: list[str] | None = None,
     copied from ``source_dir`` and anything still absent is reported missing.
     ``JDEC_OFFLINE=1`` enables this for callers with no CLI flag (decompile,
     pipeline, scorecard).
+
+    A replacement is fully obtained and verified BEFORE the existing jar is
+    touched, and installed with an atomic ``os.replace``. Losing the download
+    or the offline source therefore leaves the previous jar in place instead
+    of silently deleting a usable one.
     """
     offline = offline or os.environ.get("JDEC_OFFLINE") == "1"
     src = Path(source_dir) if source_dir else None
@@ -300,37 +318,51 @@ def ensure_engines(engines_dir: Path, want: list[str] | None = None,
                 continue
             if dest.exists() and not quiet:
                 print(f"  ! {fname} failed verification, replacing ...")
-            # available() only checks size and the zip directory, so a jar with
-            # the wrong sha1 must not be left behind whichever mode we are in.
-            try:
-                dest.unlink(missing_ok=True)
-            except OSError:
-                missing.append(key)
-                break
+            copy_from: Path | None = None
+            new_data: bytes | None = None
             if offline:
                 candidate = (src / fname) if src else None
                 if candidate and _intact(candidate, want_hash):
-                    shutil.copy2(candidate, dest)
+                    copy_from = candidate
+                else:
+                    missing.append(key)
                     if not quiet:
-                        print(f"  installed {fname} from {src}")
-                    continue
-                missing.append(key)
-                break
-            if not quiet:
-                print(f"  downloading {fname} ...")
-            try:
-                import urllib.request
-                with urllib.request.urlopen(f"{maven_base()}/{rel}", timeout=180) as r:
-                    data = r.read()
-                if want_hash and _sha1(data) != want_hash:
+                        print(f"  ! {fname}: no verified offline copy; "
+                              "existing file left untouched")
+                    break
+            else:
+                if not quiet:
+                    print(f"  downloading {fname} ...")
+                try:
+                    import urllib.request
+                    with urllib.request.urlopen(
+                            f"{maven_base()}/{rel}", timeout=180) as r:
+                        data = r.read()
+                    if want_hash and _sha1(data) != want_hash:
+                        raise ValueError("sha1 mismatch - refusing to install")
+                    new_data = data
+                except Exception as exc:  # noqa: BLE001
                     if not quiet:
-                        print(f"  ! {fname}: sha1 mismatch - refusing to install")
+                        print(f"  ! failed: {exc}")
+                        if dest.exists():
+                            print(f"  ! {fname}: existing file left untouched")
                     missing.append(key)
                     break
-                dest.write_bytes(data)
-            except Exception as exc:  # noqa: BLE001
+            # Only now is the existing file replaced. Writing to a sibling and
+            # using os.replace keeps the old jar intact if the write fails.
+            tmp = dest.with_name(dest.name + ".jdec-tmp")
+            try:
+                if copy_from is not None:
+                    shutil.copy2(copy_from, tmp)
+                else:
+                    tmp.write_bytes(new_data if new_data is not None else b"")
+                os.replace(tmp, dest)
+                if not quiet and copy_from is not None:
+                    print(f"  installed {fname} from {src}")
+            except OSError as exc:
+                tmp.unlink(missing_ok=True)
                 if not quiet:
-                    print(f"  ! failed: {exc}")
+                    print(f"  ! {fname}: cannot install replacement: {exc}")
                 missing.append(key)
                 break
     ensure_procyon_bridge(engines_dir, quiet=quiet)

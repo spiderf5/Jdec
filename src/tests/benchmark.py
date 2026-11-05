@@ -13,7 +13,9 @@ Two comparisons are made:
     engines can actually judge, and must report zero differences;
   * negative control (original vs a mutant with one changed constant) - must
     report a difference. A harness that always says "same" is worthless, so
-    this is part of the verdict, not an optional extra.
+    this is part of the verdict, not an optional extra. External corpora have
+    no generated mutant, so the report records the control as skipped instead
+    of silently omitting it.
 
 To reproduce an external corpus instead, pass --original / --rewritten / --from
 (and --cp as many times as needed). See docs/REPRODUCE.md for the exact
@@ -140,6 +142,28 @@ def method_rows(jar: Path) -> list[str]:
     return rows
 
 
+def _redact(text: str, pairs: list[tuple[str, str]]) -> str:
+    """Reports are committed; never leak local absolute paths."""
+    for old, new in pairs:
+        if old:
+            text = text.replace(old, new)
+    return text
+
+
+def _redact_pairs(original: Path, rewritten: Path, rows_file: Path,
+                  cp: list[str]) -> list[tuple[str, str]]:
+    pairs = [(str(original), "<ORIGINAL>"),
+             (str(rewritten), "<REWRITTEN>"),
+             (str(rows_file), "<ROWS>")]
+    for directory in {str(original.parent), str(rows_file.parent),
+                      str(Path(__file__).resolve().parents[2])}:
+        pairs.append((directory, "<WORKDIR>"))
+        pairs.append((directory.replace("\\", "/"), "<WORKDIR>"))
+    for entry in cp:
+        pairs.append((str(entry), Path(entry).name))
+    return pairs
+
+
 def run_gate(original: Path, rewritten: Path, rows_file: Path,
              cp: list[str], gate: float = 0) -> dict:
     from jdec import cli as CL
@@ -155,14 +179,15 @@ def run_gate(original: Path, rewritten: Path, rows_file: Path,
     union = _UNION.search(text)
     value = _UNION_VALUE.search(text)
     diff = _DIFF.search(text)
+    pairs = _redact_pairs(original, rewritten, rows_file, cp)
     return {
-        "command": "jdec " + " ".join(cmd),
+        "command": "jdec " + " ".join(_redact(str(a), pairs) for a in cmd),
         "exit_code": rc,
         "union_judged": int(union.group(1)) if union else None,
         "union_total": int(union.group(2)) if union else None,
         "union_value": int(value.group(1)) if value else None,
         "diffs": int(diff.group(1)) if diff else None,
-        "stdout": text,
+        "stdout": _redact(text, pairs),
     }
 
 
@@ -209,7 +234,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="keep the generated fixture in this directory")
     args = p.parse_args(argv)
 
-    external = args.original is not None
+    external = any(x is not None for x in
+                   (args.original, args.rewritten, args.rows))
+    if external and args.original is None:
+        p.error("--original is required when --rewritten or --from is given")
     if external and args.rows is None:
         p.error("--from is required with --original (the method list is part of the recipe)")
 
@@ -247,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             "mode": mode,
             "environment": environment(),
             "methods": methods,
-            "classpath": [str(Path(c).resolve()) for c in args.cp],
+            "classpath": [Path(c).name for c in args.cp],
             "note": ("The builtin fixture is a deterministic gate regression, "
                      "not a replacement for the 411-method HMCL corpus. "
                      "docs/REPRODUCE.md records that recipe and the 83.0% / "
@@ -267,6 +295,14 @@ def main(argv: list[str] | None = None) -> int:
             report["negative_control"] = negative
             report["negative_control_detected"] = detected
             verdict_ok = verdict_ok and detected
+        else:
+            # External corpora have no generated mutant. Say so explicitly so
+            # a "PASS" cannot be mistaken for a passed negative control.
+            report["negative_control"] = None
+            report["negative_control_detected"] = None
+            report["negative_control_note"] = (
+                "skipped: an external corpus has no generated mutant; "
+                "run the builtin benchmark for the negative control")
 
         report["verdict"] = "PASS" if verdict_ok else "FAIL"
         report["source_sha256"] = (hashlib.sha256(JAVA_SOURCE.encode("utf-8"))
@@ -275,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             args.json.parent.mkdir(parents=True, exist_ok=True)
             args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False),
-                                 encoding="utf-8")
+                                 encoding="utf-8", newline="\n")
 
         union = identity["union_judged"]
         total = identity["union_total"]

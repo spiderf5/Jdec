@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-11-05T13:54:41.029597+00:00",
+  "generated_at": "2026-11-05T14:26:14.709668+00:00",
   "python": "3.13.14",
   "mode": "full",
   "javafx_entries": [
@@ -36,6 +36,30 @@
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
       },
+      "per_corpus": {
+        "hmcl": {
+          "metrics": {
+            "rewritten": 411,
+            "verified": 3693,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        },
+        "neo": {
+          "metrics": {
+            "rewritten": 196,
+            "verified": 1120,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        }
+      },
       "rule": "退出 0；改写方法数 > 0；verify 通过类数 > 0 且无拒绝",
       "rules": [
         {
@@ -43,6 +67,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -50,6 +75,7 @@
           "key": "rewritten",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -57,6 +83,7 @@
           "key": "verified",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         }
       ],
@@ -93,6 +120,38 @@
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
       },
+      "per_corpus": {
+        "hmcl": {
+          "metrics": {
+            "classes": 3740,
+            "unreadable": 0,
+            "cls_ok": 3740,
+            "cls_total": 3740,
+            "code_ok": 29395,
+            "code_total": 29395,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        },
+        "neo": {
+          "metrics": {
+            "classes": 1534,
+            "unreadable": 0,
+            "cls_ok": 1534,
+            "cls_total": 1534,
+            "code_ok": 13553,
+            "code_total": 13553,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        }
+      },
       "rule": "退出 0；result=PASS；类与 Code 数组的相等数等于总数",
       "rules": [
         {
@@ -100,6 +159,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -107,6 +167,7 @@
           "key": "cls_ok",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -114,6 +175,7 @@
           "key": "cls_ok/cls_total",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -121,6 +183,7 @@
           "key": "code_ok/code_total",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         }
       ],
@@ -152,6 +215,28 @@
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
       },
+      "per_corpus": {
+        "hmcl": {
+          "metrics": {
+            "sites": 6245,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        },
+        "neo": {
+          "metrics": {
+            "sites": 150,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        }
+      },
       "rule": "退出 0；两个语料都枚举出 > 0 个 indy 站点",
       "rules": [
         {
@@ -159,6 +244,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -166,6 +252,7 @@
           "key": "sites",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         }
       ],
@@ -199,6 +286,32 @@
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
       },
+      "per_corpus": {
+        "hmcl": {
+          "metrics": {
+            "score": 0,
+            "signature": "obfuscator signature: ProGuard / R8",
+            "structure": "goto-flood; indy-long; irreducible-goto; long-constant-array",
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        },
+        "neo": {
+          "metrics": {
+            "score": 4,
+            "signature": "obfuscator signature: ZKM 27 enhanced 字符串加密（DES）",
+            "structure": "goto-flood; indy-long; irreducible-goto; overload-collision",
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        }
+      },
       "rule": "退出 0；HMCL 命中 ProGuard/R8、NeoRaven 命中 ZKM 27 enhanced",
       "rules": [
         {
@@ -206,6 +319,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -213,6 +327,7 @@
           "key": "signature",
           "minimum": 0,
           "equals": "ProGuard / R8",
+          "scope": "any",
           "holds": true
         },
         {
@@ -220,6 +335,7 @@
           "key": "signature",
           "minimum": 0,
           "equals": "ZKM 27 enhanced",
+          "scope": "any",
           "holds": true
         }
       ],
@@ -253,6 +369,31 @@
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
       },
+      "per_corpus": {
+        "hmcl": {
+          "metrics": {
+            "strings": 15839,
+            "tagged": 409,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        },
+        "neo": {
+          "metrics": {
+            "strings": 9315,
+            "tagged": 107,
+            "encrypted_blob": 8,
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        }
+      },
       "rule": "退出 0；字符串数与标签数 > 0；ZKM 语料标出 encrypted-blob",
       "rules": [
         {
@@ -260,6 +401,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -267,6 +409,7 @@
           "key": "strings",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -274,6 +417,7 @@
           "key": "tagged",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -281,6 +425,7 @@
           "key": "encrypted_blob",
           "minimum": 1,
           "equals": "",
+          "scope": "neo",
           "holds": true
         }
       ],
@@ -311,6 +456,20 @@
         "native_methods": 69,
         "magic_hmcl": "4d5a"
       },
+      "per_corpus": {
+        "hmcl": {
+          "metrics": {
+            "libs": 1,
+            "exports": 2,
+            "native_methods": 69,
+            "magic_hmcl": "4d5a"
+          },
+          "exit_codes": [
+            0,
+            0
+          ]
+        }
+      },
       "rule": "退出 0；HMCL 提取出 PE 库、导出表项与 Java 侧 native 方法",
       "rules": [
         {
@@ -318,6 +477,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -325,6 +485,7 @@
           "key": "libs",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -332,6 +493,7 @@
           "key": "exports",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -339,6 +501,7 @@
           "key": "native_methods",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         }
       ],
@@ -368,6 +531,19 @@
         "mixin_note": "mixin/transformer (16), xyz/daikirai/music (16) | no mixin config in metadata; hooks found by scanning annotations",
         "magic_neo": "504b"
       },
+      "per_corpus": {
+        "neo": {
+          "metrics": {
+            "minecraft": "yes 1.8.9 / Forge",
+            "mixin_note": "mixin/transformer (16), xyz/daikirai/music (16) | no mixin config in metadata; hooks found by scanning annotations",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0,
+            0
+          ]
+        }
+      },
       "rule": "退出 0；NeoRaven 识别为 1.8.9 / Forge，且 analyze 输出 Mixin 说明",
       "rules": [
         {
@@ -375,6 +551,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -382,6 +559,7 @@
           "key": "minecraft",
           "minimum": 0,
           "equals": "1.8.9",
+          "scope": "all",
           "holds": true
         },
         {
@@ -389,6 +567,7 @@
           "key": "minecraft",
           "minimum": 0,
           "equals": "Forge",
+          "scope": "all",
           "holds": true
         }
       ],
@@ -422,6 +601,32 @@
         "magic_hmcl": "4d5a",
         "magic_neo": "504b"
       },
+      "per_corpus": {
+        "hmcl": {
+          "metrics": {
+            "entries": 4248,
+            "classes": 3740,
+            "file": "HMCL-3.15.2.exe",
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        },
+        "neo": {
+          "metrics": {
+            "entries": 1767,
+            "classes": 1534,
+            "file": "NeoRaven1.1.jar",
+            "magic_hmcl": "4d5a",
+            "magic_neo": "504b"
+          },
+          "exit_codes": [
+            0
+          ]
+        }
+      },
       "rule": "退出 0；按 magic 区分 MZ 自解压 stub (4d5a) 与普通 PK jar (504b)，两者都能读出条目与类数",
       "rules": [
         {
@@ -429,6 +634,7 @@
           "key": "",
           "minimum": 0,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -436,6 +642,7 @@
           "key": "entries",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -443,6 +650,7 @@
           "key": "classes",
           "minimum": 1,
           "equals": "",
+          "scope": "all",
           "holds": true
         },
         {
@@ -450,6 +658,7 @@
           "key": "magic_hmcl",
           "minimum": 0,
           "equals": "4d5a",
+          "scope": "any",
           "holds": true
         },
         {
@@ -457,6 +666,7 @@
           "key": "magic_neo",
           "minimum": 0,
           "equals": "504b",
+          "scope": "any",
           "holds": true
         }
       ],
@@ -466,14 +676,14 @@
   "negative_controls": [
     {
       "name": "a truncated class must not be reported as a clean PASS",
-      "command": "jdec ircheck src/tests/sample.jar",
+      "command": "jdec ircheck src/tests/sample.jar --limit 2",
       "exit_code": 3,
       "passed": true,
       "evidence": "sses   : 10 (1 unreadable)\nclass     : 10/10 byte-identical\nmethod    : 45/45 Code arrays byte-identical\nno code   : 1 abstract/native method(s)\nelapsed   : 0.00s\nresult    : PARTIAL (not everything was checked)\nexit 3: never checked: 1 unreadable class(es) (pass --allow-undecodable to accept that)\n"
     },
     {
       "name": "a clean fixture must still pass the same gate",
-      "command": "jdec ircheck src/tests/flow.jar",
+      "command": "jdec ircheck src/tests/flow.jar --limit 2",
       "exit_code": 0,
       "passed": true,
       "evidence": "target    : <REPO>\\src\\tests\\flow.jar\nclasses   : 4 (0 unreadable)\nclass     : 4/4 byte-identical\nmethod    : 12/12 Code arrays byte-identical\nelapsed   : 0.00s\nresult    : PASS\n"

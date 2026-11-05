@@ -6557,16 +6557,17 @@ def test_offline_engine_bundle() -> None:
             good.mkdir()
             for name in EN._SHA1:
                 shutil.copy2(ENGINES_DIR / name, good / name)
-            check("a real bundle verifies", EN.verify_bundle(good)["ok"] is True,
-                  str(EN.verify_bundle(good)))
+            good_report = EN.verify_bundle(good)
+            check("a real bundle verifies", good_report["ok"] is True,
+                  str(good_report))
             bad = root / "bad"
             shutil.copytree(good, bad)
             first = next(iter(EN._SHA1))
             with (bad / first).open("ab") as fh:
                 fh.write(b"x")
+            bad_report = EN.verify_bundle(bad)
             check("a tampered jar fails verification",
-                  EN.verify_bundle(bad)["files"][first] == "mismatch",
-                  str(EN.verify_bundle(bad)))
+                  bad_report["files"][first] == "mismatch", str(bad_report))
         else:
             print("  (skipped: real engine jars not present)")
 
@@ -6662,6 +6663,347 @@ def test_support_matrix_selfcheck() -> None:
     check("every mechanism names at least one real corpus",
           all(m.corpora and set(m.corpora) <= {"hmcl", "neo"}
               for m in SM.MECHANISMS))
+
+
+def test_replay_timeout_cleanup() -> None:
+    """A timed-out replay must never kill the caller or leak a child."""
+    print("sandbox: timeout cleanup is confined to the replay process")
+    import subprocess
+    from unittest.mock import MagicMock, patch
+    from jdec import sandbox as SBX
+
+    def timed_out_proc():
+        proc = MagicMock()
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired("java", 1), ("", "")]
+        proc.pid = 12345
+        proc.returncode = 0
+        return proc
+
+    # POSIX + harden=False: the child shares OUR process group, so killpg
+    # would SIGKILL the caller. Only proc.kill() is allowed.
+    proc = timed_out_proc()
+    with patch.object(SBX.subprocess, "Popen", return_value=proc), \
+         patch.object(SBX.os, "name", "posix"), \
+         patch.object(SBX.os, "getpgid", return_value=999, create=True), \
+         patch.object(SBX.os, "killpg", create=True) as killpg:
+        r = SBX.run_replay(["java"], 1, harden=False, text=True)
+    check("a timeout is reported", r.timed_out is True)
+    check("harden=False never kills a process group", killpg.call_count == 0,
+          str(killpg.call_args_list))
+    check("the child is still killed", proc.kill.call_count >= 1)
+    check("text mode keeps a str stdout", isinstance(r.stdout, str),
+          type(r.stdout).__name__)
+
+    # The terminating command itself failing must not crash the replay.
+    proc = timed_out_proc()
+    with patch.object(SBX.subprocess, "Popen", return_value=proc), \
+         patch.object(SBX.os, "name", "nt"), \
+         patch.object(SBX.subprocess, "run",
+                      side_effect=OSError("taskkill missing")):
+        try:
+            r = SBX.run_replay(["java"], 1, harden=True)
+            check("a failed terminator still returns a result",
+                  r.timed_out is True, str(r))
+        except Exception as exc:
+            check("a failed terminator still returns a result", False,
+                  f"{type(exc).__name__}: {exc}")
+
+    # harden=True keeps the process-group kill (the original behaviour).
+    proc = timed_out_proc()
+    with patch.object(SBX.subprocess, "Popen", return_value=proc), \
+         patch.object(SBX.os, "name", "posix"), \
+         patch.object(SBX.os, "getpgid", return_value=54321, create=True), \
+         patch.object(SBX.os, "killpg", create=True) as killpg:
+        SBX.run_replay(["java"], 1, harden=True)
+    check("harden=True still kills the child's group",
+          killpg.call_count == 1, str(killpg.call_args_list))
+
+    # A second communicate timeout must reap the child and close the pipes.
+    proc = MagicMock()
+    proc.communicate.side_effect = [subprocess.TimeoutExpired("java", 1),
+                                   subprocess.TimeoutExpired("java", 30)]
+    proc.pid = 12345
+    proc.returncode = 0
+    with patch.object(SBX.subprocess, "Popen", return_value=proc), \
+         patch.object(SBX.os, "name", "nt"):
+        r = SBX.run_replay(["java"], 1, harden=True, text=True)
+    check("a stuck child is reaped", proc.kill.call_count >= 1
+          and proc.wait.call_count >= 1,
+          f"kill={proc.kill.call_count} wait={proc.wait.call_count}")
+    check("pipes are closed", proc.stdout.close.called and
+          proc.stderr.close.called)
+    check("empty timeout output matches text mode",
+          isinstance(r.stdout, str) and isinstance(r.stderr, str))
+
+
+def test_engine_install_safety() -> None:
+    """A failed replacement must not delete the jar it cannot replace."""
+    print("engines: replacement is prepared before the old jar is touched")
+    import io
+    import shutil
+    import zipfile
+    import contextlib
+    from unittest.mock import patch
+    from jdec import engines as EN
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+
+        def make_jar(path: Path) -> None:
+            with zipfile.ZipFile(path, "w") as z:
+                z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+            with path.open("ab") as fh:
+                fh.write(b"0" * 20000)
+
+        offline_dir = root / "offline"
+        offline_dir.mkdir()
+        jar = offline_dir / "cfr-0.152.jar"
+        make_jar(jar)
+        with contextlib.redirect_stdout(io.StringIO()):
+            missing = EN.ensure_engines(offline_dir, want=["cfr"],
+                                        offline=True, quiet=True)
+        check("offline with no source keeps the existing jar", jar.is_file())
+        check("offline with no source reports the engine missing",
+              missing == ["cfr"], str(missing))
+        check("no temp file is left behind",
+              not list(offline_dir.glob("*.jdec-tmp")))
+
+        online_dir = root / "online"
+        online_dir.mkdir()
+        jar2 = online_dir / "cfr-0.152.jar"
+        make_jar(jar2)
+        with patch("urllib.request.urlopen", side_effect=OSError("offline")), \
+             patch.object(EN, "ensure_procyon_bridge", return_value=True):
+            with contextlib.redirect_stdout(io.StringIO()):
+                missing = EN.ensure_engines(online_dir, want=["cfr"], quiet=True)
+        check("a failed download keeps the existing jar", jar2.is_file())
+        check("a failed download is reported", missing == ["cfr"], str(missing))
+
+        # A verified offline source still installs, atomically.
+        bundle = root / "bundle"
+        bundle.mkdir()
+        for name in EN._SHA1:
+            src = ENGINES_DIR / name
+            if src.is_file():
+                shutil.copy2(src, bundle / name)
+        if (bundle / "cfr-0.152.jar").is_file():
+            target = root / "target"
+            with contextlib.redirect_stdout(io.StringIO()):
+                missing = EN.ensure_engines(
+                    target, want=["cfr"], offline=True, quiet=True,
+                    source_dir=bundle)
+            check("a verified offline source installs cleanly",
+                  missing == [], str(missing))
+            check("the installed jar matches the pinned sha1",
+                  EN._intact(target / "cfr-0.152.jar",
+                             EN._SHA1["cfr-0.152.jar"]))
+
+        # Streamed digest must equal the whole-buffer digest.
+        probe = root / "probe.bin"
+        probe.write_bytes(b"jdec" * 4096)
+        check("streamed sha1 matches the whole-buffer sha1",
+              EN._sha1_file(probe) == EN._sha1(probe.read_bytes()))
+
+        # The bridge short-circuit now points at the path javac writes to.
+        bridge = root / "bridge"
+        bridge.mkdir()
+        (bridge / "ProcyonBridge.class").write_bytes(b"x")
+        with patch.object(EN, "find_javac") as javac:
+            check("an existing bridge skips javac",
+                  EN.ensure_procyon_bridge(root, quiet=True) is True)
+            check("javac is not started", javac.call_count == 0)
+
+
+def test_engines_cli_consistency() -> None:
+    """Flags that promise 'local only' / 'install' must keep that promise."""
+    print("engines: CLI flag combinations and exit codes")
+    import io
+    import contextlib
+    import types
+    from unittest.mock import patch
+    from jdec import cli_commands as CC
+    from jdec import engines as EN
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+
+        def ns(**kw):
+            base = dict(engines_dir=str(root / "eng"), offline=False,
+                        from_dir=None, verify_only=False, json=None,
+                        mirror=None, with_ghidra=False)
+            base.update(kw)
+            return types.SimpleNamespace(**base)
+
+        fake_eng = {k: types.SimpleNamespace(label=k, available=lambda d: True)
+                    for k in ("cfr", "vineflower", "procyon")}
+        with patch.object(CC.GE, "find_ghidra", return_value=None), \
+             patch.object(CC.GE, "download_ghidra") as download:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = CC.cmd_engines(ns(verify_only=True, with_ghidra=True))
+            check("--verify-only refuses --with-ghidra", rc == 2, str(rc))
+            check("--verify-only never downloads Ghidra",
+                  download.call_count == 0)
+
+        with patch.object(CC.GE, "find_ghidra", return_value=None), \
+             patch.object(CC.GE, "download_ghidra",
+                          side_effect=RuntimeError("network down")), \
+             patch.object(EN, "ensure_engines", return_value=[]), \
+             patch.object(EN, "ENGINES", fake_eng):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = CC.cmd_engines(ns(with_ghidra=True))
+            check("a failed Ghidra download is not a success", rc == 1, str(rc))
+
+        (root / "bundle").mkdir()
+        with patch("urllib.request.urlopen") as urlopen, \
+             patch.object(EN, "ensure_procyon_bridge", return_value=True):
+            with contextlib.redirect_stdout(io.StringIO()):
+                CC.cmd_engines(ns(from_dir=str(root / "bundle")))
+            check("--from-dir alone never touches the network",
+                  urlopen.call_count == 0, str(urlopen.call_count))
+
+        with patch.object(EN, "ensure_engines", return_value=["cfr"]), \
+             patch.object(EN, "ENGINES", fake_eng), \
+             patch.object(CC.GE, "find_ghidra", return_value=None):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = CC.cmd_engines(ns())
+            check("a failed fetch is reflected in the exit code",
+                  rc == 1, str(rc))
+
+        report = root / "nested" / "deep" / "engines.json"
+        with patch.object(EN, "ensure_engines", return_value=[]), \
+             patch.object(EN, "ENGINES", fake_eng), \
+             patch.object(CC.GE, "find_ghidra", return_value=None):
+            with contextlib.redirect_stdout(io.StringIO()):
+                CC.cmd_engines(ns(json=str(report)))
+        check("--json creates its parent directories", report.is_file())
+        check("the report is valid JSON",
+              isinstance(json.loads(report.read_text(encoding="utf-8")), dict))
+        check("the report uses LF endings",
+              b"\r" not in report.read_bytes())
+
+
+def test_support_matrix_per_corpus_gate() -> None:
+    """One corpus with a zero must not be hidden by another corpus's count."""
+    print("support matrix: per-corpus rules and report hygiene")
+    import io
+    import contextlib
+    import support_matrix as SM
+
+    spec = SM.MECHANISMS[0]
+    original = SM._capture
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        a, b = root / "a.bin", root / "b.bin"
+        a.write_bytes(b"MZ" + b"x" * 100)
+        b.write_bytes(b"PK" + b"x" * 100)
+
+        calls = {"n": 0}
+
+        def one_corpus_is_zero(argv):
+            calls["n"] += 1
+            n = "411" if calls["n"] == 1 else "0"
+            return 0, (f"deflat     : {n} method(s) rewritten\n"
+                       "verify     : 3693 class(es) pass\n")
+
+        SM._capture = one_corpus_is_zero
+        try:
+            bad = SM.run_mechanism(spec, {"hmcl": a, "neo": b}, root, [])
+        finally:
+            SM._capture = original
+        check("a zero on one corpus fails the mechanism",
+              bad["verdict"] == "FAIL", bad["verdict"])
+        check("the per-corpus numbers are both recorded",
+              bad["per_corpus"]["hmcl"]["metrics"]["rewritten"] == 411
+              and bad["per_corpus"]["neo"]["metrics"]["rewritten"] == 0,
+              str(bad["per_corpus"]))
+        check("the aggregate report number is unchanged",
+              bad["metrics"]["rewritten"] == 411, str(bad["metrics"]))
+        check("rules are evaluated once", len(bad["rules"]) == len(spec.rules))
+
+        out = root / "nested" / "selfcheck.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = SM.main(["--selfcheck", "--json", str(out)])
+        check("--selfcheck --json creates its parent", out.is_file() and rc == 0,
+              str(rc))
+        data = json.loads(out.read_text(encoding="utf-8"))
+        check("the selfcheck report declares its scope",
+              data["stage_04_threshold_met"] is False)
+
+    check("pair_equal without a slash is rejected",
+          SM.Rule("pair_equal", "nonsense").holds({}, [0]) is False)
+    check("contains with an empty needle is rejected",
+          SM.Rule("contains", "x", equals="").holds({"x": "anything"}, [0])
+          is False)
+    check("min against a text value is rejected",
+          SM.Rule("min", "x", 1).holds({"x": "411"}, [0]) is False)
+    check("all_zero_rc on an empty result is False",
+          SM.Rule("all_zero_rc").holds({}, []) is False)
+
+    # ROOT here is src/, while support_matrix.ROOT is the repository root.
+    committed = SM.ROOT / "docs" / "SUPPORT_MATRIX_REPORT.json"
+    if committed.is_file():
+        report = json.loads(committed.read_text(encoding="utf-8"))
+        check("the committed report still matches the registry",
+              report["total"] == len(SM.MECHANISMS)
+              and [m["id"] for m in report["mechanisms"]]
+              == [m.id for m in SM.MECHANISMS],
+              str(report.get("total")))
+        check("the committed report records per-corpus evidence",
+              all("per_corpus" in m for m in report["mechanisms"]))
+
+
+def test_benchmark_report_hygiene() -> None:
+    """The committed benchmark report must not leak local paths."""
+    print("benchmark: report hygiene and argument validation")
+    import io
+    import contextlib
+    import benchmark as BM
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        out = root / "report.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = BM.main(["--json", str(out)])
+        check("the builtin benchmark still passes", rc == 0, str(rc))
+        data = json.loads(out.read_text(encoding="utf-8"))
+        blob = json.dumps(data, ensure_ascii=False)
+        check("no local absolute path leaks into the report",
+              not any(n in blob for n in ("AppData", "Users", "D:/MC")),
+              data["comparison"]["command"][:120])
+        check("the command still records the gate",
+              "--engine both" in data["comparison"]["command"])
+        check("classpath entries are basenames",
+              all("/" not in c and "\\" not in c
+                  for c in data["classpath"]), str(data["classpath"]))
+        check("the report uses LF endings", b"\r" not in out.read_bytes())
+        check("builtin mode reports a real negative control",
+              data["negative_control_detected"] is True)
+
+        # External mode: the control is explicitly marked as skipped.
+        rows = root / "rows.tsv"
+        rows.write_text("a/A\tm\t(I)V\n", encoding="utf-8")
+        ext = root / "ext.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            BM.main(["--original", str(root / "a.jar"), "--from", str(rows),
+                     "--json", str(ext)])
+        if ext.is_file():
+            d = json.loads(ext.read_text(encoding="utf-8"))
+            check("external mode marks its negative control as skipped",
+                  d["negative_control"] is None
+                  and d["negative_control_detected"] is None
+                  and "skipped" in d["negative_control_note"],
+                  str(d.get("negative_control_detected")))
+
+    # A half-specified external recipe must not silently run the builtin one.
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buf):
+            BM.main(["--rewritten", "x.jar"])
+        check("half-specified external mode is rejected", False, "no error")
+    except SystemExit as exc:
+        check("half-specified external mode is rejected", exc.code == 2,
+              str(exc.code))
 
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
@@ -8050,6 +8392,11 @@ def main() -> int:
     test_benchmark_is_reproducible()
     test_offline_engine_bundle()
     test_union_denominator_guard()
+    test_replay_timeout_cleanup()
+    test_engine_install_safety()
+    test_engines_cli_consistency()
+    test_support_matrix_per_corpus_gate()
+    test_benchmark_report_hygiene()
     test_nativedb_bundle()
     test_support_matrix_selfcheck()
     test_frame_generation()
