@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-11-05T13:32:54.762206+00:00",
+  "generated_at": "2026-11-05T13:54:41.029597+00:00",
   "python": "3.13.14",
   "mode": "full",
   "javafx_entries": [
@@ -476,7 +476,7 @@
       "command": "jdec ircheck src/tests/flow.jar",
       "exit_code": 0,
       "passed": true,
-      "evidence": "target    : D:\\MC\\Jdec\\src\\tests\\flow.jar\nclasses   : 4 (0 unreadable)\nclass     : 4/4 byte-identical\nmethod    : 12/12 Code arrays byte-identical\nelapsed   : 0.00s\nresult    : PASS\n"
+      "evidence": "target    : <REPO>\\src\\tests\\flow.jar\nclasses   : 4 (0 unreadable)\nclass     : 4/4 byte-identical\nmethod    : 12/12 Code arrays byte-identical\nelapsed   : 0.00s\nresult    : PASS\n"
     }
   ],
   "note": "Real corpora stay outside the tree; generated fixtures are negative controls only and are NOT independent samples.",
@@ -495,5 +495,7 @@
   "missing_corpora": [],
   "passed": 8,
   "total": 8,
-  "verdict": "PASS"
+  "verdict": "PASS",
+  "scope": "Diagnostic CLI smoke checks only. PASS means eight EXISTING CLI commands ran on two real jars and produced non-empty numbers of the expected shape. It is NOT evidence that ROADMAP stage 04 is met: no mechanism implementation was added by this harness, most rules are self-referential existence checks, and the strict 'independent sample regression per mechanism' is unverified. See docs/SUPPORT_MATRIX.md section 9.",
+  "stage_04_threshold_met": false
 }

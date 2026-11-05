@@ -306,6 +306,22 @@ def run_mechanism(spec: MechanismSpec, corpora: dict, out: Path,
     }
 
 
+def _sanitise(text: str, repo: Path) -> str:
+    """Reports are committed; CLI transcripts must not carry local paths."""
+    return text.replace(str(repo), "<REPO>").replace(
+        str(repo).replace("\\", "/"), "<REPO>")
+
+
+SCOPE_NOTE = (
+    "Diagnostic CLI smoke checks only. PASS means eight EXISTING CLI commands "
+    "ran on two real jars and produced non-empty numbers of the expected shape. "
+    "It is NOT evidence that ROADMAP stage 04 is met: no mechanism implementation "
+    "was added by this harness, most rules are self-referential existence checks, "
+    "and the strict 'independent sample regression per mechanism' is unverified. "
+    "See docs/SUPPORT_MATRIX.md section 9."
+)
+
+
 def negative_controls(repo: Path, out: Path) -> list[dict]:
     """In-repo fixtures only: prove the gates are not vacuously true."""
     results = []
@@ -317,7 +333,7 @@ def negative_controls(repo: Path, out: Path) -> list[dict]:
             "command": "jdec ircheck src/tests/sample.jar",
             "exit_code": rc,
             "passed": rc != 0 or "PASS" not in text,
-            "evidence": text[-300:],
+            "evidence": _sanitise(text[-300:], repo),
         })
     flow = repo / "src/tests/flow.jar"
     if flow.is_file():
@@ -326,7 +342,7 @@ def negative_controls(repo: Path, out: Path) -> list[dict]:
             "name": "a clean fixture must still pass the same gate",
             "command": "jdec ircheck src/tests/flow.jar",
             "exit_code": rc, "passed": rc == 0 and "PASS" in text,
-            "evidence": text[-300:],
+            "evidence": _sanitise(text[-300:], repo),
         })
     return results
 
@@ -373,9 +389,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.selfcheck:
             ok = bool(neg) and all(n["passed"] for n in neg)
             report["verdict"] = "PASS" if ok else "FAIL"
+            report["scope"] = SCOPE_NOTE
+            report["stage_04_threshold_met"] = False
             if args.json:
                 args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False),
-                                     encoding="utf-8")
+                                     encoding="utf-8", newline="\n")
             print(f"selfcheck: {sum(n['passed'] for n in neg)}/{len(neg)} controls passed")
             return 0 if ok else 1
 
@@ -399,10 +417,12 @@ def main(argv: list[str] | None = None) -> int:
         report["passed"] = passed
         report["total"] = len(MECHANISMS)
         report["verdict"] = "PASS" if overall else "FAIL"
+        report["scope"] = SCOPE_NOTE
+        report["stage_04_threshold_met"] = False
         if args.json:
             args.json.parent.mkdir(parents=True, exist_ok=True)
             args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False),
-                                 encoding="utf-8")
+                                 encoding="utf-8", newline="\n")
         print(f"\nsupport matrix: {passed}/{len(MECHANISMS)} mechanisms PASS, "
               f"{sum(n['passed'] for n in neg)}/{len(neg)} negative controls, "
               f"verdict {report['verdict']}")
