@@ -11,6 +11,7 @@ and on a cheat client it is often more productive than reading decompiled code.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import zipfile
@@ -46,9 +47,32 @@ _SUSPICIOUS = (
     (re.compile(r"api[.]telegram[.]org/bot[0-9]+:[A-Za-z0-9_-]+", re.I), "telegram"),
     (re.compile(r"pastebin[.]com|raw[.]githubusercontent[.]com|ngrok[.]io|ngrok-free[.]app|hastebin[.]com|rentry[.]co", re.I), "c2-staging"),
     (re.compile(r"(?:(?<![A-Za-z0-9])[13][a-km-zA-HJ-NP-Z1-9]{25,34}(?![A-Za-z0-9])|(?<![A-Za-z0-9])0x[a-fA-F0-9]{40}(?![A-Za-z0-9]))"), "crypto"),
-    (re.compile(r"^[A-Za-z0-9+/]{48,}={0,2}$"), "encrypted-blob"),
-    (re.compile(r"^[0-9a-fA-F]{48,}$"), "encrypted-blob"),
 )
+
+_BLOB_B64 = re.compile(r"^[A-Za-z0-9+/]{48,}={0,2}$")
+_BLOB_HEX = re.compile(r"^[0-9a-fA-F]{64,}$")
+# `com/foo/Bar` is a constant-pool internal name, not ciphertext. The old
+# base64 character class included '/', so every long FQCN was tagged as a
+# blob (8 false positives on NeoRaven1.1.jar).
+_INTERNAL_NAME = re.compile(r"^[0-9A-Za-z_$][\w$]*(?:/[A-Za-z_$][\w$]*){2,}")
+
+
+def _encrypted_blob(s: str) -> bool:
+    """A blob must decode to >=32 non-printable-ish bytes, not be a class name."""
+    if _INTERNAL_NAME.match(s):
+        return False
+    if _BLOB_HEX.fullmatch(s) and len(s) % 2 == 0:
+        return True
+    if not _BLOB_B64.fullmatch(s) or len(s) % 4:
+        return False
+    try:
+        raw = base64.b64decode(s, validate=True)
+    except ValueError:
+        return False
+    if len(raw) < 32:
+        return False
+    printable = sum(1 for b in raw if 32 <= b < 127) / len(raw)
+    return printable < 0.9
 
 
 def classify(s: str) -> list[str]:
@@ -64,6 +88,8 @@ def classify(s: str) -> list[str]:
             continue
         if rx.search(s):
             out.append(label)
+    if "encrypted-blob" not in out and _encrypted_blob(s):
+        out.append("encrypted-blob")
     return out
 
 

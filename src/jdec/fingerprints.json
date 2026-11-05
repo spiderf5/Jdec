@@ -23,9 +23,11 @@
       "keywords": [
         "des/cbc/pkcs5padding",
         "deskeyspec",
-        "javax/crypto/spec/ivparameterspec"
+        "zelix"
       ],
-      "tool": "java-deobfuscator 的 zelix.StringEncryptionTransformer（执行引擎；key 藏在多层常量折叠 + indy 里，手写 DES 还原成本过高）"
+      "tool": "java-deobfuscator 的 zelix.StringEncryptionTransformer（执行引擎；key 藏在多层常量折叠 + indy 里，手写 DES 还原成本过高）",
+      "min_keywords": 2,
+      "_note": "javax/crypto/spec/ivparameterspec was removed: AES-CBC clients use the same IvParameterSpec, which produced a confirmed false positive on NeoRaven1.1.jar."
     },
     {
       "name": "JNIC",
@@ -219,7 +221,9 @@
       "keywords": [
         "sentinel"
       ],
-      "tool": "无公开 transformer，需手工分析"
+      "tool": "无公开 transformer，需手工分析",
+      "auto_attribute": false,
+      "_note": "Single generic word 'sentinel' also occurs in ordinary libraries (confirmed on junit 4.13.2); this entry is a research note, never an automatic obfuscator attribution."
     },
     {
       "name": "XenonGuard",

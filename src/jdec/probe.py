@@ -314,8 +314,16 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
         blob += "\n" + "\n".join(cp_strings).lower()
     for item in _load_fingerprints():
         name = item.get("name")
+        if item.get("auto_attribute") is False:
+            # Research-only entries (e.g. a single generic English word) must
+            # never become an automatic attribution.
+            continue
         kws = item.get("keywords", [])
-        if any(kw.lower() in blob for kw in kws):
+        # Some families share a generic JDK marker with unrelated clients
+        # (IvParameterSpec is used by AES-CBC too). `min_keywords` requires
+        # several EXCLUSIVE markers before a signature is claimed.
+        need = int(item.get("min_keywords", 1))
+        if sum(1 for kw in kws if kw.lower() in blob) >= need:
             prof.obfuscator = name
             prof.signatures.append(f"obfuscator signature: {name}")
             break
