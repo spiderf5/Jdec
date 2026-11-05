@@ -684,8 +684,9 @@ def recover(jar: Path, out_dir: Path, cp: str = "", java: str = "java",
         except SBX.SandboxError as exc:
             print(f"sandbox : {exc}")
             return 1
-        print(f"isolation: {SBX.plan(java).backend} backend under "
-              f"{sandbox_root} ({SBX.plan(java).note})")
+        isolation = SBX.plan(java)
+        print(f"isolation: {isolation.backend} backend under "
+              f"{sandbox_root} ({isolation.note})")
 
     target_for_cp = jar
     if sandbox:

@@ -146,6 +146,7 @@ jobs:
         # This is the only networked step of the offline path. Everything
         # after it runs with a dead proxy, so a stray download fails loudly.
         run: |
+          set -euo pipefail
           python scripts/verify_engine_bundle.py --build "$RUNNER_TEMP/jdec-engines" | tee bundle.txt
           grep -q 'overall   : OK' bundle.txt
           python scripts/verify_engine_bundle.py --verify "$RUNNER_TEMP/jdec-engines" | tee verify.txt
@@ -165,12 +166,14 @@ jobs:
           NO_PROXY: ""
           JDEC_OFFLINE: "1"
         run: |
+          set -euo pipefail
           CACHE="$RUNNER_TEMP/jdec-offline-cache"
           /tmp/jdec-offline-venv/bin/jdec --engines-dir "$CACHE" engines \
-              --offline --from-dir "$RUNNER_TEMP/jdec-engines" | tee engines.txt
-          grep -q 'CFR 0.152.*available' engines.txt
-          grep -q 'Vineflower 1.11.1.*available' engines.txt
-          grep -q 'Procyon 0.6.0.*available' engines.txt
+              --offline --from-dir "$RUNNER_TEMP/jdec-engines" \
+              --json engines.json | tee engines.txt
+          # Structured assertion: catches a failed install even when the
+          # three "available" lines are printed (e.g. a failed Procyon bridge).
+          python -c "import json,sys; d=json.load(open('engines.json')); sys.exit(0 if not d['missing'] and not d['unavailable'] and d['bundle']['ok'] else 1)"
           test ! -d /tmp/jdec-offline-venv/lib/python3.11/site-packages/engines
       - name: Gates pass from the offline install
         # flow.jar, not sample.jar: sample ships a truncated class on purpose.
@@ -180,6 +183,7 @@ jobs:
           NO_PROXY: ""
           JDEC_OFFLINE: "1"
         run: |
+          set -euo pipefail
           python src/tests/build_fixtures.py
           CACHE="$RUNNER_TEMP/jdec-offline-cache"
           /tmp/jdec-offline-venv/bin/jdec --engines-dir "$CACHE" ircheck src/tests/flow.jar
@@ -203,5 +207,10 @@ jobs:
       # registry and its negative controls still work with in-repo fixtures.
       - name: Build fixtures
         run: python src/tests/build_fixtures.py
+      # The support matrix harness lives in src/tests/ and is deliberately
+      # NOT shipped in the wheel, so this job imports from the source tree.
       - name: Support matrix negative controls
-        run: python src/tests/support_matrix.py --selfcheck --json matrix-selfcheck.json
+        run: |
+          set -euo pipefail
+          python src/tests/support_matrix.py --selfcheck --json matrix-selfcheck.json
+          python -c "import json; d=json.load(open('matrix-selfcheck.json')); assert d['verdict']=='PASS' and d['stage_04_threshold_met'] is False and len(d['negative_controls'])==2"

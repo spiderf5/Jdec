@@ -298,8 +298,9 @@ def harvest(spec_path: Path, out_tsv: Path, work_dir: Path, cp: str = "",
             sandbox_entry = SBX.classpath_entry(java=java)
         except SBX.SandboxError as exc:
             raise RuntimeError(f"sandbox: {exc}") from None
-        print(f"isolation: {SBX.plan(java).backend} backend under "
-              f"{work_dir} ({SBX.plan(java).note})")
+        isolation = SBX.plan(java)
+        print(f"isolation: {isolation.backend} backend under "
+              f"{work_dir} ({isolation.note})")
 
     sep = TC.path_sep()
     agent_jvm_arg = ""
