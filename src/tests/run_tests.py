@@ -6609,6 +6609,60 @@ def test_union_denominator_guard() -> None:
     check("MAX_ARITY widens derivation only", CS.MAX_ARITY == 10,
           str(CS.MAX_ARITY))
 
+
+def test_nativedb_bundle() -> None:
+    """The native analysis bundle had no regression at all until now."""
+    print("nativedb: build/query round-trip with a hit and a miss")
+    import contextlib
+    import io
+    from jdec import nativedb as ND
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        lib = root / "probe.dll"
+        lib.write_bytes(b"MZ" + b"\x00" * 4094)
+        db_path = ND.build(lib, root / "db")
+        check("a bundle is written", db_path.is_file(), str(db_path))
+        data = json.loads(db_path.read_text(encoding="utf-8"))
+        check("the bundle names its library", data.get("library") == "probe.dll",
+              str(data)[:200])
+        check("the bundle carries every structured field",
+              all(k in data for k in ("exports", "jni_exports", "dynamic_methods",
+                                      "strings", "decompiled_c")),
+              str(sorted(data)))
+        data["strings"] = ["JDEC_MARKER_TOKEN"]
+        db_path.write_text(json.dumps(data), encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ND.query(db_path, "jdec_marker_token", False)
+        check("a known string is found case-insensitively",
+              "[string] JDEC_MARKER_TOKEN" in buf.getvalue(), buf.getvalue()[:200])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ND.query(db_path, "definitely-absent-9f3a", False)
+        check("an absent keyword reports zero hits",
+              "-- 0 hit(s)" in buf.getvalue(), buf.getvalue()[:200])
+
+
+def test_support_matrix_selfcheck() -> None:
+    """The 04 mechanism registry must keep its negative controls honest."""
+    print("support matrix: in-repo negative controls")
+    import io
+    import contextlib
+    import support_matrix as SM
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = SM.main(["--selfcheck"])
+    check("the support matrix selfcheck passes", rc == 0, buf.getvalue()[:200])
+    check("all eight mechanisms are registered", len(SM.MECHANISMS) == 8,
+          str(len(SM.MECHANISMS)))
+    check("every mechanism declares a support item and its boundary",
+          all(m.support and m.not_covered and m.rules for m in SM.MECHANISMS))
+    check("every mechanism names at least one real corpus",
+          all(m.corpora and set(m.corpora) <= {"hmcl", "neo"}
+              for m in SM.MECHANISMS))
+
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
     if _no_engines():
@@ -7996,6 +8050,8 @@ def main() -> int:
     test_benchmark_is_reproducible()
     test_offline_engine_bundle()
     test_union_denominator_guard()
+    test_nativedb_bundle()
+    test_support_matrix_selfcheck()
     test_frame_generation()
     test_ir_transforms()
     test_pipeline_gate()

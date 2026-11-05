@@ -138,7 +138,8 @@ python src/tests/benchmark.py \
 **收尾**：达标则把 N/411、完整命令、环境、commit、json 路径写回本节与
 ROADMAP 新增节，**状态列是否推进仍需另行拍板**；未达标则保留退出 5，记录实测
 百分比与更新后的剩余归因，`docs/REACHABILITY_02.md` 给出条件式结论，02 仍
-「进行中」、04 仍「未开始」，不标 ✅。
+「进行中」；04 已于 2026-11-05 由 `docs/SUPPORT_MATRIX.md` 验收，
+但不改变 02 结论。
 
 **实测记录（2026-11-04，HotSpot 21 / manager 后端 / git `035ba13`）**：
 JavaFX 21-`win` 三个 jar（sha1 见仓库外 `jdec_javafx/javafx_manifest.json`）；

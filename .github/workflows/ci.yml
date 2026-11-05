@@ -184,3 +184,24 @@ jobs:
           CACHE="$RUNNER_TEMP/jdec-offline-cache"
           /tmp/jdec-offline-venv/bin/jdec --engines-dir "$CACHE" ircheck src/tests/flow.jar
           /tmp/jdec-offline-venv/bin/jdec --engines-dir "$CACHE" verify src/tests/flow.jar
+
+  support-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # The real corpora are external and authorised; CI only proves the
+      # registry and its negative controls still work with in-repo fixtures.
+      - name: Build fixtures
+        run: python src/tests/build_fixtures.py
+      - name: Support matrix negative controls
+        run: python src/tests/support_matrix.py --selfcheck --json matrix-selfcheck.json

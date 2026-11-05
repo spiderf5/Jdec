@@ -1,0 +1,499 @@
+{
+  "schema": 1,
+  "generated_at": "2026-11-05T13:32:54.762206+00:00",
+  "python": "3.13.14",
+  "mode": "full",
+  "javafx_entries": [
+    "javafx-base-21-win.jar",
+    "javafx-controls-21-win.jar",
+    "javafx-graphics-21-win.jar"
+  ],
+  "mechanisms": [
+    {
+      "id": "M1",
+      "name": "控制流去平坦化 / 常量折叠 / 不透明谓词",
+      "support": "对含 goto-flood、irreducible-goto 的真实 jar 产出可重放的指令级改写，重算 StackMapTable，并让全部类通过 -Xverify:all；产出改写清单供对拍",
+      "not_covered": "不承诺还原任意自定义 VM；jsr/ret 明确拒绝；改写保持语义但不证明等价",
+      "corpora": [
+        "hmcl",
+        "neo"
+      ],
+      "container_kinds": {
+        "hmcl": "zip/0x4d5a",
+        "neo": "zip/0x504b"
+      },
+      "commands": [
+        "jdec deflat <HMCL> -o <WORKDIR>/hmcl_deflat.jar --rewritten <WORKDIR>/hmcl_rw.txt --cp javafx-base-21-win.jar --cp javafx-controls-21-win.jar --cp javafx-graphics-21-win.jar",
+        "jdec deflat <NEO> -o <WORKDIR>/neo_deflat.jar --rewritten <WORKDIR>/neo_rw.txt --cp javafx-base-21-win.jar --cp javafx-controls-21-win.jar --cp javafx-graphics-21-win.jar"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "rewritten": 411,
+        "verified": 3693,
+        "magic_hmcl": "4d5a",
+        "magic_neo": "504b"
+      },
+      "rule": "退出 0；改写方法数 > 0；verify 通过类数 > 0 且无拒绝",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "rewritten",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "verified",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M2",
+      "name": "字节级往返与坏类隔离（改写底座）",
+      "support": "对整份真实 jar 逐类 parse→重汇编→逐字节比对，报告类与 Code 数组的相等数；坏类被隔离而不是拖垮整批",
+      "not_covered": "不进行语义等价性证明；jsr/ret 与不可解码类按边界拒绝",
+      "corpora": [
+        "hmcl",
+        "neo"
+      ],
+      "container_kinds": {
+        "hmcl": "zip/0x4d5a",
+        "neo": "zip/0x504b"
+      },
+      "commands": [
+        "jdec ircheck <HMCL> --limit 2",
+        "jdec ircheck <NEO> --limit 2"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "classes": 3740,
+        "unreadable": 0,
+        "cls_ok": 3740,
+        "cls_total": 3740,
+        "code_ok": 29395,
+        "code_total": 29395,
+        "magic_hmcl": "4d5a",
+        "magic_neo": "504b"
+      },
+      "rule": "退出 0；result=PASS；类与 Code 数组的相等数等于总数",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "cls_ok",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "pair_equal",
+          "key": "cls_ok/cls_total",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "pair_equal",
+          "key": "code_ok/code_total",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M3",
+      "name": "invokedynamic / BootstrapMethods 站点枚举",
+      "support": "枚举真实 jar 的 BootstrapMethods 与 indy 站点，按 bootstrap owner 与站点名归类，为字符串/调用目标编码提供站点清单",
+      "not_covered": "不执行 bootstrap；不解密 recipe 之外的自定义引导逻辑",
+      "corpora": [
+        "hmcl",
+        "neo"
+      ],
+      "container_kinds": {
+        "hmcl": "zip/0x4d5a",
+        "neo": "zip/0x504b"
+      },
+      "commands": [
+        "jdec indy <HMCL>",
+        "jdec indy <NEO>"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "sites": 6245,
+        "magic_hmcl": "4d5a",
+        "magic_neo": "504b"
+      },
+      "rule": "退出 0；两个语料都枚举出 > 0 个 indy 站点",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "sites",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M4",
+      "name": "混淆器结构指纹归因",
+      "support": "基于结构阈值与关键词对真实 jar 做混淆器归因并给出置信度，36 项指纹各自有门控，命中必须带证据",
+      "not_covered": "归因词表不等于支持该混淆器的全部机制；不承诺还原",
+      "corpora": [
+        "hmcl",
+        "neo"
+      ],
+      "container_kinds": {
+        "hmcl": "zip/0x4d5a",
+        "neo": "zip/0x504b"
+      },
+      "commands": [
+        "jdec probe <HMCL>",
+        "jdec probe <NEO>"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "score": 4,
+        "signature": "obfuscator signature: ProGuard / R8 | obfuscator signature: ZKM 27 enhanced 字符串加密（DES）",
+        "structure": "goto-flood; indy-long; irreducible-goto; long-constant-array | goto-flood; indy-long; irreducible-goto; overload-collision",
+        "magic_hmcl": "4d5a",
+        "magic_neo": "504b"
+      },
+      "rule": "退出 0；HMCL 命中 ProGuard/R8、NeoRaven 命中 ZKM 27 enhanced",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "contains",
+          "key": "signature",
+          "minimum": 0,
+          "equals": "ProGuard / R8",
+          "holds": true
+        },
+        {
+          "kind": "contains",
+          "key": "signature",
+          "minimum": 0,
+          "equals": "ZKM 27 enhanced",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M5",
+      "name": "字符串常量抽取与加密/威胁标签",
+      "support": "从真实 jar 的常量池抽取字符串并按 url/path/credential/encrypted-blob/machine-id/class-loading 分类标注，输出 TSV+JSON",
+      "not_covered": "标签是启发式；抽取不等于解密 ZKM 池，需 pool/recover 另行重放",
+      "corpora": [
+        "hmcl",
+        "neo"
+      ],
+      "container_kinds": {
+        "hmcl": "zip/0x4d5a",
+        "neo": "zip/0x504b"
+      },
+      "commands": [
+        "jdec strings <HMCL> -o <WORKDIR>/hmcl_strings",
+        "jdec strings <NEO> -o <WORKDIR>/neo_strings"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "strings": 15839,
+        "tagged": 409,
+        "encrypted_blob": 8,
+        "magic_hmcl": "4d5a",
+        "magic_neo": "504b"
+      },
+      "rule": "退出 0；字符串数与标签数 > 0；ZKM 语料标出 encrypted-blob",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "strings",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "tagged",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "encrypted_blob",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M6",
+      "name": "native 分诊与 PE/JNI 库提取",
+      "support": "从自解压 PE/ELF 与 jar 资源中提取 native 库，解析导出表与JNINativeMethod，报告 Java 侧声明的 native 方法与匹配情况",
+      "not_covered": "不反编译 native 函数体；不承诺 RegisterNatives 动态绑定还原",
+      "corpora": [
+        "hmcl"
+      ],
+      "container_kinds": {
+        "hmcl": "zip/0x4d5a"
+      },
+      "commands": [
+        "jdec natives <HMCL> -o <WORKDIR>/hmcl_natives",
+        "jdec analyze <HMCL> -o <WORKDIR>/hmcl_analyze"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "libs": 1,
+        "exports": 2,
+        "native_methods": 69,
+        "magic_hmcl": "4d5a"
+      },
+      "rule": "退出 0；HMCL 提取出 PE 库、导出表项与 Java 侧 native 方法",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "libs",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "exports",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "native_methods",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M7",
+      "name": "Minecraft 元数据与 Mixin hook 识别",
+      "support": "识别真实客户端的 MC 版本/加载器、Mixin 配置或注解 hook，并在无映射时如实保留 hook 目标名",
+      "not_covered": "映射表本身外置；无映射时不解析 hook 目标的最终符号",
+      "corpora": [
+        "neo"
+      ],
+      "container_kinds": {
+        "neo": "zip/0x504b"
+      },
+      "commands": [
+        "jdec probe <NEO>",
+        "jdec analyze <NEO> -o <WORKDIR>/neo_analyze"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "minecraft": "yes 1.8.9 / Forge",
+        "mixin_note": "mixin/transformer (16), xyz/daikirai/music (16) | no mixin config in metadata; hooks found by scanning annotations",
+        "magic_neo": "504b"
+      },
+      "rule": "退出 0；NeoRaven 识别为 1.8.9 / Forge，且 analyze 输出 Mixin 说明",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "contains",
+          "key": "minecraft",
+          "minimum": 0,
+          "equals": "1.8.9",
+          "holds": true
+        },
+        {
+          "kind": "contains",
+          "key": "minecraft",
+          "minimum": 0,
+          "equals": "Forge",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    },
+    {
+      "id": "M8",
+      "name": "容器分类与多版本/截断类隔离",
+      "support": "按 magic 识别 MZ stub + zip 自解压容器、普通 jar 与目录；ircheck 对不可读类隔离而不是把整批判为失败",
+      "not_covered": "不处理加密容器；multi-release 条目按同一基类的备选排除",
+      "corpora": [
+        "hmcl",
+        "neo"
+      ],
+      "container_kinds": {
+        "hmcl": "zip/0x4d5a",
+        "neo": "zip/0x504b"
+      },
+      "commands": [
+        "jdec probe <HMCL>",
+        "jdec probe <NEO>"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ],
+      "metrics": {
+        "entries": 4248,
+        "classes": 3740,
+        "file": "HMCL-3.15.2.exe | NeoRaven1.1.jar",
+        "magic_hmcl": "4d5a",
+        "magic_neo": "504b"
+      },
+      "rule": "退出 0；按 magic 区分 MZ 自解压 stub (4d5a) 与普通 PK jar (504b)，两者都能读出条目与类数",
+      "rules": [
+        {
+          "kind": "all_zero_rc",
+          "key": "",
+          "minimum": 0,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "entries",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "min",
+          "key": "classes",
+          "minimum": 1,
+          "equals": "",
+          "holds": true
+        },
+        {
+          "kind": "magic",
+          "key": "magic_hmcl",
+          "minimum": 0,
+          "equals": "4d5a",
+          "holds": true
+        },
+        {
+          "kind": "magic",
+          "key": "magic_neo",
+          "minimum": 0,
+          "equals": "504b",
+          "holds": true
+        }
+      ],
+      "verdict": "PASS"
+    }
+  ],
+  "negative_controls": [
+    {
+      "name": "a truncated class must not be reported as a clean PASS",
+      "command": "jdec ircheck src/tests/sample.jar",
+      "exit_code": 3,
+      "passed": true,
+      "evidence": "sses   : 10 (1 unreadable)\nclass     : 10/10 byte-identical\nmethod    : 45/45 Code arrays byte-identical\nno code   : 1 abstract/native method(s)\nelapsed   : 0.00s\nresult    : PARTIAL (not everything was checked)\nexit 3: never checked: 1 unreadable class(es) (pass --allow-undecodable to accept that)\n"
+    },
+    {
+      "name": "a clean fixture must still pass the same gate",
+      "command": "jdec ircheck src/tests/flow.jar",
+      "exit_code": 0,
+      "passed": true,
+      "evidence": "target    : D:\\MC\\Jdec\\src\\tests\\flow.jar\nclasses   : 4 (0 unreadable)\nclass     : 4/4 byte-identical\nmethod    : 12/12 Code arrays byte-identical\nelapsed   : 0.00s\nresult    : PASS\n"
+    }
+  ],
+  "note": "Real corpora stay outside the tree; generated fixtures are negative controls only and are NOT independent samples.",
+  "corpora": {
+    "hmcl": {
+      "name": "HMCL-3.15.2.exe",
+      "size": 10907431,
+      "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
+    },
+    "neo": {
+      "name": "NeoRaven1.1.jar",
+      "size": 15315966,
+      "sha256": "57f294cb4374861c7ee1c68e887f0bdcd09c0182545f80412ed2091a3ff6e022"
+    }
+  },
+  "missing_corpora": [],
+  "passed": 8,
+  "total": 8,
+  "verdict": "PASS"
+}

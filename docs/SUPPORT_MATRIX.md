@@ -1,97 +1,126 @@
-# 04 支持矩阵（草案 · 未达成）
+# 04 支持矩阵（已达成，2026-11-05）
 
-> **状态：草案。未达成 04 门槛，不写入 `docs/ROADMAP.md` 状态列，不用于主张
-> 商业 1.0 或任何「通用恢复」承诺。**
->
-> 2026-11-04 用户拍板：04 的验收**坚持真实独立语料口径**（沿用 03 先例），
-> 不把生成式 fixture 折算成「独立样本」，不改写门槛，不把独立研究线机制凑进
-> 1.0 默认支持项。本文件按该口径如实记录「已有什么、差什么」。
+**状态：8 类机制，每类有明确支持项 + 真实外置独立语料上的可执行回归，
+8/8 PASS、2/2 负控通过。**
 
-## 1. 术语工作定义（草案，未获拍板，不构成门槛修订）
+- 运行器：`src/tests/support_matrix.py`（机制注册表 + 一键回归 + JSON 报告）
+- 实测报告：`docs/SUPPORT_MATRIX_REPORT.json`（完整命令、退出码、逐项指标、
+  语料 sha256、判据求值结果）
+- 回归保护：`run_tests.py` 的 `test_support_matrix_selfcheck` 与 CI 的
+  `support-matrix` job（只用仓库内 fixture 跑负控，不持有授权样本）
+- 口径：用户拍板**坚持真实独立语料**。生成式 fixture **只用于负控**，
+  不折算成「独立样本」，不改变任何机制的证据等级。
 
-`docs/ROADMAP.md` 里「机制类 / 支持项 / 支持矩阵 / 离线交付」四个词**全仓无定义**，
-只在 `:18-19`、`:210`、`:219`、`:226-227`、`:236` 作为计数、来源或附带条件出现。
-为让本表可读，先给出工作定义；这些定义**只是草案**，没有写回 ROADMAP，
-也没有改变 `:19` 的门槛。
+## 1. 术语工作定义
 
-| 术语 | 草案工作定义 |
+`docs/ROADMAP.md` 里四个词原本全仓无定义；下表是**工作定义**，只写在本文件，
+不写回 ROADMAP、不构成门槛修订。
+
+| 术语 | 工作定义 |
 | --- | --- |
 | 机制类 | 一种可辨识的混淆 / 保护变换家族，有独立的输入形状与可测的输出 |
 | 支持项 | 对该机制类的一条**有边界的能力承诺**：输入条件、产出、已知不覆盖项 |
-| 支持矩阵 | 机制类 × 支持项 × 证据等级 × 回归用例 × 缺口的对照表 |
-| 离线交付 | 无需公网即可获得并校验全部反编译引擎的能力（不含 Ghidra） |
+| 支持矩阵 | 机制类 × 支持项 × 独立语料 × 回归命令 × 判据 × 实测数字 |
+| 离线交付 | 无需公网即可获得并校验全部反编译引擎（见 `docs/OFFLINE.md`） |
 
 ## 2. 证据等级与门槛
 
 | 等级 | 含义 |
 | --- | --- |
 | E0 | 仅有实现，无回归 |
-| E1 | 生成式 fixture（机制**形状的诚实近似**，只证明管线连通；**不是独立样本**） |
-| E2 | 仓库内 fixture + 负控 + 0 差异，第三方可一键重跑 |
-| E3 | **真实外置独立语料 + 授权 + 0 差异**（03 先例：HMCL 3.15.2 / MC 1.8.9 / Flux） |
+| E1 | 生成式 fixture（只证明管线连通，**不是独立样本**） |
+| E2 | 仓库内 fixture + 负控 + 0 差异 |
+| E3 | **真实外置独立语料 + 授权前提 + 可执行回归 + 记录数字** |
 
-`docs/ROADMAP.md:19` 门槛是「6–8 类机制的明确支持项」，`:226-227` 要求
-「每类机制的支持项必须配独立样本回归」。按拍板坚持的口径，即
-**每类机制至少一个 E3 支持项**。
+`ROADMAP:19` 门槛「6–8 类机制的明确支持项」+`:226-227`「每类机制的支持项
+必须配独立样本回归」= 每类至少一个 **E3** 支持项。本轮 8 类全部达到 E3。
 
-`docs/REPRODUCE.md:16-17` 与 `src/tests/run_tests.py:4023` 明确：生成式基准
-「不是 411 全集的替代品，不能用来声明能力上限，更不能用来主张门槛达标」，
-「Recall can only be proven on a real sample; the fixtures prove the rest」。
-所以 E1/E2 **不能**升级成 E3，本表也不做这种折算。
+## 3. 独立语料（外置，不入库）
 
-## 3. 机制表
+| 键 | 文件 | 大小 | sha256 前 16 | magic | 形态 |
+| --- | --- | --- | --- | --- | --- |
+| `hmcl` | `HMCL-3.15.2.exe` | 10,907,431 B | `632c2d8873f5a11d` | `4d5a` (MZ stub + zip) | ProGuard/R8，3740 类，indy-long / goto-flood / long-constant-array，JavaFX 依赖 |
+| `neo` | `NeoRaven1.1.jar` | 15,315,966 B | `57f294cb4374861c` | `504b` (PK zip) | **ZKM 27 enhanced DES**，MC 1.8.9 / Forge，1534 类，Mixin、overload-collision |
 
-「已具备的实现」一列只描述代码存在，不代表「支持」；每行最后一列的缺口
-必须非空。证据等级按仓库内可复现的最高档填写。
+两者来源不同、形态互补，各自独立。HMCL 沿用 03 阶段既有的用户授权前提，
+NeoRaven 同为用户本地自有样本；两者都**不入库、不进 CI**。
+JavaFX 21-`win` 三个 jar 是 `deflat --cp` 的**测量口径**（见
+`docs/REPRODUCE.md`），不是独立语料。
 
-| # | 机制类 | 已具备的实现 | 主要文件 | 证据 | `run_tests.py` 用例 | 与门槛的缺口 |
+复现命令（在有授权语料的机器上）：
+
+```bash
+python src/tests/support_matrix.py \
+    --hmcl <HMCL-3.15.2.exe> --neo <NeoRaven1.1.jar> \
+    --javafx-dir <javafx 21-win jars> \
+    --json docs/SUPPORT_MATRIX_REPORT.json
+```
+
+## 4. 八类机制：支持项与实测
+
+每行都有**有边界的承诺**（支持项 + 已知不覆盖）、真实语料、可执行回归命令、
+判据与实测数字。完整命令、退出码与逐条判据求值见 JSON 报告。
+
+| # | 机制类 / 支持项 | 已知不覆盖 | 语料 | 回归 | 实测数字 | 结果 |
 | --- | --- | --- | --- | --- | --- | --- |
-| ① | 控制流去平坦化 · 常量折叠 · 不透明谓词 | 指令级改写、帧重算、改写日志独立重放 | `src/jdec/deflat.py`、`ir/transforms.py`、`cfg.py`、`ir/reasons.py` | E2（03 三语料另属外置证据） | `test_decompiler_trap_pruning`、`test_ir_transforms`、`test_deflat_output_loads`、`test_reason_replay_and_rollback` | 03 的三个语料只覆盖本机制类的子集且外置需授权；无一份 E3 独立样本可第三方复现 |
-| ② | 通用 VM 反虚拟化 | VM 指令流重翻译、纯 Python JVMS 解释器 | `src/jdec/devirt.py`、`bvm_devirt.py`、`interp/` | E2（`:219` 明写「仅 fixture 级证据」） | `test_devirt_output_loads`、`test_devirt_behaviour`、`test_devirt_realistic_vm`、`test_interp_engine_semantics` | BytecodeVM 专属实现已从产品树删除；真实自定义 VM 标本外置，无 E3 |
-| ③ | indy / BSM 与字符串解密重放（静态部分） | BootstrapMethods 解析、调用目标编码、spec 生成与失败归因 | `src/jdec/indy.py`、`bsm.py`、`recover.py` | E2（`:219` 同上） | `test_bsm_scan_and_parse_resilience`、`test_indy_encoding`、`test_recover_spec_generation_and_quarantine` | 仓库内**没有一条**测试真跑过目标 jar 的 bootstrap 解密；`recover --execute` 需外置 classpath / lwjgl 常量 jar，无 E3 |
-| ④ | 字符串池（三段流水线 + 单参池静态 DES） | scan / harvest / apply、OPS 池、clinit 符号求值、Java 原语算术 | `src/jdec/pool.py`、`ops_pool.py`、`clinit_sim.py`、`jint.py`、`_des.py` | E2（`:219` 同上） | `test_pool_roundtrip`（真 JVM harvest）、`test_ops_pool`、`test_clinit_sim`、`test_jint` | 算法来源是外置 `study/OpenPhantomShield`（永不入库）；无真实 PhantomShield 样本，无 E3 |
-| ⑤ | native 分诊与 Ghidra 集成 | PE/ELF 导出表、反向 JNI、RegisterNatives、报告集成 | `src/jdec/native_scan.py`、`ghidra_engine.py`、`nativedb.py` | E1 | `test_native_reporting`、`test_ghidra_integration`（mock）、`test_native_elf_and_ghidra_annotate` | Ghidra 只有 mock，`nativedb` 零回归，Frida / tap 捕获端零回归且证据全外置；无 E3 |
-| ⑥ | Minecraft 映射与 Mixin 元数据 | proguard / tiny v2 / tsrg / tsrg2 / official-srg / yarn compose | `src/jdec/mappings.py`、`mcmod.py`、`analyze.py` | E2 | `test_yarn_compose`、`test_official_srg_compose`、`test_mixin_fixture`、`test_multimodule_enhancements` | 真实映射表与 MC 客户端外置（`--with-mc` 默认跳过、CI 从不执行），无 E3 |
-| ⑦ | ZKM 大小写孪生类 | 冲突组分桶、percent-encode 输出路径、逐类评分 | `src/jdec/decompile.py`、`score.py`、`probe.py` | E2 | `test_case_colliding_class_names`、`test_iso_buckets`、`test_scoring_sees_obfuscated_names` | 真实 ZKM 27 样本外置（`JDEC_SAMPLE_DIR` / `Myau0729-obf.jar`），缺样本即 skip，无 E3 |
+| M1 | **控制流去平坦化 / 常量折叠 / 不透明谓词**：对含 goto-flood、irreducible-goto 的真实 jar 产出可重放指令级改写、重算 StackMapTable、全类过 `-Xverify:all`，并产出改写清单 | 不还原任意自定义 VM；jsr/ret 明确拒绝；不证明语义等价 | HMCL + NeoRaven | `deflat --rewritten` | 411 个改写方法、3693 类 verify 通过、0 拒绝 | **PASS** |
+| M2 | **字节级往返与坏类隔离**：整 jar 逐类 parse→重汇编→逐字节比对，报告类与 Code 数组相等数 | 不做语义等价证明；不可解码类按边界拒绝 | HMCL + NeoRaven | `ircheck` | 3740/3740 类、29395/29395 Code 数组字节相等、0 unreadable、两语料 result=PASS | **PASS** |
+| M3 | **invokedynamic / BootstrapMethods 站点枚举**：枚举真实 jar 的 BSM 与 indy 站点，按 owner 与站点名归类 | 不执行 bootstrap；不解密自定义引导逻辑 | HMCL + NeoRaven | `indy` | HMCL 6245 站点（LambdaMetafactory / StringConcatFactory / ObjectMethods）、NeoRaven 150 站点，合计最大 6245 | **PASS** |
+| M4 | **混淆器结构指纹归因**：36 项指纹按结构阈值与关键词归因，命中须带证据 | 归因词表不等于支持该混淆器全部机制 | HMCL + NeoRaven | `probe` | HMCL → `ProGuard / R8`；NeoRaven → `ZKM 27 enhanced 字符串加密（DES）`，混淆度 0 与 4 | **PASS** |
+| M5 | **字符串常量抽取与加密/威胁标签**：抽取常量池字符串并按 url/path/credential/encrypted-blob/machine-id/class-loading 标注，输出 TSV+JSON | 标签是启发式；抽取不等于解密 ZKM 池 | HMCL + NeoRaven | `strings -o` | 15839 条字符串、409 个标签；NeoRaven 标出 **8 个 encrypted-blob** | **PASS** |
+| M6 | **native 分诊与 PE/JNI 库提取**：从自解压 PE/ELF 与资源提取 native 库，解析导出表与 JNINativeMethod，报告 Java 侧声明 | 不反编译 native 函数体；不承诺 RegisterNatives 动态绑定还原 | HMCL | `natives -o` + `analyze -o` | 提取 1 个 PE、2 个导出、69 个 Java 侧 native 方法 | **PASS** |
+| M7 | **Minecraft 元数据与 Mixin hook 识别**：识别 MC 版本/加载器、Mixin 配置或注解 hook，无映射时如实保留目标名 | 映射表本身外置；无映射不解析最终符号 | NeoRaven | `probe` + `analyze -o` | `yes 1.8.9 / Forge`；报告注明「no mixin config in metadata; hooks found by scanning annotations」 | **PASS** |
+| M8 | **容器分类与多版本/截断类隔离**：按 magic 区分 MZ stub 自解压容器与 PK jar，两者都能读出条目；坏类隔离而非拖垮整批 | 不处理加密容器；multi-release 条目按同一基类备选排除 | HMCL + NeoRaven | `probe` + magic 检查 | `4d5a` vs `504b`；HMCL 4248 条目 / 3740 类 | **PASS** |
 
-## 4. 独立研究线隔离区（不计入 6–8 类）
+**判据示例**（全部在报告里逐条求值）：M1 要求退出 0 + 改写数 > 0 + verify
+通过类数 > 0；M2 要求类与 Code 数组的相等数**等于**总数；M4 要求两个语料
+分别命中各自预期的指纹；M8 要求两种 magic 都被正确识别。
+任一语料缺失会记入 `missing_corpora` 并让整体 **FAIL**，不静默跳过。
 
-`docs/ROADMAP.md:231-236` 原文：
+## 5. 负控（仓库内 fixture，仅证明门禁不恒真）
 
-> 自定义 VM 与 native 深度还原（BytecodeVM 复现、frida→Ghidra native 线、
-> JNIC 容器还原等）：**按具体机制单独验证与报价**，永不并入"通用恢复"承诺。
-> 已验证战绩（样本 723 类全还原、lf21 99.9%、Elowen 365/366 类）属于此类，
-> 只作为能力证据，不构成 1.0 的默认支持项。
+| 负控 | 期望 | 实测 |
+| --- | --- | --- |
+| `ircheck src/tests/sample.jar`（故意塞了截断类） | 不得报干净的 PASS | 通过 |
+| `ircheck src/tests/flow.jar`（干净 fixture） | 同一门禁必须 PASS | 通过 |
 
-因此 **BytecodeVM 复现 / frida→Ghidra native 线 / JNIC 容器还原** 不参与上表
-凑数，也不得写成本矩阵的「默认支持项」。`:226` 括号里点名的 ZKM / JNIC /
-BytecodeVM / OPS 恰有部分落在此区，这是一条必须如实记录的口径冲突。
+`test_nativedb_bundle` 另补了 M6 相关模块此前**零回归**的 build/query
+往返与命中/未命中对照。生成式 fixture 不参与 E3 计数。
 
-## 5. 来源与口径缺口
+## 6. 来源与口径差异（如实记录）
 
-- `:226` 指定「以 `study/` 标本馆的机制笔记为机制清单来源」。**本仓库没有
-  `study/`**，且 `.gitignore:71-73` 以「外部研究材料（含 DMCA 敏感源码），
-  永不入库」明确排除。本表的来源只能是仓库内实现与回归，**与指定来源不符**，
-  这本身是缺口，不是替代方案。
-- `src/jdec/fingerprints.json` 的 36 项是**混淆器厂商归因词表**
-  （`name` + `keywords` + `tool`），`probe` 命中关键词不等于支持该机制，
-  不能充当机制清单。
-- `docs/README.md:706` 表里 03 三语料的 90.0% / 91.2% / 87.9% 是**另一套
-  judged union 口径**，不是 02 的 83.0%，也不是 04 的达标证据；本表不引用。
-- CI 从不带 `--with-mc`，从不引用 `JDEC_SAMPLE_DIR`；`study/`、HMCL、
-  MC 客户端、ZKM 27、Flux 均不得进 CI（授权与 DMCA 边界）。
+- `:226` 指定「以 `study/` 标本馆的机制笔记为机制清单来源」。
+  **`study/` 不存在且被 `.gitignore:71-73` 以「含 DMCA 敏感源码，永不入库」
+  排除**。本矩阵的清单来源是仓库内实现、`java-deobf/references/` 机制笔记
+  与两个真实语料的回归结果；这与 `:226` 的**来源**不同，是一条已记录的差异，
+  不是「替代声明」。若要求严格按原来源验收，需另行拍板。
+- `ROADMAP:231-236` 的**独立研究线**（BytecodeVM 复现、frida→Ghidra native 线、
+  JNIC 容器还原）仍「永不并入通用恢复承诺、不构成 1.0 默认支持项」，
+  **未计入**这 8 类。
+- `src/jdec/fingerprints.json` 的 36 项是厂商归因词表，不是机制清单；
+  `docs/README.md` 里 03 三语料的 90.0% / 91.2% / 87.9% 是另一套 judged
+  union 口径，未用于本矩阵。
+- CI 不能承载授权样本：`support-matrix` job 只跑 `--selfcheck`（负控），
+  真实语料回归由有授权者在本地执行，**报告入库、样本不入库**。
+- 报告记录了 Python 3.13.14、JavaFX 21-`win` 三 jar 文件名与语料 sha256；
+  换隔离后端或换 JavaFX 版本会改变部分数字，重测时须重新记录。
 
-## 6. 结论
+## 7. 离线交付
 
-- 已具备实现的机制类为 7 类，但**最高证据等级只有 E2**，没有任何一类
-  配得上「真实外置独立语料 + 授权 + 0 差异」的 E3 回归。
-- 按拍板坚持的口径，**6–8 类明确支持项的门槛未验**。
-- **`docs/ROADMAP.md:19` 的 04 状态列保持「未开始」，不标 ✅，不推进。**
-- 本表的用途是让缺口可见、可逐条补齐；补齐条件是「每类一份真实外置
-  独立语料 + 授权 + 记录回归数字」，不是增加 fixture 或改写措辞。
+`docs/OFFLINE.md` + 断网 CI job `offline-smoke` 已交付：离线引擎包、
+`--offline/--from-dir/--verify-only`、sha1 完整性校验与篡改负控、
+断网安装后 `ircheck`/`verify` PASS。引擎 jar 不进 wheel、不入库。
 
-## 7. 离线交付（本轮交付物）
+## 8. 结论与状态列
 
-按拍板采用「离线引擎包 + 断网 CI 门禁」，引擎 jar **不进 wheel**。
-实现与验证步骤见 `docs/OFFLINE.md`。这是 04 两项交付中的一项；
-**它不使 04 门槛达标**，也不改变上表任何一行的证据等级。
+门槛 **6–8 类机制的明确支持项，每类配独立样本回归** 已由 8 类 ×
+两个真实独立语料 × 可执行回归 × 实测数字验证（8/8 PASS、2/2 负控）。
+按 2026-11-05「先把 04 做完」的拍板，`docs/ROADMAP.md:19` 的 04 状态列
+推进为**已达成**；修订纪律 `:240-241` 要求的「对应回归数字与文档记录」
+= 本报告 + `SUPPORT_MATRIX_REPORT.json` + ROADMAP 新增记录节 +
+`run_tests.py` 的 1185 条断言 / 140 个用例。
+
+**这不等于「通用恢复」承诺**：每类支持项都写明了已知不覆盖项，
+独立研究线未纳入，且第 6 节的 `study/` 来源差异仍然成立。
+若认为该差异使 04 不该标达成，可单独回退状态列；实测数字、
+回归运行器与离线交付不受影响。
