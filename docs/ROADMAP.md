@@ -477,9 +477,14 @@ ZKM/JNIC/BytecodeVM 深度还原按 `:231-236` 属独立研究线；`:226` 的
   `Program.retarget` 取代）。删除它们是为了不让两套实现漂移。
 - `engines.ensure_engines` 复杂度 17 → 拆出 `_obtain_offline` /
   `_obtain_online` / `_install_atomic` / `_ensure_one`，主函数不再嵌套。
+- `probe.profile_jar`（233 行）拆成容器事实 + 四个阶段函数
+  （`_minecraft_identity` / `_java_versions` / `_attribute_obfuscator` /
+  `_name_shape_score`），主函数 96 行。四个语料的 `jdec probe` 输出
+  **逐字节一致**（HMCL / NeoRaven / sample / junit），并新增
+  `test_probe_profile_phases` 钉住各阶段的产出。
 
 **实测与验证**：8/8 PASS、**57 项交叉检查**（a=36 / b=9 / c=10 / d=2）；
-回归 **1274 断言 / 147 用例**；ruff 通过；报告仍无本机路径、LF 行尾。
+回归 **1283 断言 / 148 用例**；ruff 通过；报告仍无本机路径、LF 行尾。
 
 **状态列不变**：04 仍「✅ 已达成」（证据增强，不是新增门槛）；02 仍
 「进行中」，`342/411 = 83.2%`、1 个差异不变——M3 的载荷还原不产生

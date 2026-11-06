@@ -145,16 +145,13 @@ def _major_version(data: bytes) -> int | None:
         return None
 
 
-def profile_jar(path: Path, sample: int = 400) -> JarProfile:
-    prof = JarProfile(path=path)
-    zf = zipfile.ZipFile(path)
-    names = zf.namelist()
-    prof.entries = len(names)
-    class_names = [n for n in names if n.endswith(".class")]
-    prof.classes = len(class_names)
-    prof.resources = prof.entries - prof.classes
+def _minecraft_identity(prof: JarProfile, zf, names: list[str],
+                        joined: str, path: Path) -> None:
+    """Fill the Minecraft fields from container markers and mod manifests.
 
-    joined = "\n".join(names)
+    A shaded client carries the loader's own packages; a mod jar does not, so
+    the loader manifests are the reliable signal for both flavour and the game
+    version the mod declares."""
     for m in _MC_MARKERS:
         if m in joined:
             prof.is_minecraft = True
@@ -244,8 +241,9 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
             except Exception:
                 pass
 
-    # bytecode versions across everything: full entry bytes in the SAME
-    # pass as the header read (one open per class either way).
+
+def _java_versions(zf, class_names: list[str]) -> dict[str, int]:
+    """Class-file major versions, counted per release, in one pass."""
     from .classfile import java_version_of
     versions: dict[str, int] = {}
     for n in class_names:
@@ -257,7 +255,75 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
         mj = _major_version(head)
         if mj:
             versions[java_version_of(mj)] = versions.get(java_version_of(mj), 0) + 1
-    prof.java_versions = versions
+    return versions
+
+
+def _attribute_obfuscator(prof: JarProfile, joined: str,
+                         cp_strings: list[str]) -> None:
+    """Keyword fingerprints over entry names + sampled constant pools.
+
+    Entry names alone never see pool-only markers (DESKeySpec, $CodePool); the
+    sampled classes supply the pool half of the documented search domain."""
+    # keyword fingerprints over entry names + sampled constant pools.  Entry
+    # names alone never see pool-only markers (DESKeySpec, $CodePool); the
+    # sampled classes supply the pool half of the documented search domain.
+    blob = joined.lower()
+    if cp_strings:
+        blob += "\n" + "\n".join(cp_strings).lower()
+    for item in _load_fingerprints():
+        name = item.get("name")
+        if item.get("auto_attribute") is False:
+            # Research-only entries (e.g. a single generic English word) must
+            # never become an automatic attribution.
+            continue
+        kws = item.get("keywords", [])
+        # Some families share a generic JDK marker with unrelated clients
+        # (IvParameterSpec is used by AES-CBC too). `min_keywords` requires
+        # several EXCLUSIVE markers before a signature is claimed.
+        need = int(item.get("min_keywords", 1))
+        if sum(1 for kw in kws if kw.lower() in blob) >= need:
+            prof.obfuscator = name
+            prof.signatures.append(f"obfuscator signature: {name}")
+            break
+
+    if not prof.obfuscator:
+        for marker, obf in _KNOWN_OBFUSCATORS.items():
+            if marker in joined and obf:
+                prof.obfuscator = obf
+                prof.signatures.append(f"obfuscator package {marker}")
+                break
+
+
+def _name_shape_score(name_lengths: list[int], member_lengths: list[int],
+                      stem_hits: int, stem_total: int) -> float:
+    """0 = clean names, 100 = mangled. Four independent signals, weighted."""
+    if not name_lengths:
+        return 0.0
+    cls_med = _median(name_lengths)
+    mem_med = _median(member_lengths) if member_lengths else cls_med
+    stem_ratio = (stem_hits / stem_total) if stem_total else 0.0
+    short_ratio = sum(1 for x in member_lengths if x <= 2) / max(1, len(member_lengths))
+    # each signal contributes independently; 0 = clean, 1 = mangled
+    s_len = _clamp01((12 - cls_med) / 10)          # short class names
+    s_mem = _clamp01((10 - mem_med) / 8)           # short member names
+    s_stem = _clamp01((0.35 - stem_ratio) / 0.35)  # no readable word stems
+    s_short = _clamp01(short_ratio / 0.5)          # lots of 1-2 char names
+    return round(
+        100 * (0.28 * s_len + 0.26 * s_mem + 0.30 * s_stem + 0.16 * s_short), 1)
+
+
+def profile_jar(path: Path, sample: int = 400) -> JarProfile:
+    prof = JarProfile(path=path)
+    zf = zipfile.ZipFile(path)
+    names = zf.namelist()
+    prof.entries = len(names)
+    class_names = [n for n in names if n.endswith(".class")]
+    prof.classes = len(class_names)
+    prof.resources = prof.entries - prof.classes
+
+    joined = "\n".join(names)
+    _minecraft_identity(prof, zf, names, joined, path)
+    prof.java_versions = _java_versions(zf, class_names)
 
     # deep sample for naming statistics
     step = max(1, len(class_names) // sample)
@@ -306,49 +372,10 @@ def profile_jar(path: Path, sample: int = 400) -> JarProfile:
     prof.unicode_names = unicode_names
     prof.top_packages = sorted(pkg_counter.items(), key=lambda kv: -kv[1])[:12]
 
-    # keyword fingerprints over entry names + sampled constant pools.  Entry
-    # names alone never see pool-only markers (DESKeySpec, $CodePool); the
-    # sampled classes supply the pool half of the documented search domain.
-    blob = joined.lower()
-    if cp_strings:
-        blob += "\n" + "\n".join(cp_strings).lower()
-    for item in _load_fingerprints():
-        name = item.get("name")
-        if item.get("auto_attribute") is False:
-            # Research-only entries (e.g. a single generic English word) must
-            # never become an automatic attribution.
-            continue
-        kws = item.get("keywords", [])
-        # Some families share a generic JDK marker with unrelated clients
-        # (IvParameterSpec is used by AES-CBC too). `min_keywords` requires
-        # several EXCLUSIVE markers before a signature is claimed.
-        need = int(item.get("min_keywords", 1))
-        if sum(1 for kw in kws if kw.lower() in blob) >= need:
-            prof.obfuscator = name
-            prof.signatures.append(f"obfuscator signature: {name}")
-            break
+    _attribute_obfuscator(prof, joined, cp_strings)
 
-    if not prof.obfuscator:
-        for marker, obf in _KNOWN_OBFUSCATORS.items():
-            if marker in joined and obf:
-                prof.obfuscator = obf
-                prof.signatures.append(f"obfuscator package {marker}")
-                break
-
-    if not name_lengths:
-        prof.obfuscation = 0.0
-    else:
-        cls_med = _median(name_lengths)
-        mem_med = _median(member_lengths) if member_lengths else cls_med
-        stem_ratio = (stem_hits / stem_total) if stem_total else 0.0
-        short_ratio = sum(1 for x in member_lengths if x <= 2) / max(1, len(member_lengths))
-        # each signal contributes independently; 0 = clean, 1 = mangled
-        s_len = _clamp01((12 - cls_med) / 10)          # short class names
-        s_mem = _clamp01((10 - mem_med) / 8)           # short member names
-        s_stem = _clamp01((0.35 - stem_ratio) / 0.35)  # no readable word stems
-        s_short = _clamp01(short_ratio / 0.5)          # lots of 1-2 char names
-        prof.obfuscation = round(
-            100 * (0.28 * s_len + 0.26 * s_mem + 0.30 * s_stem + 0.16 * s_short), 1)
+    prof.obfuscation = _name_shape_score(
+        name_lengths, member_lengths, stem_hits, stem_total)
 
     if structural:
         prof.structural = sorted(structural)

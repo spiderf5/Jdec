@@ -7251,6 +7251,45 @@ def test_indy_payload_resolution() -> None:
           BM.resolve_site(concat_site("a\x01", []))["kind"] == "concat")
 
 
+def test_probe_profile_phases() -> None:
+    """The four extracted profile phases must keep their measured behaviour."""
+    print("probe: container, minecraft, version, naming and attribution phases")
+    from jdec import probe as PR
+
+    sample = ROOT / "tests" / "sample.jar"   # ROOT here is src/
+    prof = PR.profile_jar(sample)
+    check("container facts are counted",
+          prof.entries == 12 and prof.classes == 11 and prof.resources == 1,
+          f"{prof.entries}/{prof.classes}/{prof.resources}")
+    check("bytecode versions are grouped per release",
+          prof.java_versions == {"21": 11}, str(prof.java_versions))
+    check("the name-shape score is computed, not defaulted",
+          abs(prof.obfuscation - 42.4) < 0.05, str(prof.obfuscation))
+    check("top packages are ranked by class count",
+          prof.top_packages[:1] == [("demo/modern", 5)], str(prof.top_packages[:2]))
+    check("structural fingerprints come from the sampler",
+          prof.structural == ["goto-flood", "irreducible-goto"], str(prof.structural))
+    check("a plain jar is not claimed to be Minecraft", prof.is_minecraft is False)
+
+    # mixin.jar ships fabric.mod.json, which is the only marker that sets the
+    # flavour for a mod jar (a mod does not shade the loader's own packages).
+    mixin = PR.profile_jar(ROOT / "tests" / "mixin.jar")
+    check("fabric.mod.json sets the Minecraft flavour",
+          mixin.is_minecraft is True and mixin.mc_flavor == "Fabric",
+          f"{mixin.is_minecraft}/{mixin.mc_flavor}")
+
+    # A two-class jar gets a capped score and says so, rather than reporting
+    # 100/100 off a median over two names.
+    tiny = PR.profile_jar(ROOT / "tests" / "collide.jar")
+    check("a tiny sample caps the score at 50 and explains why",
+          tiny.obfuscation <= 50.0
+          and any("small sample" in s for s in tiny.signatures),
+          f"{tiny.obfuscation} {tiny.signatures}")
+
+    check("the score helper returns 0 for an empty sample",
+          PR._name_shape_score([], [], 0, 0) == 0.0)
+
+
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
     if _no_engines():
@@ -8645,6 +8684,7 @@ def main() -> int:
     test_benchmark_report_hygiene()
     test_stage04_acceptance_harness()
     test_indy_payload_resolution()
+    test_probe_profile_phases()
     test_nativedb_bundle()
     test_support_matrix_selfcheck()
     test_frame_generation()
