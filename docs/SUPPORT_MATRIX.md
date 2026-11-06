@@ -25,8 +25,8 @@
 | --- | --- | --- |
 | 6–8 类机制的明确支持项 | 满足 | 8 类，每类有输入条件、结构化产出、已知不覆盖 |
 | 每类配独立样本回归 | 满足 | 每类在真实独立语料上跑（第二语料**实际执行**，不再是声明），配独立金标准与本类负控；87 项检查 |
-| 清单来源 `study/` | 替代 | `docs/mechanisms/` 9 份纯机制形态笔记（不含源码）；来源差异见第 5 节 |
-| 交付「支持矩阵」 | 已交付 | 本文件 + 两份机器可读报告 |
+| 清单来源 `study/` | 替代 | `docs/mechanisms/` 8 份机制笔记（M1–M8）+ 索引（不含源码）；来源差异见第 5 节 |
+| 交付「支持矩阵」 | 已交付 | 本文件 + `docs/STAGE04_REPORT.json`（诊断层报告按需生成、不入库） |
 | 交付「离线交付」 | 已交付 | `docs/OFFLINE.md` + 断网 CI job |
 
 **「支持项」的定义**：对该机制类的一条**有边界的工具能力承诺**，不是
@@ -39,7 +39,7 @@
 
 | ID | 明确支持项 | 独立金标准 | 本类负控 | 实测 |
 | --- | --- | --- | --- | --- |
-| M1 控制流改写 | 区分两类来源并分别改写（均过 JVM `-Xverify:all`）：混淆器平坦化（while + switch 状态机）、javac `switch(String)` 降级；产出改写清单 | 独立 class 解析器核对清单方法存在；`zipfile` sha256 确认字节变化 | junit：17 个改写全部是 thread/dead，`behave` 0 diff；fixture：平坦化 7 次、switch 5 次 | 411 改写；`switch=684` / `unflattened=0`（87 个方法）；`folded=0` / `predicates=0`；verify 3693；`behave` union 342/411、1 个差异 |
+| M1 控制流改写 | 区分两类来源并分别改写（均过 JVM `-Xverify:all`）：混淆器平坦化（while + switch 状态机）、javac `switch(String)` 降级；产出改写清单 | 独立 class 解析器核对清单方法存在；`zipfile` sha256 确认字节变化 | junit：17 个方法被改写（threaded 22 次 + dead 6 次，折叠/平坦化/switch 全 0），`behave` 0 diff；fixture：平坦化 7 次、switch 5 次 | 411 改写；`switch=684` / `unflattened=0`（87 个方法）；`folded=0` / `predicates=0`；verify 3693；`behave` union 342/411、1 个差异 |
 | M2 字节往返 | 逐类 parse→重汇编→逐字节比对；坏类隔离 | `zipfile` 原始类数与逐条 sha256 | 截断类 `sample.jar` 不得判为干净 PASS | 3740/3740 类、29395/29395 Code、0 unreadable |
 | M3 indy / BSM | 枚举站点、按 owner 归类，**还原每个站点的常量载荷**：lambda 调用目标、concat 格式模板、record 组件名；无常量的引导单独计数 | 独立 `BootstrapMethods` 解析给出 owner 直方图与静态载荷集合，逐字比对 | junit 必须 0 站点（金标准 0 BSM）；`sample.jar` 的 1 个 SwitchBootstraps 必须计为未还原 | 6245 站点 ≥ 5420 BSM；**payload 6245/6245**（3899/1667/679，unresolved 0）；1406 载荷全命中，0 伪造 |
 | M4 指纹归因 | 结构阈值 + 专属关键词（ZKM 27 需 ≥2 个），命中带证据 | 独立常量池扫描 DES/zelix/`$CodePool` | junit 不得误报任何签名 | HMCL → ProGuard/R8（0/100）；Neo → 未识别（4/100） |
@@ -82,10 +82,10 @@ d=3（只验金标准）。报告里每条带 `class` 字段，可逐条复核�
 ## 5. 机制清单来源与 `:226` 的差异
 
 `ROADMAP:226` 指定 `study/` 标本馆；`.gitignore:71-73` 以「含 DMCA 敏感
-源码」把 `study/` 排除。`docs/mechanisms/` 是**合规替代**：9 份纯机制形态
-笔记，不含任何第三方源码、反编译片段或混淆器实现。清单由这 9 份笔记 +
-仓库内实现 + 三个真实语料共同确定。**这是一条保留的来源差异**，不宣称
-按 `study/` 原件验收。
+源码」把 `study/` 排除。`docs/mechanisms/` 是**合规替代**：8 份机制笔记
+（M1–M8）+ 1 份索引，不含任何第三方源码、反编译片段或混淆器实现。清单由
+这 8 份笔记 + 仓库内实现 + 三个真实语料共同确定。**这是一条保留的来源
+差异**，不宣称按 `study/` 原件验收。
 
 另：机制笔记里的 `javap -v` 是推荐的人工复核手段，自动回归用的是
 `src/tests/goldens.py` 的第二套解析（zip / class / PE），**未调用 javap**。

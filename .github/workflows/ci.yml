@@ -23,8 +23,10 @@ jobs:
       - name: Lint undefined names, unused imports/vars, f-strings and bugbear
         # Rules live in pyproject.toml ([tool.ruff.lint]) so a local run and CI
         # cannot drift: F = undefined/unused, B = bugbear, E9 = syntax errors.
+        # The whole tree is linted, not a hand-picked list: `scripts/` sat
+        # outside the gate and carried an unused import that nobody saw.
         run: |
-          ruff check src/jdec src/tests java-deobf/scripts
+          ruff check .
 
   test:
     runs-on: ${{ matrix.os }}

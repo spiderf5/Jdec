@@ -339,8 +339,9 @@ git `035ba13`）得到 `union 342/411 = 83.2%`、`union nodeny 341/411 = 83.0%`�
   机制输出 + 与独立金标准交叉验证 + **该类自己的负控**。实测
   **8/8 PASS、45 项交叉检查**（`docs/STAGE04_REPORT.json`）。
   M1 升级为恢复级：`deflat` 411 改写 + 3693 类 JVM verify + `reasons`
-  411/411 可重放 + `behave` union 342/411；阴性对照 junit 的 17 个合法
-  常量折叠经 `behave` 验证 0 差异。
+  411/411 可重放 + `behave` union 342/411；阴性对照 junit 上**17 个方法**
+  被改写（threaded 22 次 + dead 6 次，折叠/平坦化/switch 均为 0），
+  `behave` 0 差异。
 - 阴性对照 `junit:junit:4.13.2` 是公开可下载、可 sha256 校验的真实
   第三方 jar，比外置授权样本更可复现；生成式 fixture 仍只做单元级负控。
 - `docs/mechanisms/`（`README.md` + M1–M8 共 9 份）是 `:226` 指定的
@@ -348,8 +349,10 @@ git `035ba13`）得到 `union 342/411 = 83.2%`、`union nodeny 341/411 = 83.0%`�
   **来源差异如实保留**，不宣称按 `study/` 原件验收。
 
 `:240-241` 要求的「对应回归数字与文档记录」= `docs/STAGE04_REPORT.json`
-+ `docs/SUPPORT_MATRIX.md` + `docs/SUPPORT_MATRIX_REPORT.json`
-+ `run_tests.py` 的 **1247 条断言 / 146 个用例全绿** + 本节记录。
++ `docs/SUPPORT_MATRIX.md`
++ `run_tests.py` 的 **1247 条断言 / 146 个用例全绿**（当时基线；当前
+1294/149）+ 本节记录。诊断层的报告不再入库：它只是某一时刻代码状态的
+证据，两次入库都随代码推进而失真，改为按需生成。
 据此把 `:19` 的 04 状态列推进为已达成。
 
 **本轮同时纠正三处已写入旧报告的事实错误**：NeoRaven 的「ZKM 27 enhanced

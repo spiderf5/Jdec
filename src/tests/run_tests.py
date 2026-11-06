@@ -1767,7 +1767,7 @@ def test_pipeline_gate() -> None:
 def test_devirt_output_loads() -> None:
     """A devirtualized method must get frames, and the gate must prove it loads."""
     print("devirt: translated bodies carry a StackMapTable and load")
-    from jdec import bvm_devirt as BVM
+    from jdec import devirt as BVM
     from jdec import stubs as SB
     from jdec import verify as VF
     from jdec.ir import attrs as AT
@@ -1918,7 +1918,7 @@ def test_devirt_realistic_vm() -> None:
     import zipfile
     from jdec import behave as BH
     from jdec import devirt as DV
-    from jdec import bvm_devirt as BVM
+    from jdec import devirt as BVM
     from jdec import stubs as SB
     from jdec.ir import attrs as AT
 
@@ -2484,7 +2484,7 @@ def test_devirt_behaviour() -> None:
     print("devirt: translated body vs the plain method, same answers")
     import zipfile
     from jdec import behave as BH
-    from jdec import bvm_devirt as BVM
+    from jdec import devirt as BVM
     from jdec import stubs as SB
 
     if EN.find_java() is None:
@@ -6008,7 +6008,7 @@ def test_cfg_and_dynamic_mocks() -> None:
 
 def test_bvm_and_native_extensions() -> None:
     print("bvm & native: BytecodeVM devirtualization, far CFG reassembly, and Frida dynamic ingest")
-    from jdec import bvm_devirt as BVM
+    from jdec import devirt as BVM
     from jdec import recover as RC
     from jdec import stubs as SB
 
@@ -6281,7 +6281,7 @@ def test_remap_failure_accounting() -> None:
 
 def test_devirt_opcode_disambiguation() -> None:
     print("devirt: opcode interpretation is explicit (ordinal vs jvm-opcode)")
-    from jdec import bvm_devirt as BVM
+    from jdec import devirt as BVM
     # 0x2E is JVM iaload AND a valid ordinal index (-> POP2): the two spaces
     # overlap, so the reading must be chosen by mode, not by silent fallback
     got = BVM.BVMDecoder.resolve_opcode(0x2E, None, mode="ordinal")
@@ -6949,16 +6949,14 @@ def test_support_matrix_per_corpus_gate() -> None:
           SM.Rule("all_zero_rc").holds({}, []) is False)
 
     # ROOT here is src/, while support_matrix.ROOT is the repository root.
+    # Only the acceptance report is versioned. The diagnostic report was
+    # committed twice and went stale both times: it is evidence for whatever
+    # code state produced it, so it is written on demand instead.
     committed = SM.ROOT / "docs" / "SUPPORT_MATRIX_REPORT.json"
-    if committed.is_file():
-        report = json.loads(committed.read_text(encoding="utf-8"))
-        check("the committed report still matches the registry",
-              report["total"] == len(SM.MECHANISMS)
-              and [m["id"] for m in report["mechanisms"]]
-              == [m.id for m in SM.MECHANISMS],
-              str(report.get("total")))
-        check("the committed report records per-corpus evidence",
-              all("per_corpus" in m for m in report["mechanisms"]))
+    check("the diagnostic layer ships no committed report",
+          not committed.is_file(), str(committed))
+    check("the acceptance report is the one under version control",
+          (SM.ROOT / "docs" / "STAGE04_REPORT.json").is_file())
 
 
 def test_benchmark_report_hygiene() -> None:
@@ -7654,7 +7652,7 @@ def test_bvm_extract_code_id_descriptor_gate() -> None:
     """BUG round negative: extract_code_id used to accept any invokestatic
     named 'execute' regardless of descriptor -> wrong codeId on collisions."""
     print("devirt: extract_code_id requires (I... descriptor on execute")
-    from jdec import bvm_devirt as BVM
+    from jdec import devirt as BVM
     from jdec import stubs as SB
     cf = CF.parse(SB.build_stub_class_bytes("com/example/Host"))
     helper = BVM.ConstantPoolHelper(cf)
