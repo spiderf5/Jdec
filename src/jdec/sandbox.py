@@ -322,8 +322,12 @@ def run_replay(cmd: list[str], timeout: int, *, harden: bool = True,
     if harden:
         popen_kw.setdefault("env", child_env())
         if os.name == "nt":
+            # getattr, not subprocess.CREATE_NEW_PROCESS_GROUP: that constant
+            # only exists on Windows, so referencing it directly raises
+            # AttributeError whenever os.name says "nt" on another platform
+            # (a mocked platform in a test, or a caller that patched os.name).
             popen_kw.setdefault("creationflags",
-                                subprocess.CREATE_NEW_PROCESS_GROUP)
+                                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         else:
             popen_kw.setdefault("start_new_session", True)
     proc = subprocess.Popen(cmd, **popen_kw)

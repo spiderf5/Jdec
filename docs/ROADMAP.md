@@ -529,7 +529,19 @@ FAIL。M1 的 `folded=0 / predicates=0 / unflattened=0` 与 M4 的「无 DES 标
 回归 **1294 断言 / 149 用例**；ruff 通过；报告 LF、无本机路径。
 `:19` 的 04 状态随之更新，**02 状态列不变**（`342/411 = 83.2%`、1 个差异）。
 
-**CI 侧的去耦合**：两处断言原先写死了 JDK 21 的产物（`{"21": 11}`、
-`sample.jar` 的 8 个 BSM 条目与 `SwitchBootstraps`），换 JDK 会红。现在改为从
-jar 自身推导（单一 release 覆盖全部类、owner 集合与工具直方图比对、
-有 `SwitchBootstraps` 才要求 `unresolved=1`）。CI 仍是 JDK 21，但断言不再依赖它。
+**CI 侧**：`Actions` 从 `6c8836b` 起一直红，但只有 ubuntu / macOS 的
+`Run test suite` 失败、Windows 全绿。原因是 `run_replay` 在
+`os.name == "nt"` 分支里直接引用 `subprocess.CREATE_NEW_PROCESS_GROUP`——这个
+常量只在 Windows 存在；测试把 `os.name` 伪造成 `"nt"` 时，POSIX 上抛
+`AttributeError`，而它不在 `try` 里，直接把整个套件打断。改为
+`getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)`（生产代码本不该依赖一个
+平台专属常量存在），并在本地用「删掉该属性」模拟 POSIX 复现与验证。
+
+同时给套件加了 `_run(...)`：单个测试抛异常记成一次失败并继续，不再让一个
+崩溃吞掉后面 140 多个测试的全部结果——这正是本次七个 job 只在日志里留下一行
+异常的原因。
+
+另两处断言原先写死了 JDK 21 的产物（`{"21": 11}`、`sample.jar` 的 8 个 BSM
+条目与 `SwitchBootstraps`），换 JDK 会红。现在改为从 jar 自身推导（单一
+release 覆盖全部类、owner 集合与工具直方图比对、有 `SwitchBootstraps` 才要求
+`unresolved=1`）。CI 仍是 JDK 21，但断言不再依赖它。
