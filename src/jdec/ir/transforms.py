@@ -374,6 +374,36 @@ def _retarget(insn, target: int) -> None:
         insn.length = 5
 
 
+def _string_hashcode_switch(prog, cf) -> bool:
+    """True when this method contains a ``String.hashCode()`` dispatch.
+
+    javac lowers ``switch (s)`` into ``s.hashCode()`` + lookupswitch + a state
+    variable + a second switch. That second switch has the same shape as an
+    obfuscator dispatcher, so without this check every such method was counted
+    as "unflattened" on ordinary jars (87/87 on HMCL).
+    """
+    if cf is None:
+        return False
+    for ins in prog.insns:
+        if ins.op != 0xB6:                      # invokevirtual
+            continue
+        idx = ins.arg
+        if idx is None or not 0 < idx < len(cf.cp):
+            continue
+        entry = cf.cp[idx]
+        if not entry or entry[0] not in (CF.C_METHODREF, CF.C_INTERFACE_METHODREF):
+            continue
+        cls_idx, nat_idx = entry[1]
+        nat = cf.cp[nat_idx]
+        cls = cf.cp[cls_idx]
+        if not nat or not cls:
+            continue
+        if (cf.utf8(nat[1][0]) == "hashCode"
+                and cf.utf8(cls[1][0]) == "java/lang/String"):
+            return True
+    return False
+
+
 def unflatten_dispatchers(prog, cf=None) -> int:
     """Retarget `[const s][istore state][goto top]` straight at the case body.
 
@@ -384,6 +414,8 @@ def unflatten_dispatchers(prog, cf=None) -> int:
     which is the whole point, and something the NOP-filling version could only
     approximate.
     """
+    # A javac switch(String) lowering is a compiler artifact, not obfuscation.
+    kind = "switch" if _string_hashcode_switch(prog, cf) else "unflatten"
     total = 0
     for _ in range(8):
         found = 0
@@ -419,7 +451,7 @@ def unflatten_dispatchers(prog, cf=None) -> int:
                 target = cases.get(value)
                 if target is None or target == dest:
                     continue
-                prog.retarget(jump.pc, target, kind="unflatten",
+                prog.retarget(jump.pc, target, kind=kind,
                               switch_pc=sw.pc, state_slot=slot, value=value,
                               case_target=target, dispatcher=dispatcher,
                               const_pc=c.pc, store_pc=st.pc, target=target)
@@ -495,11 +527,14 @@ def drop_dead_code(prog, code_len: int = 0, handlers=None) -> int:
 
 def optimize(prog, cf=None) -> dict:
     """Run the whole pipeline. Returns per-pass rewrite counts."""
-    counts = {"unflattened": 0, "folded": 0, "predicates": 0, "gotos": 0,
-              "threaded": 0, "dead": 0}
+    counts = {"unflattened": 0, "switch": 0, "folded": 0, "predicates": 0,
+              "gotos": 0, "threaded": 0, "dead": 0}
     for _ in range(8):                    # passes feed each other
         before = sum(counts.values())
-        counts["unflattened"] += unflatten_dispatchers(prog, cf)
+        start = len(prog.journal)
+        unflatten_dispatchers(prog, cf)
+        for edit in prog.journal[start:]:
+            counts["switch" if edit.kind == "switch" else "unflattened"] += 1
         counts["folded"] += fold_constants(prog, cf)
         counts["predicates"] += prune_predicates(prog, cf)
         counts["gotos"] += drop_redundant_goto(prog)

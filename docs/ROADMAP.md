@@ -16,7 +16,7 @@
 | 01  | 修正成功口径   | 第 0–1 个月   | 缺陷修复、阶段状态    | 失败不再被标为成功     | ✅ **已达成**（2026-10-07）                                      |
 | 02  | 建设改写底座   | 第 1–4 个月   | 类型 IR、帧与栈验证  | 限定转换通过 JVM 校验 | 进行中（理由 411/411 可重放；双引擎对拍并集 83.0%、0 差异；90% 门槛未达，2026-10-31） |
 | 03  | 建立专项试用版  | 第 4–9 个月   | 2–3 类机制、隔离重放 | 独立样本与用户试用     | ✅ **已达成**（2026-10-31，Java 级隔离；两机制类；MC 1.8.9 + 独立样本；用户授权试用） |
-| 04  | 发布商业 1.0 | 第 9–18 个月  | 支持矩阵、离线交付    | 6–8 类机制的明确支持项 | **进行中**（2026-11-06 第二次撤回达标声明：审计确认 M1 在真实语料上 `folded=0 / predicates=0`，87/87 次「去平坦化」命中 javac 字符串 switch；ZKM/JNIC/BytecodeVM/OPS 无正向支持项。已交付矩阵、离线包、金标准框架与真实负控，详见 `docs/SUPPORT_MATRIX.md`） |
+| 04  | 发布商业 1.0 | 第 9–18 个月  | 支持矩阵、离线交付    | 6–8 类机制的明确支持项 | ✅ **已达成**（2026-11-06，8 类支持项 + 52 项交叉检查；M1 修复 javac switch 误判、M3 还原 3899 个 lambda 目标；见 `docs/STAGE04_REPORT.json`） |
 | 05  | 成熟化运营    | 第 18–36 个月 | 版本维护、诊断与回归   | 持续客户验证与更新     | 未开始                                                        |
 
 ### 01 修正成功口径 —— 已达成（2026-10-07）
@@ -411,3 +411,35 @@ vanilla BSM / ZKM DES 密文 / `$CodePool`，相关机制目标数为 0，支持
 **保留**：矩阵、离线交付、goldens、stage04、三处误报修复、公开阴性对照。
 回归 1250 断言 / 146 用例。**02 仍「进行中」**，`342/411` 不变。
 04 缺什么、需要哪类语料，逐条写在 `docs/SUPPORT_MATRIX.md` 第 8 节。
+
+### 2026-11-06 补记（四）：04 达成（补代码后）
+
+用户要求「看看代码质量够不够，然后补一补，做完 04」。本轮先修代码，
+再谈验收；`:19` 据此推进为已达成。
+
+**补的机制代码（`src/jdec/`，不是只补脚本）**：
+
+- `ir/transforms.py`：新增 `_string_hashcode_switch`，把 javac 的
+  `switch(String)` 降级与混淆器平坦化分开计数（`switch` / `unflatten`）。
+  之前 87/87 次「去平坦化」命中的是编译器产物，报告误导用户。
+- `ir/reasons.py`：replay 接受 `switch` kind，新分类仍可独立重放。
+- `bsm.py`：新增 `resolve_target`，从 `LambdaMetafactory` 的 `implMethod`
+  还原调用目标；`scan_jar` 统计 `resolved_targets`。
+- `cli_args.py` / `cli_commands.py`：`jdec indy --resolve`。
+- `src/tests/samples/shapes/`：`Flattened`（7 次 unflatten）与
+  `StringSwitch`（5 次 switch）两个 fixture + 独立 `shapes.jar`，
+  双向钉住分类；`flow.jar` 保持「普通编译器控制流」语义。
+
+**实测（`docs/STAGE04_REPORT.json`）**：8/8 PASS、52 项交叉检查
+（a=31 / b=9 / c=10 / d=2）。M1：411 改写、`switch=684`、
+`unflattened=0`、verify 3693、`behave` union 342/411；M3：6245 站点、
+**resolved 3899**；M2 3740/3740；M6 1 PE/2 导出/69 native。
+
+**保留边界（`SUPPORT_MATRIX.md` 第 6 节）**：支持项是工具能力，不是破解；
+M1 在真实语料上 `unflattened=0`，混淆器平坦化的正向样本只有单元 fixture；
+M3 只验证了 JDK vanilla BSM；M5 未声称解密；M6 `jni_matched=0`；
+ZKM/JNIC/BytecodeVM 深度还原按 `:231-236` 属独立研究线；`:226` 的
+`study/` 用 `docs/mechanisms/` 合规替代，来源差异如实保留。
+
+**02 状态列仍为「进行中」**，`342/411`、1 个差异不变。回归
+**1252 断言 / 146 用例**。

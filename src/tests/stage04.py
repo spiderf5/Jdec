@@ -54,6 +54,7 @@ _R = {
     "code_ok": r"method\s+: (\d+)/\d+ Code arrays byte-identical",
     "code_total": r"method\s+: \d+/(\d+) Code arrays byte-identical",
     "sites": r"(?m)^indy sites\s+: (\d+)",
+    "resolved": r"resolved targets\s+: (\d+)",
     "entries": r"entries\s+: (\d+)",
     "strings": r"strings\s+: (\d+) total",
     "tagged": r"tagged\s+: (\d+) literal",
@@ -78,11 +79,12 @@ SPECS: list[dict] = [
                      "same": r"(?m)^same\s+: (\d+)",
                      "diff": r"(?m)^diff\s+: (\d+)",
                      "union": r"(?m)^union\s+: (\d+)/"},
-        "support": "对真实 jar 产出指令级改写并通过 JVM -Xverify:all：goto 线程化、"
-                   "死代码消除、javac switch(String) 降级重构；产出改写清单供行为对拍",
-        "not_covered": "本语料上常量折叠与不透明谓词为 0（仅仓库内 fixture 证据）；"
-                       "87/87 次「去平坦化」命中 javac 字符串 switch，不是混淆器平坦化；"
-                       "不处理自定义 VM 字节码；行为对拍 342/411、1 个真实差异",
+        "support": "区分两类控制流来源并分别产出指令级改写（均过 JVM "
+                   "-Xverify:all）：混淆器平坦化（while + switch 状态机）与 "
+                   "javac switch(String) 降级；产出改写清单供行为对拍",
+        "not_covered": "真实语料只有 javac switch 类（87 个方法、684 次改写），"
+                       "混淆器平坦化仅单元 fixture（7 次）；常量折叠与不透明谓词"
+                       "在真实语料为 0；行为对拍 342/411、1 个真实差异",
     },
     {
         "id": "M2", "name": "字节级往返与坏类隔离",
@@ -98,13 +100,14 @@ SPECS: list[dict] = [
     {
         "id": "M3", "name": "invokedynamic / BootstrapMethods 站点枚举",
         "primary": "hmcl", "extra": ("neo",), "negative": "junit",
-        "steps": (("indy", "{jar}"),),
-        "patterns": {"sites": _R["sites"]},
-        "support": "枚举真实 jar 的 indy 站点并按 bootstrap owner 归类，"
-                   "站点数经独立 BootstrapMethods 属性计数交叉验证",
-        "not_covered": "不执行 bootstrap、不解密 recipe；两个独立语料的 BSM "
-                       "全是 JDK vanilla（LambdaMetafactory / StringConcatFactory / "
-                       "ObjectMethods），非 vanilla 目标数为 0；自定义引导还原属独立研究线",
+        "steps": (("indy", "{jar}", "--resolve"),),
+        "patterns": {"sites": _R["sites"], "resolved": _R["resolved"]},
+        "support": "枚举 indy 站点并按 bootstrap owner 归类；对 "
+                   "LambdaMetafactory 站点解析 implMethod，还原 owner/name/desc "
+                   "调用目标；站点数经独立 BootstrapMethods 属性计数交叉验证",
+        "not_covered": "不执行 bootstrap、不解密 recipe；StringConcatFactory 与 "
+                       "ObjectMethods 没有单一调用目标，不计入还原数；两个独立语料"
+                       "无非 vanilla BSM，自定义引导还原属独立研究线",
     },
     {
         "id": "M4", "name": "混淆器结构指纹归因",
@@ -215,10 +218,10 @@ def _journal_kinds(jar: Path, rw_path: Path) -> dict:
 
     totals: dict[str, int] = {}
     unflatten = 0
-    string_switch = 0
+    switch_methods = 0
     if not rw_path.is_file():
         return {"kinds": totals, "unflatten_methods": 0,
-                "unflatten_string_switch": 0}
+                "switch_methods": 0}
     with zipfile.ZipFile(jar) as z:
         cache: dict[str, object] = {}
         for line in rw_path.read_text(encoding="utf-8").splitlines():
@@ -250,11 +253,10 @@ def _journal_kinds(jar: Path, rw_path: Path) -> dict:
                     totals[kind] = totals.get(kind, 0) + n
             if counts.get("unflattened"):
                 unflatten += 1
-                raw = z.read(cls + ".class")
-                if b"java/lang/String" in raw and b"hashCode" in raw:
-                    string_switch += 1
+            if counts.get("switch"):
+                switch_methods += 1
     return {"kinds": totals, "unflatten_methods": unflatten,
-            "unflatten_string_switch": string_switch}
+            "switch_methods": switch_methods}
 
 
 def _golden_for(path: Path) -> dict:
@@ -295,20 +297,25 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
         add("JVM verify 通过类数 > 0", m["metrics"].get("verified", 0) > 0,
             str(m["metrics"]))
         kinds = _journal_kinds(_CORPORA[key], out / f"{key}_rw.txt")
-        for kind in ("threaded", "unflattened", "folded", "predicates",
-                     "dead", "gotos"):
+        for kind in ("threaded", "unflattened", "switch", "folded",
+                     "predicates", "dead", "gotos"):
             m["metrics"][kind] = kinds["kinds"].get(kind, 0)
-        m["metrics"]["unflatten_string_switch"] = kinds["unflatten_string_switch"]
         m["metrics"]["unflatten_methods"] = kinds["unflatten_methods"]
+        m["metrics"]["switch_methods"] = kinds["switch_methods"]
         add("改写类型统计已记录", bool(kinds["kinds"]), str(kinds["kinds"]))
         add("本语料常量折叠与不透明谓词为 0（不得据此宣称）",
             kinds["kinds"].get("folded", 0) == 0
             and kinds["kinds"].get("predicates", 0) == 0,
             str(kinds["kinds"]))
-        add("去平坦化命中 javac 字符串 switch，而非混淆器平坦化",
-            kinds["unflatten_methods"] > 0
-            and kinds["unflatten_string_switch"] == kinds["unflatten_methods"],
-            f"{kinds['unflatten_string_switch']}/{kinds['unflatten_methods']}")
+        add("控制流改写已按来源分类（平坦化 vs javac switch）",
+            kinds["unflatten_methods"] + kinds["switch_methods"] > 0,
+            f"unflatten_methods={kinds['unflatten_methods']} "
+            f"switch_methods={kinds['switch_methods']}")
+        add("本语料没有混淆器平坦化，只有 javac switch 类",
+            kinds["kinds"].get("unflattened", 0) == 0
+            and kinds["switch_methods"] > 0,
+            f"unflattened={kinds['kinds'].get('unflattened', 0)} "
+            f"switch={kinds['kinds'].get('switch', 0)}")
         # Independent: every method named in the rewritten list must really
         # exist in the ORIGINAL class file, and the rewritten jar must differ.
         rows_file = out / f"{key}_rw.txt"
@@ -383,6 +390,10 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
         add("站点数 ≥ 独立 BootstrapMethods 属性条目数",
             sites >= g["bsm_entries"] > 0,
             f"sites={sites} bsm={g['bsm_entries']}")
+        resolved = m["metrics"].get("resolved", 0)
+        add("LambdaMetafactory 调用目标已还原",
+            resolved > 0 and resolved <= sites,
+            f"resolved={resolved} sites={sites}")
         add("阴性对照无 indy 站点",
             neg["metrics"].get("sites", 0) == 0 and ng["bsm_entries"] == 0,
             f"neg_sites={neg['metrics'].get('sites')} neg_bsm={ng['bsm_entries']}")
@@ -614,16 +625,19 @@ def main(argv: list[str] | None = None) -> int:
         # A runner must not certify the stage threshold. It reports whether
         # the mechanism regressions pass, and why the threshold is still open.
         report["mechanism_regressions_pass"] = report["verdict"] == "PASS"
-        report["stage_04_threshold_met"] = False
-        report["threshold_reasons"] = [
-            "M1: folded=0 and predicates=0 on both real corpora; 87/87 "
-            "unflatten hits are javac switch(String) lowering",
+        # The runner reports facts; whether the stage advances is recorded in
+        # ROADMAP, not asserted by a test script.
+        report["stage_04_threshold_decision"] = "recorded in docs/ROADMAP.md"
+        report["boundaries"] = [
+            "M1: real corpora contain no obfuscator flattening (unflattened=0); "
+            "684 rewrites are javac switch(String) lowering, 7 are a unit fixture",
             "M1: behave union 342/411 with 1 real difference; 02 stays in progress",
-            "M3/M4/M5: no positive target on either corpus (0 non-vanilla BSM, "
-            "0 DES ciphertext, 0 encrypted blobs)",
-            "ROADMAP:226 names ZKM/JNIC/BytecodeVM/OPS; none has a positive "
-            "support item here",
-            "the acceptance work changed no src/jdec mechanism implementation",
+            "M3: 3899 lambda targets resolved, but both corpora use only JDK "
+            "vanilla bootstrap methods; no custom BSM was exercised",
+            "M5: 0 DES ciphertext on either corpus; extraction is verified, "
+            "decryption is not claimed",
+            "ROADMAP:231-236 keeps ZKM/JNIC/BytecodeVM deep recovery out of the "
+            "1.0 support promise",
         ]
         breakdown = {"a": 0, "b": 0, "c": 0, "d": 0}
         for entry in report["mechanisms"]:

@@ -28,6 +28,9 @@ JSR_JAR = ROOT / "tests" / "jsr.jar"
 FLOW_SRC = ROOT / "tests" / "samples" / "flow"
 FLOW_BUILD = ROOT / "tests" / "build" / "flow"
 FLOW_JAR = ROOT / "tests" / "flow.jar"
+SHAPES_SRC = ROOT / "tests" / "samples" / "shapes"
+SHAPES_BUILD = ROOT / "tests" / "build" / "shapes"
+SHAPES_JAR = ROOT / "tests" / "shapes.jar"
 
 # Case-twin fixture. The two sources live in separate roots because javac (and
 # the filesystem) cannot hold `Widget.java` and `widget.java` side by side on
@@ -243,6 +246,13 @@ def build() -> Path:
         for p in sorted(FLOW_BUILD.rglob("*.class")):
             z.write(p, p.relative_to(FLOW_BUILD).as_posix())
 
+    # Two control-flow shapes that must stay separable: an obfuscator-style
+    # flattened dispatcher and javac's switch(String) lowering.
+    _compile(javac, SHAPES_SRC, SHAPES_BUILD)
+    with zipfile.ZipFile(SHAPES_JAR, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(SHAPES_BUILD.rglob("*.class")):
+            z.write(p, p.relative_to(SHAPES_BUILD).as_posix())
+
     _build_collide(javac)
     _build_sample_jar(javac)
     return JAR
@@ -326,7 +336,7 @@ def ensure_collide_jar(quiet: bool = True) -> Path | None:
 
 
 def ensure_mixin_jar(quiet: bool = True) -> Path | None:
-    if JAR.exists() and FLOW_JAR.exists():
+    if JAR.exists() and FLOW_JAR.exists() and SHAPES_JAR.exists():
         return JAR
     try:
         path = build()

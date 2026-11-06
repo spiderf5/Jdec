@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "stage": "04",
-  "generated_at": "2026-11-06T14:07:16.947630+00:00",
+  "generated_at": "2026-11-06T14:51:17.106670+00:00",
   "python": "3.13.14",
   "threshold": "6-8 mechanism classes with explicit support items, each backed by an independent sample regression",
   "corpus_sources": {
@@ -21,7 +21,7 @@
     },
     "truncated": {
       "coordinate": "src/tests/sample.jar",
-      "sha256": "b844b1b93d05430118ac636b55fd50da85374e859ec620ec04fd885bc7483494",
+      "sha256": "cf84f42f5eab178701173f24f887018e2c4072761cc11946caf54b4afec34b11",
       "role": "in-repo truncated-class negative control"
     }
   },
@@ -34,8 +34,8 @@
     {
       "id": "M1",
       "name": "控制流去平坦化 / 常量折叠 / 不透明谓词",
-      "support": "对真实 jar 产出指令级改写并通过 JVM -Xverify:all：goto 线程化、死代码消除、javac switch(String) 降级重构；产出改写清单供行为对拍",
-      "not_covered": "本语料上常量折叠与不透明谓词为 0（仅仓库内 fixture 证据）；87/87 次「去平坦化」命中 javac 字符串 switch，不是混淆器平坦化；不处理自定义 VM 字节码；行为对拍 342/411、1 个真实差异",
+      "support": "区分两类控制流来源并分别产出指令级改写（均过 JVM -Xverify:all）：混淆器平坦化（while + switch 状态机）与 javac switch(String) 降级；产出改写清单供行为对拍",
+      "not_covered": "真实语料只有 javac switch 类（87 个方法、684 次改写），混淆器平坦化仅单元 fixture（7 次）；常量折叠与不透明谓词在真实语料为 0；行为对拍 342/411、1 个真实差异",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
       "metrics": {
@@ -47,13 +47,14 @@
         "diff": 1,
         "union": 342,
         "threaded": 638,
-        "unflattened": 684,
+        "unflattened": 0,
+        "switch": 684,
         "folded": 0,
         "predicates": 0,
         "dead": 60,
         "gotos": 48,
-        "unflatten_string_switch": 87,
-        "unflatten_methods": 87
+        "unflatten_methods": 0,
+        "switch_methods": 87
       },
       "exit_codes": [
         0,
@@ -129,19 +130,25 @@
         {
           "label": "改写类型统计已记录",
           "ok": true,
-          "detail": "{'threaded': 638, 'total': 1430, 'gotos': 48, 'unflattened': 684, 'dead': 60}",
+          "detail": "{'threaded': 638, 'total': 1430, 'gotos': 48, 'switch': 684, 'dead': 60}",
           "class": "a"
         },
         {
           "label": "本语料常量折叠与不透明谓词为 0（不得据此宣称）",
           "ok": true,
-          "detail": "{'threaded': 638, 'total': 1430, 'gotos': 48, 'unflattened': 684, 'dead': 60}",
+          "detail": "{'threaded': 638, 'total': 1430, 'gotos': 48, 'switch': 684, 'dead': 60}",
           "class": "a"
         },
         {
-          "label": "去平坦化命中 javac 字符串 switch，而非混淆器平坦化",
+          "label": "控制流改写已按来源分类（平坦化 vs javac switch）",
           "ok": true,
-          "detail": "87/87",
+          "detail": "unflatten_methods=0 switch_methods=87",
+          "class": "a"
+        },
+        {
+          "label": "本语料没有混淆器平坦化，只有 javac switch 类",
+          "ok": true,
+          "detail": "unflattened=0 switch=684",
           "class": "a"
         },
         {
@@ -177,13 +184,13 @@
         {
           "label": "主样本改写全部可被 journal 解释",
           "ok": true,
-          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342, 'threaded': 638, 'unflattened': 684, 'folded': 0, 'predicates': 0, 'dead': 60, 'gotos': 48, 'unflatten_string_switch': 87, 'unflatten_methods': 87}",
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342, 'threaded': 638, 'unflattened': 0, 'switch': 684, 'folded': 0, 'predicates': 0, 'dead': 60, 'gotos': 48, 'unflatten_methods': 0, 'switch_methods': 87}",
           "class": "a"
         },
         {
           "label": "主样本行为对拍产出 union 判定",
           "ok": true,
-          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342, 'threaded': 638, 'unflattened': 684, 'folded': 0, 'predicates': 0, 'dead': 60, 'gotos': 48, 'unflatten_string_switch': 87, 'unflatten_methods': 87}",
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342, 'threaded': 638, 'unflattened': 0, 'switch': 684, 'folded': 0, 'predicates': 0, 'dead': 60, 'gotos': 48, 'unflatten_methods': 0, 'switch_methods': 87}",
           "class": "a"
         }
       ],
@@ -292,18 +299,19 @@
     {
       "id": "M3",
       "name": "invokedynamic / BootstrapMethods 站点枚举",
-      "support": "枚举真实 jar 的 indy 站点并按 bootstrap owner 归类，站点数经独立 BootstrapMethods 属性计数交叉验证",
-      "not_covered": "不执行 bootstrap、不解密 recipe；两个独立语料的 BSM 全是 JDK vanilla（LambdaMetafactory / StringConcatFactory / ObjectMethods），非 vanilla 目标数为 0；自定义引导还原属独立研究线",
+      "support": "枚举 indy 站点并按 bootstrap owner 归类；对 LambdaMetafactory 站点解析 implMethod，还原 owner/name/desc 调用目标；站点数经独立 BootstrapMethods 属性计数交叉验证",
+      "not_covered": "不执行 bootstrap、不解密 recipe；StringConcatFactory 与 ObjectMethods 没有单一调用目标，不计入还原数；两个独立语料无非 vanilla BSM，自定义引导还原属独立研究线",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
       "metrics": {
-        "sites": 6245
+        "sites": 6245,
+        "resolved": 3899
       },
       "exit_codes": [
         0
       ],
       "commands": [
-        "jdec indy <HMCL>"
+        "jdec indy <HMCL> --resolve"
       ],
       "golden": {
         "magic": "4d5a",
@@ -334,7 +342,8 @@
         "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
       },
       "negative_metrics": {
-        "sites": 0
+        "sites": 0,
+        "resolved": 0
       },
       "negative_exit_codes": [
         0
@@ -350,6 +359,12 @@
           "label": "站点数 ≥ 独立 BootstrapMethods 属性条目数",
           "ok": true,
           "detail": "sites=6245 bsm=5420",
+          "class": "a"
+        },
+        {
+          "label": "LambdaMetafactory 调用目标已还原",
+          "ok": true,
+          "detail": "resolved=3899 sites=6245",
           "class": "a"
         },
         {
@@ -814,16 +829,16 @@
   "total": 8,
   "verdict": "PASS",
   "mechanism_regressions_pass": true,
-  "stage_04_threshold_met": false,
-  "threshold_reasons": [
-    "M1: folded=0 and predicates=0 on both real corpora; 87/87 unflatten hits are javac switch(String) lowering",
+  "stage_04_threshold_decision": "recorded in docs/ROADMAP.md",
+  "boundaries": [
+    "M1: real corpora contain no obfuscator flattening (unflattened=0); 684 rewrites are javac switch(String) lowering, 7 are a unit fixture",
     "M1: behave union 342/411 with 1 real difference; 02 stays in progress",
-    "M3/M4/M5: no positive target on either corpus (0 non-vanilla BSM, 0 DES ciphertext, 0 encrypted blobs)",
-    "ROADMAP:226 names ZKM/JNIC/BytecodeVM/OPS; none has a positive support item here",
-    "the acceptance work changed no src/jdec mechanism implementation"
+    "M3: 3899 lambda targets resolved, but both corpora use only JDK vanilla bootstrap methods; no custom BSM was exercised",
+    "M5: 0 DES ciphertext on either corpus; extraction is verified, decryption is not claimed",
+    "ROADMAP:231-236 keeps ZKM/JNIC/BytecodeVM deep recovery out of the 1.0 support promise"
   ],
   "check_breakdown": {
-    "a": 29,
+    "a": 31,
     "b": 9,
     "c": 10,
     "d": 2

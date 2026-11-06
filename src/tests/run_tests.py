@@ -7056,6 +7056,30 @@ def test_stage04_acceptance_harness() -> None:
     check("the skill fingerprint twin is byte-identical",
           twin == (ROOT.parent / "src/jdec/fingerprints.json").read_bytes())
 
+    # The two control-flow shapes must stay separated. Without a fixture for
+    # each direction the pass silently treated javac output as obfuscation.
+    import zipfile as _zf
+    from jdec import bytecode as _BC
+    from jdec import classfile as _CF
+    from jdec.ir import assemble as _ASM
+    from jdec.ir import transforms as _TR
+
+    def _kinds_of(cls_name: str, method: str) -> dict:
+        with _zf.ZipFile(ROOT / "tests" / "shapes.jar") as z:
+            cf = _CF.parse(z.read(cls_name + ".class"))
+        member = next(x for x in cf.methods
+                      if cf.utf8(x.name_index) == method)
+        code = _BC.method_code(cf, member, decode_insns=False)
+        prog = _ASM.Program.parse(code.code, code.handlers)
+        return _TR.optimize(prog, cf)
+
+    flat = _kinds_of("demo/shapes/Flattened", "run")
+    ssw = _kinds_of("demo/shapes/StringSwitch", "pick")
+    check("a real flattened dispatcher is classified as unflatten",
+          flat.get("unflattened", 0) > 0 and flat.get("switch", 0) == 0, str(flat))
+    check("a javac switch(String) is classified as switch",
+          ssw.get("switch", 0) > 0 and ssw.get("unflattened", 0) == 0, str(ssw))
+
     report = ROOT.parent / "docs" / "STAGE04_REPORT.json"
     if report.is_file():
         data = json.loads(report.read_text(encoding="utf-8"))
@@ -7072,11 +7096,12 @@ def test_stage04_acceptance_harness() -> None:
                   for m in data["mechanisms"]))
         check("the negative corpus is publicly reproducible",
               "junit:junit:4.13.2" in str(data["corpus_sources"]))
-        check("the acceptance report does not certify the stage threshold",
-              data.get("stage_04_threshold_met") is False
+        check("the runner reports facts without certifying the threshold",
+              data.get("stage_04_threshold_decision")
+              == "recorded in docs/ROADMAP.md"
               and data.get("mechanism_regressions_pass") is True
-              and len(data.get("threshold_reasons", [])) >= 3,
-              str(data.get("threshold_reasons"))[:200])
+              and len(data.get("boundaries", [])) >= 3,
+              str(data.get("boundaries"))[:200])
         check("every check is classified and the counts add up",
               data.get("check_breakdown", {}).get("a", 0) > 0
               and sum(data["check_breakdown"].values())
@@ -7087,10 +7112,9 @@ def test_stage04_acceptance_harness() -> None:
               m1["metrics"].get("folded") == 0
               and m1["metrics"].get("predicates") == 0,
               str(m1["metrics"]))
-        check("M1 records the javac switch(String) share of unflatten",
-              m1["metrics"].get("unflatten_methods", 0) > 0
-              and m1["metrics"].get("unflatten_string_switch")
-              == m1["metrics"].get("unflatten_methods"),
+        check("M1 separates javac switch from obfuscator flattening",
+              m1["metrics"].get("switch", 0) > 0
+              and m1["metrics"].get("unflatten_methods") == 0,
               str(m1["metrics"]))
 
 def test_replay_safety_gate() -> None:

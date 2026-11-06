@@ -219,7 +219,7 @@ def replay(original_code: bytes, original_handlers, journal,
         for edit in group:
             pcs = [s.pc for s in edit.before]
             try:
-                if kind in ("thread", "unflatten"):
+                if kind in ("thread", "unflatten", "switch"):
                     shadow.retarget(pcs[0], edit.evidence["target"], kind=kind)
                 elif kind == "dead_handlers":
                     shadow.set_handlers(

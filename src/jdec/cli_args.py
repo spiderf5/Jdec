@@ -266,6 +266,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="write detailed JSON (stats + sampled sites)")
     si.add_argument("--sample", type=int, default=40,
                     help="how many classes of site detail to include")
+    si.add_argument("--resolve", action="store_true",
+                    help="resolve LambdaMetafactory implementation targets "
+                         "(owner/name/desc) instead of only counting sites")
     si.set_defaults(handler="cmd_indy")
 
     sr = sub.add_parser("recover",

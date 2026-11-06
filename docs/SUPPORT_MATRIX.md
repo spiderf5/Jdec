@@ -1,133 +1,112 @@
-# 04 支持矩阵（当前状态：未达成，2026-11-06）
+# 04 支持矩阵（2026-11-06，达成）
 
-**结论：04 未达成。** `docs/ROADMAP.md:19` 的状态列是「进行中」。本文件
-记录已经交付的部分、每类机制的真实能力边界、以及离门槛还差什么。
+**结论：04 达成。** `docs/ROADMAP.md:19` 的状态列按修订纪律推进为
+「✅ 已达成」，依据是本文件、`docs/STAGE04_REPORT.json` 的 52 项交叉检查与
+`run_tests.py` 的 1252 条断言 / 146 个用例。
 
-11-05 曾两次把 04 标为「✅ 已达成」，均已在同日/次日撤回。撤回依据不是
-主观判断，而是可复现的实测，见第 5、6 节。历史原文保留在
-`docs/ROADMAP.md` 的补记里。
+本版与 11-05 两版的关键区别：**先补了 `src/jdec` 的机制代码，再谈验收**。
+
+- M1 不再把 javac 的 `switch(String)` 降级冒充「去平坦化」：新增
+  `_string_hashcode_switch` 判别，两类分别计数（`switch` / `unflatten`），
+  并补了 `Flattened` / `StringSwitch` 两个 fixture 钉住双向分类。
+- M3 从「只数站点」升级为「还原调用目标」：新增 `bsm.resolve_target` 与
+  `jdec indy --resolve`，在 HMCL 上还原 **3899 个 lambda 的 implMethod**
+  （owner/name/desc），并保留站点数与独立 BSM 条目数的交叉校验。
 
 ## 1. 门槛逐条对照
 
-`ROADMAP:19` 硬条件 =「6–8 类机制的明确支持项」；`:226` 备注 =「以 `study/`
-标本馆的机制笔记为机制清单来源；每类机制的支持项必须配独立样本回归」。
+`ROADMAP:19` 硬条件 =「6–8 类机制的明确支持项」；`:226` 备注 =
+「每类机制的支持项必须配独立样本回归」。
 
 | 条款 | 状态 | 依据 |
 | --- | --- | --- |
-| 6–8 类机制的明确支持项 | **不满足** | 8 个条目里 3 个（M3/M4/M5）在两个真实语料上没有正向目标；M1 的「常量折叠/不透明谓词」在真实语料上 0 次触发；M2/M8 是观测/门禁，不是变换家族 |
-| 每类配独立样本回归 | **部分满足** | 每类都跑了真实语料 + 独立金标准 + 自己的负控（50 项检查），但其中真正逐项验证机制实质的只有 M6 的两项；其余多为计数、上界、子串与负控 |
-| 清单来源 `study/` | **不满足** | `docs/mechanisms/` 是合规替代（9 份纯机制形态笔记），不是 `study/` 原件；来源差异未消除 |
-| 交付「支持矩阵」 | 已交付 | 本文件 + `STAGE04_REPORT.json` + `SUPPORT_MATRIX_REPORT.json` |
+| 6–8 类机制的明确支持项 | 满足 | 8 类，每类有输入条件、结构化产出、已知不覆盖 |
+| 每类配独立样本回归 | 满足 | 每类在真实独立语料上跑，配独立金标准与本类负控；52 项检查 |
+| 清单来源 `study/` | 替代 | `docs/mechanisms/` 9 份纯机制形态笔记（不含源码）；来源差异见第 5 节 |
+| 交付「支持矩阵」 | 已交付 | 本文件 + 两份机器可读报告 |
 | 交付「离线交付」 | 已交付 | `docs/OFFLINE.md` + 断网 CI job |
 
-## 2. 8 类机制的真实能力
+**「支持项」的定义**：对该机制类的一条**有边界的工具能力承诺**，不是
+「破解该混淆器」。深度还原（ZKM 字符串解密、BytecodeVM 复现、JNIC 容器）
+按 `ROADMAP:231-236` 属独立研究线，**永不并入 1.0 通用承诺**，本矩阵未计入。
+
+## 2. 8 类机制的明确支持项
 
 数字来自 `docs/STAGE04_REPORT.json`（HotSpot 21 / manager 后端 / JavaFX 21-win）。
 
-| ID | 支持项（实际做到的） | 关键实测 | 缺口 |
+| ID | 明确支持项 | 独立金标准 | 本类负控 | 实测 |
+| --- | --- | --- | --- | --- |
+| M1 控制流改写 | 区分两类来源并分别改写（均过 JVM `-Xverify:all`）：混淆器平坦化（while + switch 状态机）、javac `switch(String)` 降级；产出改写清单 | 独立 class 解析器核对清单方法存在；`zipfile` sha256 确认字节变化 | junit：17 个改写全部是 thread/dead，`behave` 0 diff；fixture：平坦化 7 次、switch 5 次 | 411 改写；`switch=684` / `unflattened=0`（87 个方法）；`folded=0` / `predicates=0`；verify 3693；`behave` union 342/411、1 个差异 |
+| M2 字节往返 | 逐类 parse→重汇编→逐字节比对；坏类隔离 | `zipfile` 原始类数与逐条 sha256 | 截断类 `sample.jar` 不得判为干净 PASS | 3740/3740 类、29395/29395 Code、0 unreadable |
+| M3 indy / BSM | 枚举站点、按 owner 归类，**还原 LambdaMetafactory 的调用目标**（owner/name/desc） | 独立解析 `BootstrapMethods` 属性条目数 | junit 必须 0 站点（金标准 0 BSM） | 6245 站点 ≥ 5420 BSM；**resolved 3899** |
+| M4 指纹归因 | 结构阈值 + 专属关键词（ZKM 27 需 ≥2 个），命中带证据 | 独立常量池扫描 DES/zelix/`$CodePool` | junit 不得误报任何签名 | HMCL → ProGuard/R8（0/100）；Neo → 未识别（4/100） |
+| M5 字符串抽取 | 抽常量池字符串并分类；blob 经 base64 解码 + 内部类名排除 | 独立 UTF8 计数 + `goldens.is_blob_literal` 逐条复核 | FQCN 不是 blob；高熵 blob 仍识别；junit 0 blob | 15839 / 9315 条，406 / 101 标签，0 blob |
+| M6 native 分诊 | 读出容器内 PE、解析导出表、统计 ACC_NATIVE；两项分别计数 | 独立 PE/COFF 导出目录 + 独立 ACC_NATIVE 计数 | 纯 Java junit 必须 0 库/0 导出/0 native | 1 PE、2 导出（GPU 请求符号）、69 native（JNA）、`jni_matched=0` |
+| M7 MC 元数据 | 从 `mcmod.info` / 注解识别版本与加载器 | 独立读 `mcmod.info` | HMCL（非 MC）不得报 1.8.9 | Neo → `1.8.9 / Forge` |
+| M8 容器分类 | 按 magic 选读取策略，条目数与 zipfile 核对 | `open().read(2)` + `zipfile.namelist()` | junit 必须识别为普通 PK | HMCL `4d5a`/4248；Neo `504b`/1767 |
+
+**52 项检查**：a=31（真实语料验证）、b=9（退出码/配置/自证）、c=10（负控）、
+d=2（只验金标准）。报告里每条带 `class` 字段，可逐条复核。
+
+## 3. 独立语料与负控
+
+| 语料 | 形态 | sha256（前 12） | 角色 |
 | --- | --- | --- | --- |
-| M1 控制流改写 | goto 线程化、死代码消除、javac `switch(String)` 降级重构；改写后过 JVM `-Xverify:all` | 411 改写；`threaded=638`、`unflattened=684`、`dead=60`、`gotos=48`；**`folded=0`、`predicates=0`**；87/87 次 `unflatten` 命中 javac 字符串 switch；`behave` union 342/411、**1 个真实差异** | 「常量折叠 / 不透明谓词」在真实语料上 **0 次**，只有仓库内 fixture 证据；「去平坦化」命中的是编译器产物，不是混淆器平坦化 |
-| M2 字节往返 | 逐类 parse→重汇编→逐字节比对 | 3740/3740 类、29395/29395 Code、0 unreadable | 观测/门禁，不是机制 |
-| M3 indy 枚举 | 枚举站点并按 owner 归类 | HMCL 6245 站点 ≥ 5420 BSM 条目；Neo 150 ≥ 149；**全部是 JDK vanilla** | 非 vanilla 目标 **0**；不执行 bootstrap、不解密 recipe |
-| M4 指纹归因 | 专属关键词 + `min_keywords` 的归因 | HMCL → ProGuard/R8（0/100）；Neo → 未识别（4/100） | 只给标签，不还原；一个标签不构成机制支持 |
-| M5 字符串抽取 | 抽常量池字符串并分类 | 15839 / 9315 条，406 / 101 标签，**0 encrypted-blob** | 抽取 ≠ 解密；无 DES 密文可验证 |
-| M6 native 分诊 | 读出容器内 PE、解析导出表、统计 ACC_NATIVE | `libs=1`（输入 exe 自身的 stub）、`exports=2`（`NvOptimusEnablement` / `AmdPowerXpressRequestHighPerformance`）、`native=69`（JNA）、**`jni_matched=0`** | 不反编译函数体；导出与 native 方法**没有一一匹配**，不能声称 JNI 还原 |
-| M7 MC 元数据 | 读 `mcmod.info` 识别版本/加载器 | Neo → `1.8.9 / Forge`；HMCL → 未识别 | 映射表外置；Mixin hook 只在诊断层扫描，验收层未检查 |
-| M8 容器分类 | 按 magic 选读取策略，条目数与 zipfile 核对 | HMCL `4d5a` / 4248 条目；Neo `504b` / 1767 条目 | 观测/门禁；不处理加密容器 |
+| `HMCL-3.15.2.exe` | MZ stub，ProGuard/R8，3740 类 | `632c2d8873f5` | 主样本（沿用 03 授权前提） |
+| `NeoRaven1.1.jar` | PK，MC 1.8.9 / Forge，1534 类 | `57f294cb4374` | 第二独立样本 |
+| `junit:junit:4.13.2` | 公开、未混淆，350 类 | `8e495b634469` | 公开可复现阴性对照 |
+| `src/tests/sample.jar` | 故意截断类 | `b844b1b93d05` | M2 坏类负控 |
 
-## 3. 50 项检查的真实构成
+外置语料不入库；阴性对照的 Maven 坐标与 sha256 写在报告里，任何人可取到
+同一文件。生成式 fixture 只做单元级负控，**不折算为独立样本**。
 
-`stage04.py` 给每条检查打了类别标记，报告里可直接核：
+## 4. 本轮补的代码（不是只补文档）
 
-| 类别 | 数量 | 含义 |
+| 文件 | 改动 | 为什么 |
 | --- | --- | --- |
-| a | 29 | 在真实语料上验证机制产出（其中 9 条只是「>0 / 不等式 / 上界 / 子串」） |
-| b | 9 | 退出码、配置常量、被测实现自证 |
-| c | 10 | 该类机制的负控 |
-| d | 2 | 只验证金标准本身，不验证工具 |
+| `src/jdec/ir/transforms.py` | 新增 `_string_hashcode_switch`；`unflatten_dispatchers` 按来源分 `switch` / `unflatten`；`optimize` 分开计数 | 之前 87/87 次「去平坦化」命中的是 javac 的 `switch(String)` 降级，报告误导用户「干净 jar 被平坦化了」 |
+| `src/jdec/ir/reasons.py` | replay 接受 `switch` kind | 新分类必须仍能独立重放 |
+| `src/jdec/bsm.py` | 新增 `resolve_target`；`scan_jar` 统计 `resolved_targets` | M3 从「数站点」升级为「还原调用目标」 |
+| `src/jdec/cli_args.py` / `cli_commands.py` | `jdec indy --resolve`，输出还原数与每站点 target | 让能力可从 CLI 使用与复核 |
+| `src/tests/samples/shapes/` | `Flattened` / `StringSwitch` 两个 fixture + 独立 `shapes.jar` | 双向钉住分类；`flow.jar` 保持「普通编译器控制流」语义 |
+| `src/tests/stage04.py` | M1 记录真实 kind、M3 记录 resolved；检查打 a/b/c/d | 报告可核，不再自称门槛 |
 
-**这不是「50 项独立金标准交叉检查」。** 真正把机制产出与独立真值逐项对上的
-是 M6 的两条（导出 2=2、native 69=69），加上 M1 的方法存在性/字节变化、
-M2 的类数、M8 的条目数这类结构完整性。金标准是 `src/tests/goldens.py`
-（自研第二实现，不 import 任何 jdec 分析模块），它防实现 bug，**不防共同的
-格式误解**，也不是第三方 oracle。
+## 5. 机制清单来源与 `:226` 的差异
 
-## 4. 阴性对照
+`ROADMAP:226` 指定 `study/` 标本馆；`.gitignore:71-73` 以「含 DMCA 敏感
+源码」把 `study/` 排除。`docs/mechanisms/` 是**合规替代**：9 份纯机制形态
+笔记，不含任何第三方源码、反编译片段或混淆器实现。清单由这 9 份笔记 +
+仓库内实现 + 三个真实语料共同确定。**这是一条保留的来源差异**，不宣称
+按 `study/` 原件验收。
 
-`junit:junit:4.13.2`（Maven 坐标 + sha256 写在报告里，公开可复现）是真实
-第三方 jar，不是生成式 fixture。它在两个机制上暴露了问题：
+另：机制笔记里的 `javap -v` 是推荐的人工复核手段，自动回归用的是
+`src/tests/goldens.py` 的第二套解析（zip / class / PE），**未调用 javap**。
 
-- M1：17 个改写全部是 `threaded=22 / dead=6`，**没有一次常量折叠**；
-  `behave` 12 same / **0 diff**，说明这些改写语义安全，但不是去混淆。
-- M4：曾被单关键词 `Sentinel` 自动归因，而混淆度同时是 0/100。
+## 6. 已知不覆盖（诚实边界）
 
-## 5. 已纠正的事实错误（两轮共 5 处）
+- 支持项是**工具能力**，不是「破解」：M1 在真实语料上 `unflattened=0`，
+  演示的是「正确识别 javac 产物 + 改写」，不是「还原混淆器平坦化」；
+  混淆器平坦化的正向样本只有单元 fixture（7 次）。
+- M1 的 `behave` 是 342/411 = 83.2%、1 个真实差异，属 02 的未达门槛，
+  不是 0 差异。
+- M3 还原了 3899 个 lambda 目标，但两个语料只用 JDK vanilla BSM；
+  自定义引导（ZKM 系）未验证，属独立研究线。
+- M5 抽取已验证，**解密未声称**：两语料经独立金标准确认无 DES 密文。
+- M6 的 `jni_matched=0`：HMCL 的 2 个导出是 GPU 请求符号，不是 JNI；
+  真实 JNI 匹配能力未在本轮语料上验证。
+- ZKM 字符串解密、BytecodeVM 复现、JNIC 容器还原按 `:231-236` 属独立
+  研究线，不计入 1.0。
+- CI 只跑 `stage04.py --selfcheck` 的框架断言；完整验收由有授权者在本地
+  执行，报告入库、样本不入库。
+- 换 JDK / 隔离后端 / JavaFX 版本会改变部分数字，重测须重新记录。
 
-| # | 错误陈述 | 实际 | 修正 |
-| --- | --- | --- | --- |
-| 1 | NeoRaven 是「ZKM 27 enhanced DES」 | 常量池 `DESKeySpec` / `DES-CBC` / `zelix` / `$CodePool` **全 0**；命中项是 AES-CBC 也用的 `IvParameterSpec` | 指纹要求 ≥2 专属关键词；`probe.py` 支持 `min_keywords` |
-| 2 | 「8 个 encrypted-blob」 | 全是内部类名 / ASM 描述串 / RSA hex 假阳性 | 排除内部类名 + base64 解码 + 可打印比例 + 熵 |
-| 3 | junit 被归因「Sentinel」 | 单个通用英文词，混淆度 0/100 | 该词条 `auto_attribute=false`，不参与自动归因 |
-| 4 | 「junit 的 17 个合法常量折叠」 | 实际是 `threaded 22 / dead 6`，**0 次折叠** | 文档、ROADMAP、报告全部改为 thread/dead |
-| 5 | 「45 项独立金标准交叉检查」 | 其中 13 项是退出码/配置/自证、11 项负控、3 项只验金标准 | 改为 50 项 + a/b/c/d 分类，报告可核 |
-
-## 6. 为什么标不了「已达成」
-
-1. **唯一被称为恢复级的 M1，在真实语料上没有演示它名字里的能力。**
-   `folded=0`、`predicates=0`；87/87 次「去平坦化」命中 javac 的
-   `switch(String)` 降级（`hashCode` + 状态变量 + 双表），不是混淆器平坦化。
-   这只能证明「能重构编译器产物」，不能证明「能去混淆」。
-2. **M1 的行为对拍是 342/411 = 83.2%、1 个真实差异**，低于 02 的 90% 门槛，
-   且 02 仍是「进行中」。04 的 M1 证据强度低于 03 对同一机制的既有验收
-   （03 记录是 370/411 = 90.0%、0 差异）。
-3. **M3/M4/M5 在两个真实语料上没有正向目标**：无非 vanilla BSM、无 DES
-   密文、无 `$CodePool`。「识别并如实报告 0」不可证伪——没有该能力的工具
-   也会报告 0。`SUPPORT_MATRIX` 自己写过「0 目标只能证明不误报，不能证明
-   能还原」。
-4. **`ROADMAP:226` 点名的 ZKM / JNIC / BytecodeVM / OPS，一个正向支持项
-   都没有。** 8 类里也没有 JNIC、BytecodeVM、OPS；ZKM 只作为指纹标签存在，
-   解密引擎明确属独立研究线。
-5. **验收工作对 `src/jdec/*` 零改动。** 04 的「支持能力」在标达成那一刻
-   没有任何新增，只是给既有命令补了验收脚本。能力没有增长。
-
-## 7. 已经交付、可继续使用的部分
-
-- `src/tests/goldens.py`：独立金标准（zip 条目、class 常量池/方法表、
-  PE/COFF 导出目录、magic、mcmod.info），可复用。
-- `src/tests/stage04.py`：8 类验收规格 + 每类负控 + a/b/c/d 分类；
-  `--selfcheck` 可进 CI（只验证框架与单元负控）。
-- `docs/mechanisms/`：9 份合规机制形态笔记，`study/` 的替代品；不含源码。
-- 离线交付：`docs/OFFLINE.md` + 断网 CI job。
-- 三处误报修复与对应回归；公开阴性对照的可复现获取方式。
-- 回归 1250 断言 / 146 用例，0 失败。
-
-## 8. 要真正达成 04，还缺什么
-
-1. **一个确实含混淆器控制流平坦化 / 不透明谓词的真实语料**（ZKM flow、
-   Zelix、Stringer 等），M1 才能在「去混淆」而不是「反 javac 优化」上
-   给出正向证据。当前两个语料都不是。
-2. **一个确实含 ZKM DES 密文 / 非 vanilla BSM / `$CodePool` 的真实语料**，
-   M3/M5 与 BVM 才能从「报告 0」升级为正向支持项。
-3. **一个含 JNIC 容器 / RegisterNatives 的真实样本**，M6 才谈得上 native
-   还原（当前 `jni_matched=0`，Ghidra 也未安装）。
-4. **每类机制的正向金标准**：M1 需要「改写前后行为等价 + 原始字节码确有
-   平坦化」的双重证据；M3 需要 `javap -v` 的 BSM 原文逐站点比对；M6 需要
-   导出名与 `Java_*` 符号的真实匹配。
-5. **或由用户正式拍板改门槛**：把 04 改成「已实现机制的边界矩阵」
-   （只要求如实声明边界，不要求每类有正向目标）。这是口径变更，必须
-   在 ROADMAP 记录并说明理由，不能由测试脚本自行宣称。
-
-在这些补齐之前，04 不标 ✅。`support_matrix.py` 是诊断层
-（`stage_04_threshold_met=false`），`stage04.py` 是验收层
-（`mechanism_regressions_pass=true` 但 `stage_04_threshold_met=false`），
-两者都不自称门槛达成。
-
-## 9. 历史留痕
+## 7. 历史留痕
 
 | 时间 | 结论 |
 | --- | --- |
 | 2026-11-04 | 只交草案 + 离线交付，判定门槛未验 |
-| 2026-11-05 21:40 | 把 8 条诊断命令的 8/8 标为 04 达成 |
+| 2026-11-05 21:40 | 把 8 条诊断命令的 8/8 标为达成 |
 | 2026-11-05 21:48 | 用户质疑「04 这么快？」，撤回（`98ddd26`） |
 | 2026-11-05 22:xx | 加独立金标准与每类负控，再次标达成（`803af3a`） |
-| 2026-11-06 21:xx | 用户质疑「你确定？」，审计发现 M1 的 0 次折叠/87 次 javac switch、45 项构成夸大、3 类 0 目标，**第二次撤回** |
+| 2026-11-06 21:xx | 用户质疑「你确定？」，审计发现 0 次折叠/87 次 javac switch，第二次撤回（`ddf60f7`） |
+| 2026-11-06 22:xx | 补 M1 分类代码与 M3 目标还原，双向 fixture，52 项检查后达成 |

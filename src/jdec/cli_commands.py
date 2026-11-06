@@ -847,6 +847,9 @@ def cmd_indy(args: argparse.Namespace) -> int:
           f"({st['bsm_total']} bootstrap entries)")
     print(f"with indy sites    : {st['classes_with_sites']}")
     print(f"indy sites         : {st['sites']}")
+    if getattr(args, "resolve", False):
+        print(f"resolved targets   : {st.get('resolved_targets', 0)} "
+              f"of {st['sites']} site(s)")
     if result["per_owner"]:
         print("bootstrap owners (top):")
         for owner, n in sorted(result["per_owner"].items(),
@@ -869,6 +872,7 @@ def cmd_indy(args: argparse.Namespace) -> int:
                         "bsm": ({"owner": s.bsm.owner, "name": s.bsm.name,
                                  "kind": s.bsm.kind}
                                 if s.bsm else None),
+                        "target": BM.resolve_target(s),
                         "dynargs": repr(s.dynargs)} for s in sites]}
                        for c, sites in result["sample"]]}
         out.write_text(json.dumps(payload, ensure_ascii=False, indent=1),

@@ -303,10 +303,32 @@ def enum_sites(cf, bsm_cache: dict | None = None) -> list[IndySite]:
     return sites
 
 
+def resolve_target(site: "IndySite") -> dict | None:
+    """The implementation target of a LambdaMetafactory site.
+
+    `LambdaMetafactory.metafactory` takes (samMethodType, implMethod,
+    instantiatedMethodType). `implMethod` is a MethodHandle, already decoded
+    into a `("mh", {...})` leaf by `_const`, so the call target can be reported
+    instead of only counting the site.
+    """
+    bsm = getattr(site, "bsm", None)
+    if not bsm or "LambdaMetafactory" not in (bsm.owner or ""):
+        return None
+    for arg in getattr(bsm, "args", []):
+        if isinstance(arg, tuple) and len(arg) == 2 and arg[0] == "mh":
+            payload = arg[1]
+            if isinstance(payload, dict) and payload.get("owner"):
+                return {"kind": payload.get("kind"),
+                        "owner": payload.get("owner"),
+                        "name": payload.get("name"),
+                        "desc": payload.get("desc")}
+    return None
+
+
 def scan_jar(jar: Path, limit: int = 0) -> dict:
     """整个 jar 的 indy 站点普查：统计 + 逐类站点。"""
     stats = {"classes": 0, "classes_with_bsm": 0, "classes_with_sites": 0,
-             "sites": 0, "bsm_total": 0}
+             "sites": 0, "bsm_total": 0, "resolved_targets": 0}
     per_owner: dict[str, int] = {}
     per_name: dict[str, int] = {}
     out = []
@@ -332,6 +354,8 @@ def scan_jar(jar: Path, limit: int = 0) -> dict:
                 owner = s.bsm.owner if s.bsm else "?"
                 per_owner[owner] = per_owner.get(owner, 0) + 1
                 per_name[s.name] = per_name.get(s.name, 0) + 1
+                if resolve_target(s):
+                    stats["resolved_targets"] += 1
             if limit and len(out) < limit:
                 out.append((cf.name, sites))
     return {"stats": stats, "per_owner": per_owner, "per_name": per_name,
