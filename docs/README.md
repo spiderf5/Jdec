@@ -388,6 +388,24 @@ jdec 直接把它解出来，**不需要执行任何东西、不需要加载类*
 注意别误判：普通 lambda 也是 `invokedynamic`，但没有编码表——vanilla 1.20.4  
 实测有 19024 个 indy 调用点、编码串 0 条。
 
+### vanilla bootstrap 里的常量：`--resolve`
+
+上面那套是**自定义编码**；vanilla 编译产物的三类 bootstrap 也各自带着可直接  
+读出的常量，同样不需要执行、不需要加载类：
+
+| bootstrap owner | 静态参数 | 还原出的东西 |
+| --- | --- | --- |
+| `LambdaMetafactory` | `implMethod` 句柄 | 方法引用 / lambda 的实现方法（owner + 名 + 描述符）|
+| `StringConcatFactory` | recipe（`\u0001` 动态实参、`\u0002` 常量占位）| 字符串拼接模板与其中的常量片段 |
+| `ObjectMethods` | 组件名列表（分号分隔）| record 的字段名与 getter 类型 |
+
+`jdec indy client.jar --resolve` 额外打印三类还原数、未还原数与 owner 直方图。  
+HMCL 实测 **6245/6245 站点全部还原**（3899 lambda + 1667 concat + 679 record），  
+还原出的 1406 个去重模板 / 组件列表逐字命中常量池。没有可读常量的引导  
+（如 JDK 21 的 `SwitchBootstraps`）计入 `unresolved` 而不是猜一个值——  
+`src/tests/sample.jar` 里正好有 1 个这样的站点，用来钉住「三类 + 未还原 = 站点数」  
+这个分区。
+
 ## 混淆器识别
 
 按包名认混淆器只对一半工具有效：Allatori、Stringer、Dash-O 会留下自己的运行时包，  

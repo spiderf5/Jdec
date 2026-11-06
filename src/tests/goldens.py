@@ -304,3 +304,131 @@ def methods_of(path: Path, internal_name: str) -> list[str]:
     with zipfile.ZipFile(path) as z:
         raw = z.read(entry)
     return class_facts(raw)["methods"]
+
+
+# ------------------------------------------------------------- BSM facts
+# A second, independent BootstrapMethods reader. It resolves each entry's
+# bootstrap MethodHandle back to its owner class and collects every static
+# UTF8 argument, so bsm.py's per-site bookkeeping can be compared against
+# something that never imports it.
+
+_CP_TAGGED_FIXED = {3: 4, 4: 4, 5: 8, 6: 8, 7: 2, 8: 2, 9: 4, 10: 4, 11: 4,
+                    12: 4, 15: 3, 16: 2, 17: 4, 18: 4, 19: 2, 20: 2}
+
+
+def _cp_tagged(data: bytes) -> tuple[list[tuple[int, tuple] | None], int]:
+    """Constant pool with tags kept, so MethodHandle chains can be resolved."""
+    count = _u2(data, 8)
+    pool: list[tuple[int, tuple] | None] = [None] * count
+    off = 10
+    i = 1
+    while i < count:
+        tag = data[off]
+        off += 1
+        if tag == 1:
+            length = _u2(data, off)
+            off += 2
+            pool[i] = (tag, (data[off:off + length].decode("utf-8", "replace"),))
+            off += length
+        elif tag in (7, 8, 16, 19, 20):
+            pool[i] = (tag, (_u2(data, off),))
+            off += 2
+        elif tag == 15:
+            pool[i] = (tag, (data[off], _u2(data, off + 1)))
+            off += 3
+        elif tag in (9, 10, 11, 12, 17, 18):
+            pool[i] = (tag, (_u2(data, off), _u2(data, off + 2)))
+            off += 4
+        elif tag in (3, 4):
+            off += 4
+        elif tag in (5, 6):
+            off += 8
+            i += 1
+        else:
+            raise ValueError(f"unsupported constant-pool tag {tag}")
+        i += 1
+    return pool, off
+
+
+def _utf8_at(pool, idx) -> str | None:
+    if idx is None or not 0 <= idx < len(pool):
+        return None
+    entry = pool[idx]
+    return entry[1][0] if entry and entry[0] == 1 else None
+
+
+def _bsm_owner(pool, ref: int) -> tuple[str | None, str | None]:
+    """(owner class, method name) of a bootstrap method handle."""
+    entry = pool[ref] if 0 <= ref < len(pool) else None
+    if not entry or entry[0] != 15:
+        return None, None
+    target = pool[entry[1][1]] if 0 <= entry[1][1] < len(pool) else None
+    if not target or target[0] not in (10, 11):
+        return None, None
+    cls_idx, nat_idx = target[1]
+    cls = pool[cls_idx] if 0 <= cls_idx < len(pool) else None
+    nat = pool[nat_idx] if 0 <= nat_idx < len(pool) else None
+    owner = _utf8_at(pool, cls[1][0]) if cls and cls[0] == 7 else None
+    name = _utf8_at(pool, nat[1][0]) if nat and nat[0] == 12 else None
+    return owner, name
+
+
+def bsm_facts(path: Path) -> dict:
+    """Entries, owner histogram and static UTF8 payloads of every class.
+
+    Payloads are the literal strings a bootstrap carries: the StringConcatFactory
+    recipe (``\u0001`` placeholders included) and the ObjectMethods component
+    list. Comparing them against what the tool reports is a real cross-check,
+    because a fabricated value cannot appear in the constant pool.
+    """
+    entries = 0
+    owners: dict[str, int] = {}
+    payloads: list[str] = []
+    with zipfile.ZipFile(path) as z:
+        for info in z.infolist():
+            if not info.filename.endswith(".class") or info.file_size == 0:
+                continue
+            data = z.read(info.filename)
+            if data[:4] != b"\xca\xfe\xba\xbe":
+                continue
+            try:
+                pool, off = _cp_tagged(data)
+            except (ValueError, struct.error, IndexError):
+                continue
+            utf8 = [e[1][0] if e and e[0] == 1 else None for e in pool]
+            off += 6                     # access_flags, this, super
+            off += 2 + 2 * _u2(data, off)          # interfaces
+            for _ in range(2):                      # fields, methods
+                n = _u2(data, off)
+                off += 2
+                for _ in range(n):
+                    off += 6
+                    off, _ = _skip_attributes(data, off, utf8)
+            n = _u2(data, off)
+            off += 2
+            for _ in range(n):
+                name = utf8[_u2(data, off)]
+                length = _u4(data, off + 2)
+                body = off + 6
+                if name == "BootstrapMethods":
+                    count = _u2(data, body)
+                    o = body + 2
+                    for _ in range(count):
+                        ref = _u2(data, o)
+                        nargs = _u2(data, o + 2)
+                        o += 4
+                        owner, _m = _bsm_owner(pool, ref)
+                        entries += 1
+                        if owner:
+                            owners[owner] = owners.get(owner, 0) + 1
+                        for k in range(nargs):
+                            arg = pool[_u2(data, o + 2 * k)]
+                            if arg and arg[0] == 8:
+                                text = _utf8_at(pool, arg[1][0])
+                                if text is not None:
+                                    payloads.append(text)
+                        o += 2 * nargs
+                off = body + length
+    return {"entries": entries, "owners": owners,
+            "payload_count": len(payloads),
+            "payloads": sorted(set(payloads))}

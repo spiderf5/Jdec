@@ -54,7 +54,11 @@ _R = {
     "code_ok": r"method\s+: (\d+)/\d+ Code arrays byte-identical",
     "code_total": r"method\s+: \d+/(\d+) Code arrays byte-identical",
     "sites": r"(?m)^indy sites\s+: (\d+)",
-    "resolved": r"resolved targets\s+: (\d+)",
+    "lambda": r"lambda targets\s+: (\d+)",
+    "concat": r"concat templates\s+: (\d+)",
+    "record": r"record components\s+: (\d+)",
+    "payload": r"payload recovered\s+: (\d+)",
+    "unresolved": r"unresolved\s+: (\d+)",
     "entries": r"entries\s+: (\d+)",
     "strings": r"strings\s+: (\d+) total",
     "tagged": r"tagged\s+: (\d+) literal",
@@ -101,13 +105,18 @@ SPECS: list[dict] = [
         "id": "M3", "name": "invokedynamic / BootstrapMethods 站点枚举",
         "primary": "hmcl", "extra": ("neo",), "negative": "junit",
         "steps": (("indy", "{jar}", "--resolve"),),
-        "patterns": {"sites": _R["sites"], "resolved": _R["resolved"]},
-        "support": "枚举 indy 站点并按 bootstrap owner 归类；对 "
-                   "LambdaMetafactory 站点解析 implMethod，还原 owner/name/desc "
-                   "调用目标；站点数经独立 BootstrapMethods 属性计数交叉验证",
-        "not_covered": "不执行 bootstrap、不解密 recipe；StringConcatFactory 与 "
-                       "ObjectMethods 没有单一调用目标，不计入还原数；两个独立语料"
-                       "无非 vanilla BSM，自定义引导还原属独立研究线",
+        "patterns": {"sites": _R["sites"], "lambda": _R["lambda"],
+                     "concat": _R["concat"], "record": _R["record"],
+                     "payload": _R["payload"], "unresolved": _R["unresolved"]},
+        "support": "枚举 indy 站点并按 bootstrap owner 归类，然后还原每个站点"
+                   "携带的常量载荷：LambdaMetafactory 的调用目标、"
+                   "StringConcatFactory 的格式模板（含常量片段）、"
+                   "ObjectMethods 的 record 组件名；站点数与 owner 直方图经独立 "
+                   "BootstrapMethods 解析交叉验证",
+        "not_covered": "不执行 bootstrap；SwitchBootstraps 等引导没有可读常量，"
+                       "计入未还原而不是猜测；自定义引导（非 JDK vanilla）的站点"
+                       "只是被枚举，没有还原语义；两个独立语料都没有非 vanilla "
+                       "BSM，因此该路径只有单元级证据",
     },
     {
         "id": "M4", "name": "混淆器结构指纹归因",
@@ -259,6 +268,52 @@ def _journal_kinds(jar: Path, rw_path: Path) -> dict:
             "switch_methods": switch_methods}
 
 
+def _payload_values(jar: Path) -> set[str]:
+    """Every constant string the tool recovers from a bootstrap, deduplicated.
+
+    Concat recipes and record component lists are the values a user actually
+    gains; comparing the set against goldens.bsm_facts() proves they are real
+    constant-pool strings rather than synthesised text.
+    """
+    import zipfile
+
+    from jdec import bsm as BM
+    from jdec import classfile as CF
+
+    values: set[str] = set()
+    with zipfile.ZipFile(jar) as z:
+        for info in z.infolist():
+            if not info.filename.endswith(".class"):
+                continue
+            try:
+                cf = CF.parse(z.read(info))
+            except Exception:          # noqa: BLE001 - unreadable class
+                continue
+            for site in BM.enum_sites(cf):
+                concat = BM.resolve_concat(site)
+                if concat:
+                    values.add(concat["recipe"])
+                record = BM.resolve_record(site)
+                if record:
+                    values.add(";".join(record["components"]))
+    return values
+
+
+def _owner_counts(text: str) -> dict[str, int]:
+    """Parse the ``owners : a=1;b=2`` line printed by ``indy --resolve``."""
+    for line in text.splitlines():
+        if line.startswith("owners") and ":" in line:
+            out: dict[str, int] = {}
+            for part in line.split(":", 1)[1].strip().split(";"):
+                if "=" not in part:
+                    continue
+                key, _, num = part.rpartition("=")
+                if num.isdigit():
+                    out[key.strip()] = int(num)
+            return out
+    return {}
+
+
 def _golden_for(path: Path) -> dict:
     z = G.zip_facts(path)
     j = G.jar_facts(path)
@@ -276,223 +331,280 @@ def _golden_for(path: Path) -> dict:
     }
 
 
+def _check_m1(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M1."""
+    add("改写方法数 > 0", m["metrics"].get("rewritten", 0) > 0,
+        str(m["metrics"]))
+    add("JVM verify 通过类数 > 0", m["metrics"].get("verified", 0) > 0,
+        str(m["metrics"]))
+    kinds = _journal_kinds(_CORPORA[key], out / f"{key}_rw.txt")
+    for kind in ("threaded", "unflattened", "switch", "folded",
+                 "predicates", "dead", "gotos"):
+        m["metrics"][kind] = kinds["kinds"].get(kind, 0)
+    m["metrics"]["unflatten_methods"] = kinds["unflatten_methods"]
+    m["metrics"]["switch_methods"] = kinds["switch_methods"]
+    add("改写类型统计已记录", bool(kinds["kinds"]), str(kinds["kinds"]))
+    add("本语料常量折叠与不透明谓词为 0（不得据此宣称）",
+        kinds["kinds"].get("folded", 0) == 0
+        and kinds["kinds"].get("predicates", 0) == 0,
+        str(kinds["kinds"]))
+    add("控制流改写已按来源分类（平坦化 vs javac switch）",
+        kinds["unflatten_methods"] + kinds["switch_methods"] > 0,
+        f"unflatten_methods={kinds['unflatten_methods']} "
+        f"switch_methods={kinds['switch_methods']}")
+    add("本语料没有混淆器平坦化，只有 javac switch 类",
+        kinds["kinds"].get("unflattened", 0) == 0
+        and kinds["switch_methods"] > 0,
+        f"unflattened={kinds['kinds'].get('unflattened', 0)} "
+        f"switch={kinds['kinds'].get('switch', 0)}")
+    # Independent: every method named in the rewritten list must really
+    # exist in the ORIGINAL class file, and the rewritten jar must differ.
+    rows_file = out / f"{key}_rw.txt"
+    rewritten_jar = out / f"{key}_deflat.jar"
+    verified = 0
+    missing = []
+    if rows_file.is_file():
+        for line in rows_file.read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            cls, meth = parts[0], parts[1]
+            try:
+                names = G.methods_of(_CORPORA[key], cls)
+            except (KeyError, OSError, ValueError):
+                missing.append(cls)
+                continue
+            if meth in names:
+                verified += 1
+            else:
+                missing.append(f"{cls}.{meth}")
+    add("改写清单里的方法独立存在于原 class 文件",
+        verified > 0 and not missing,
+        f"verified={verified} missing={len(missing)} {missing[:3]}")
+    changed = 0
+    if rewritten_jar.is_file():
+        original_hashes = G.zip_facts(_CORPORA[key])["class_sha256"]
+        rewritten_hashes = G.zip_facts(rewritten_jar)["class_sha256"]
+        changed = sum(1 for cls, digest in rewritten_hashes.items()
+                      if cls in original_hashes
+                      and original_hashes[cls] != digest)
+    add("改写后的 class 字节确实变化", changed > 0, f"changed={changed}")
+    # The negative corpus is NOT claimed to have zero rewrites: constant
+    # folding legitimately applies to ordinary Java too (17 methods on
+    # junit). The control demands semantic preservation and a much
+    # smaller rewrite scale than the obfuscated corpus.
+    add("阴性对照的改写全部可被 journal 解释",
+        neg["metrics"].get("unexplained", -1) == 0,
+        str(neg["metrics"]))
+    add("阴性对照行为对拍 0 差异",
+        neg["metrics"].get("diff", -1) == 0
+        and neg["metrics"].get("same", 0) > 0,
+        f"same={neg['metrics'].get('same')} diff={neg['metrics'].get('diff')}")
+    add("阴性对照改写规模显著小于混淆语料",
+        0 <= neg["metrics"].get("rewritten", 10**9)
+        < m["metrics"].get("rewritten", 0) / 10,
+        f"{neg['metrics'].get('rewritten')} vs {m['metrics'].get('rewritten')}")
+    add("主样本改写全部可被 journal 解释",
+        m["metrics"].get("unexplained", -1) == 0, str(m["metrics"]))
+    add("主样本行为对拍产出 union 判定",
+        m["metrics"].get("union", 0) > 0, str(m["metrics"]))
+
+def _check_m2(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M2."""
+    v = m["metrics"]
+    add("class 计数等于 zipfile 原始类数",
+        v.get("classes") == g["class_count"],
+        f"{v.get('classes')} vs {g['class_count']}")
+    add("类字节往返全等且分母等于原始类数",
+        v.get("cls_ok") == v.get("cls_total") == g["class_count"],
+        str(v))
+    add("Code 数组往返全等", v.get("code_ok") == v.get("code_total")
+        and v.get("code_total", 0) > 0, str(v))
+    add("无不可读类", v.get("unreadable") == 0 and g["readable"] == g["class_count"],
+        f"unreadable={v.get('unreadable')} readable={g['readable']}")
+    add("截断类负控不得判为干净 PASS",
+        any(rc != 0 for rc in neg["exit_codes"]) or
+        neg["metrics"].get("unreadable", 0) > 0,
+        f"rc={neg['exit_codes']} metrics={neg['metrics']}")
+
+def _check_m3(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M3."""
+    sites = m["metrics"].get("sites", 0)
+    v = m["metrics"]
+    bsm_golden = G.bsm_facts(_CORPORA[key])
+    add("站点数 ≥ 独立 BootstrapMethods 属性条目数",
+        sites >= bsm_golden["entries"] > 0,
+        f"sites={sites} bsm={bsm_golden['entries']}")
+    owners = _owner_counts(m["stdout_head"])
+    add("bootstrap owner 集合等于独立解析结果",
+        set(owners) == set(bsm_golden["owners"]),
+        f"tool={sorted(owners)} golden={sorted(bsm_golden['owners'])}")
+    add("每个 owner 的站点数 ≥ 其独立条目数",
+        bool(owners) and all(owners.get(o, 0) >= n
+                             for o, n in bsm_golden["owners"].items()),
+        f"{owners} vs {bsm_golden['owners']}")
+    add("载荷站点数等于三类之和",
+        v.get("payload", -1) == (v.get("lambda", 0) + v.get("concat", 0)
+                                 + v.get("record", 0)) > 0, str(v))
+    # A complete partition, not a happy-path count: some bootstraps (e.g.
+    # SwitchBootstraps) carry no readable constant, and those must be counted
+    # rather than silently dropped.
+    add("三类载荷 + 未还原 = 站点数",
+        (v.get("lambda", 0) + v.get("concat", 0) + v.get("record", 0)
+         + v.get("unresolved", -1)) == sites > 0, str(v))
+    add("本语料没有「无可还原常量」的站点",
+        v.get("unresolved", -1) == 0, str(v))
+    # Value-level cross-check: every recovered recipe / component list must
+    # exist verbatim in the independently parsed constant-pool payloads.
+    recovered = _payload_values(_CORPORA[key])
+    invented = sorted(recovered - set(bsm_golden["payloads"]))
+    add("还原出的每个常量载荷都存在于独立常量池",
+        bool(recovered) and not invented,
+        f"{len(recovered)} recovered, {len(invented)} invented {invented[:2]}")
+    add("阴性对照无 indy 站点",
+        neg["metrics"].get("sites", 0) == 0 and ng["bsm_entries"] == 0,
+        f"neg_sites={neg['metrics'].get('sites')} neg_bsm={ng['bsm_entries']}")
+
+def _check_m4(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M4."""
+    text = str(m["metrics"].get("signature", ""))
+    no_des = all(v == 0 for v in g["des_markers"].values())
+    add("混淆度分数已结构化记录", "score" in m["metrics"], str(m["metrics"]))
+    add("金标准确认该语料无 ZKM DES 专属标记", no_des, str(g["des_markers"]))
+    if no_des:
+        add("无 DES 标记时不得归因 ZKM 27",
+            "ZKM 27" not in text, text[:150])
+    if key == "hmcl":
+        add("HMCL 归因 ProGuard / R8", "ProGuard / R8" in text, text[:150])
+    # Unit-level negative control: the fingerprint config itself must not
+    # accept the generic IvParameterSpec marker on its own.
+    import json as _json
+    fp = _json.loads((ROOT / "src/jdec/fingerprints.json").read_text("utf-8"))
+    zkm = next(x for x in fp["obfuscators"]
+               if x["name"] == "ZKM 27 enhanced 字符串加密（DES）")
+    add("ZKM 27 指纹要求 ≥2 个专属标记",
+        zkm.get("min_keywords", 1) >= 2
+        and all("ivparameterspec" not in k.lower() for k in zkm["keywords"]),
+        str(zkm["keywords"]))
+    add("阴性对照不误报混淆器",
+        "obfuscator signature" not in neg["stdout_head"],
+        neg["stdout_head"][:150])
+
+def _check_m5(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M5."""
+    v = m["metrics"]
+    add("抽取到字符串常量", v.get("strings", 0) > 0, str(v))
+    add("字符串数不超过独立常量池 UTF8 总数",
+        v.get("strings", 0) <= g["utf8_count"],
+        f"{v.get('strings')} <= {g['utf8_count']}")
+    # Independent re-check: goldens.is_blob_literal is a second
+    # implementation that never imports jdec.strings.
+    fqcn = "org/spongepowered/asm/lib/tree/AbstractInsnNode"
+    add("独立复核：内部类名不是 blob", not G.is_blob_literal(fqcn), fqcn)
+    import base64 as _b64
+    real = _b64.b64encode(bytes(range(64))).decode()
+    add("独立复核：高熵 blob 仍被识别", G.is_blob_literal(real), real[:40])
+    report_json = out / f"{key}_strings" / "strings.json"
+    tagged: list[str] = []
+    if report_json.is_file():
+        try:
+            data = _json_load(report_json)
+            rows = data.get("rows", data if isinstance(data, list) else [])
+            for row in rows:
+                if (isinstance(row, (list, tuple)) and len(row) > 2
+                        and "encrypted-blob" in row[2]):
+                    tagged.append(str(row[1]) if len(row) > 1 else "")
+        except (ValueError, TypeError):
+            pass
+    false_pos = [t for t in tagged if not G.is_blob_literal(t)]
+    add("每个 encrypted-blob 标签都通过独立复核",
+        not false_pos,
+        f"{len(tagged)} tagged, {len(false_pos)} false positives")
+    add("阴性对照无加密 blob", "encrypted-blob" not in neg["stdout_head"],
+        neg["stdout_head"][:120])
+
+def _check_m6(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M6."""
+    v = m["metrics"]
+    add("PE 导出数等于独立 PE/COFF 解析结果",
+        v.get("exports") == g["pe_export_count"] > 0,
+        f"{v.get('exports')} vs {g['pe_export_count']} {g['pe_exports']}")
+    add("Java 侧 native 方法数等于独立 ACC_NATIVE 计数",
+        v.get("native_methods") == g["native_methods"] > 0,
+        f"{v.get('native_methods')} vs {g['native_methods']}")
+    add("读出的 libs 计数为 1（即输入容器自身的 PE stub）",
+        v.get("libs", 0) >= 1, str(v))
+    add("JNI 匹配数如实记录（本语料 0，导出不是 JNI 符号）",
+        v.get("jni_matched", -1) == 0, str(v))
+    add("纯 Java 阴性对照报告 0 native",
+        g["native_methods"] > 0 and ng["native_methods"] == 0
+        and neg["metrics"].get("native_methods", 0) == 0,
+        f"neg_native={ng['native_methods']} neg_metrics={neg['metrics']}")
+
+def _check_m7(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M7."""
+    mc = str(m["metrics"].get("minecraft", ""))
+    if g["mc"]["mentions_189"]:
+        add("金标准 mcmod.info 含 1.8.9，机制报告一致",
+            "1.8.9" in mc, mc[:180])
+    add("金标准确认存在 mcmod.info",
+        g["mc"]["has_mcmod"] or len(g["mc"]["metadata_files"]) > 0,
+        str(g["mc"]["metadata_files"]))
+    add("非 MC 的 HMCL 负控不得报 1.8.9",
+        "1.8.9" not in neg["stdout_head"], neg["stdout_head"][:150])
+
+def _check_m8(add, m: dict, g: dict, neg: dict,
+                    ng: dict, out: Path, key: str) -> None:
+    """Cross-checks for mechanism M8."""
+    v = m["metrics"]
+    add("条目数等于 zipfile 原始目录条目数",
+        v.get("entries") == g["entries"], f"{v.get('entries')} vs {g['entries']}")
+    add("容器 magic 由独立读取记录（未与工具输出比较）",
+        g["magic"] in ("4d5a", "504b"), g["magic"])
+    add("阴性对照为普通 PK jar",
+        ng["magic"] == "504b" and ng["entries"] > 0,
+        f"{ng['magic']} {ng['entries']}")
+
+_CHECKS = {
+    "M1": _check_m1,
+    "M2": _check_m2,
+    "M3": _check_m3,
+    "M4": _check_m4,
+    "M5": _check_m5,
+    "M6": _check_m6,
+    "M7": _check_m7,
+    "M8": _check_m8,
+}
+
+
 def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
             out: Path, key: str) -> list[dict]:
-    """Cross-check the mechanism against ground truth and its negative control."""
+    """Cross-check a mechanism against ground truth and its negative control."""
     out_checks: list[dict] = []
 
     def add(label: str, ok: bool, detail: str = "") -> None:
-        out_checks.append({"label": label, "ok": bool(ok), "detail": str(detail)[:300]})
+        out_checks.append({"label": label, "ok": bool(ok),
+                           "detail": str(detail)[:300]})
 
     mid = spec["id"]
-    # `behave` returns 1 when it reports a real difference (HMCL has one,
-    # see REPRODUCE.md). That is an honest result, not a mechanism failure.
-    # Only M1 runs behave; every other mechanism must still exit 0.
+    # `behave` returns 1 when it reports a real difference (HMCL has one, see
+    # REPRODUCE.md). That is an honest result, not a mechanism failure. Only M1
+    # runs behave; every other mechanism must still exit 0.
     allowed = (0, 1) if mid == "M1" else (0,)
-    rc_ok = all(rc in allowed for rc in m["exit_codes"])
-    add(f"机制退出码在允许集合 {allowed}", rc_ok, str(m["exit_codes"]))
-    if mid == "M1":
-        add("改写方法数 > 0", m["metrics"].get("rewritten", 0) > 0,
-            str(m["metrics"]))
-        add("JVM verify 通过类数 > 0", m["metrics"].get("verified", 0) > 0,
-            str(m["metrics"]))
-        kinds = _journal_kinds(_CORPORA[key], out / f"{key}_rw.txt")
-        for kind in ("threaded", "unflattened", "switch", "folded",
-                     "predicates", "dead", "gotos"):
-            m["metrics"][kind] = kinds["kinds"].get(kind, 0)
-        m["metrics"]["unflatten_methods"] = kinds["unflatten_methods"]
-        m["metrics"]["switch_methods"] = kinds["switch_methods"]
-        add("改写类型统计已记录", bool(kinds["kinds"]), str(kinds["kinds"]))
-        add("本语料常量折叠与不透明谓词为 0（不得据此宣称）",
-            kinds["kinds"].get("folded", 0) == 0
-            and kinds["kinds"].get("predicates", 0) == 0,
-            str(kinds["kinds"]))
-        add("控制流改写已按来源分类（平坦化 vs javac switch）",
-            kinds["unflatten_methods"] + kinds["switch_methods"] > 0,
-            f"unflatten_methods={kinds['unflatten_methods']} "
-            f"switch_methods={kinds['switch_methods']}")
-        add("本语料没有混淆器平坦化，只有 javac switch 类",
-            kinds["kinds"].get("unflattened", 0) == 0
-            and kinds["switch_methods"] > 0,
-            f"unflattened={kinds['kinds'].get('unflattened', 0)} "
-            f"switch={kinds['kinds'].get('switch', 0)}")
-        # Independent: every method named in the rewritten list must really
-        # exist in the ORIGINAL class file, and the rewritten jar must differ.
-        rows_file = out / f"{key}_rw.txt"
-        rewritten_jar = out / f"{key}_deflat.jar"
-        verified = 0
-        missing = []
-        if rows_file.is_file():
-            for line in rows_file.read_text(encoding="utf-8").splitlines():
-                parts = line.split("\t")
-                if len(parts) < 2:
-                    continue
-                cls, meth = parts[0], parts[1]
-                try:
-                    names = G.methods_of(_CORPORA[key], cls)
-                except (KeyError, OSError, ValueError):
-                    missing.append(cls)
-                    continue
-                if meth in names:
-                    verified += 1
-                else:
-                    missing.append(f"{cls}.{meth}")
-        add("改写清单里的方法独立存在于原 class 文件",
-            verified > 0 and not missing,
-            f"verified={verified} missing={len(missing)} {missing[:3]}")
-        changed = 0
-        if rewritten_jar.is_file():
-            original_hashes = G.zip_facts(_CORPORA[key])["class_sha256"]
-            rewritten_hashes = G.zip_facts(rewritten_jar)["class_sha256"]
-            changed = sum(1 for cls, digest in rewritten_hashes.items()
-                          if cls in original_hashes
-                          and original_hashes[cls] != digest)
-        add("改写后的 class 字节确实变化", changed > 0, f"changed={changed}")
-        # The negative corpus is NOT claimed to have zero rewrites: constant
-        # folding legitimately applies to ordinary Java too (17 methods on
-        # junit). The control demands semantic preservation and a much
-        # smaller rewrite scale than the obfuscated corpus.
-        add("阴性对照的改写全部可被 journal 解释",
-            neg["metrics"].get("unexplained", -1) == 0,
-            str(neg["metrics"]))
-        add("阴性对照行为对拍 0 差异",
-            neg["metrics"].get("diff", -1) == 0
-            and neg["metrics"].get("same", 0) > 0,
-            f"same={neg['metrics'].get('same')} diff={neg['metrics'].get('diff')}")
-        add("阴性对照改写规模显著小于混淆语料",
-            0 <= neg["metrics"].get("rewritten", 10**9)
-            < m["metrics"].get("rewritten", 0) / 10,
-            f"{neg['metrics'].get('rewritten')} vs {m['metrics'].get('rewritten')}")
-        add("主样本改写全部可被 journal 解释",
-            m["metrics"].get("unexplained", -1) == 0, str(m["metrics"]))
-        add("主样本行为对拍产出 union 判定",
-            m["metrics"].get("union", 0) > 0, str(m["metrics"]))
-
-    elif mid == "M2":
-        v = m["metrics"]
-        add("class 计数等于 zipfile 原始类数",
-            v.get("classes") == g["class_count"],
-            f"{v.get('classes')} vs {g['class_count']}")
-        add("类字节往返全等且分母等于原始类数",
-            v.get("cls_ok") == v.get("cls_total") == g["class_count"],
-            str(v))
-        add("Code 数组往返全等", v.get("code_ok") == v.get("code_total")
-            and v.get("code_total", 0) > 0, str(v))
-        add("无不可读类", v.get("unreadable") == 0 and g["readable"] == g["class_count"],
-            f"unreadable={v.get('unreadable')} readable={g['readable']}")
-        add("截断类负控不得判为干净 PASS",
-            any(rc != 0 for rc in neg["exit_codes"]) or
-            neg["metrics"].get("unreadable", 0) > 0,
-            f"rc={neg['exit_codes']} metrics={neg['metrics']}")
-
-    elif mid == "M3":
-        sites = m["metrics"].get("sites", 0)
-        add("站点数 ≥ 独立 BootstrapMethods 属性条目数",
-            sites >= g["bsm_entries"] > 0,
-            f"sites={sites} bsm={g['bsm_entries']}")
-        resolved = m["metrics"].get("resolved", 0)
-        add("LambdaMetafactory 调用目标已还原",
-            resolved > 0 and resolved <= sites,
-            f"resolved={resolved} sites={sites}")
-        add("阴性对照无 indy 站点",
-            neg["metrics"].get("sites", 0) == 0 and ng["bsm_entries"] == 0,
-            f"neg_sites={neg['metrics'].get('sites')} neg_bsm={ng['bsm_entries']}")
-
-    elif mid == "M4":
-        text = str(m["metrics"].get("signature", ""))
-        no_des = all(v == 0 for v in g["des_markers"].values())
-        add("混淆度分数已结构化记录", "score" in m["metrics"], str(m["metrics"]))
-        add("金标准确认该语料无 ZKM DES 专属标记", no_des, str(g["des_markers"]))
-        if no_des:
-            add("无 DES 标记时不得归因 ZKM 27",
-                "ZKM 27" not in text, text[:150])
-        if key == "hmcl":
-            add("HMCL 归因 ProGuard / R8", "ProGuard / R8" in text, text[:150])
-        # Unit-level negative control: the fingerprint config itself must not
-        # accept the generic IvParameterSpec marker on its own.
-        import json as _json
-        fp = _json.loads((ROOT / "src/jdec/fingerprints.json").read_text("utf-8"))
-        zkm = next(x for x in fp["obfuscators"]
-                   if x["name"] == "ZKM 27 enhanced 字符串加密（DES）")
-        add("ZKM 27 指纹要求 ≥2 个专属标记",
-            zkm.get("min_keywords", 1) >= 2
-            and all("ivparameterspec" not in k.lower() for k in zkm["keywords"]),
-            str(zkm["keywords"]))
-        add("阴性对照不误报混淆器",
-            "obfuscator signature" not in neg["stdout_head"],
-            neg["stdout_head"][:150])
-
-    elif mid == "M5":
-        v = m["metrics"]
-        add("抽取到字符串常量", v.get("strings", 0) > 0, str(v))
-        add("字符串数不超过独立常量池 UTF8 总数",
-            v.get("strings", 0) <= g["utf8_count"],
-            f"{v.get('strings')} <= {g['utf8_count']}")
-        # Independent re-check: goldens.is_blob_literal is a second
-        # implementation that never imports jdec.strings.
-        fqcn = "org/spongepowered/asm/lib/tree/AbstractInsnNode"
-        add("独立复核：内部类名不是 blob", not G.is_blob_literal(fqcn), fqcn)
-        import base64 as _b64
-        real = _b64.b64encode(bytes(range(64))).decode()
-        add("独立复核：高熵 blob 仍被识别", G.is_blob_literal(real), real[:40])
-        report_json = out / f"{key}_strings" / "strings.json"
-        tagged: list[str] = []
-        if report_json.is_file():
-            try:
-                data = _json_load(report_json)
-                rows = data.get("rows", data if isinstance(data, list) else [])
-                for row in rows:
-                    if (isinstance(row, (list, tuple)) and len(row) > 2
-                            and "encrypted-blob" in row[2]):
-                        tagged.append(str(row[1]) if len(row) > 1 else "")
-            except (ValueError, TypeError):
-                pass
-        false_pos = [t for t in tagged if not G.is_blob_literal(t)]
-        add("每个 encrypted-blob 标签都通过独立复核",
-            not false_pos,
-            f"{len(tagged)} tagged, {len(false_pos)} false positives")
-        add("阴性对照无加密 blob", "encrypted-blob" not in neg["stdout_head"],
-            neg["stdout_head"][:120])
-
-    elif mid == "M6":
-        v = m["metrics"]
-        add("PE 导出数等于独立 PE/COFF 解析结果",
-            v.get("exports") == g["pe_export_count"] > 0,
-            f"{v.get('exports')} vs {g['pe_export_count']} {g['pe_exports']}")
-        add("Java 侧 native 方法数等于独立 ACC_NATIVE 计数",
-            v.get("native_methods") == g["native_methods"] > 0,
-            f"{v.get('native_methods')} vs {g['native_methods']}")
-        add("读出的 libs 计数为 1（即输入容器自身的 PE stub）",
-            v.get("libs", 0) >= 1, str(v))
-        add("JNI 匹配数如实记录（本语料 0，导出不是 JNI 符号）",
-            v.get("jni_matched", -1) == 0, str(v))
-        add("纯 Java 阴性对照报告 0 native",
-            g["native_methods"] > 0 and ng["native_methods"] == 0
-            and neg["metrics"].get("native_methods", 0) == 0,
-            f"neg_native={ng['native_methods']} neg_metrics={neg['metrics']}")
-
-    elif mid == "M7":
-        mc = str(m["metrics"].get("minecraft", ""))
-        if g["mc"]["mentions_189"]:
-            add("金标准 mcmod.info 含 1.8.9，机制报告一致",
-                "1.8.9" in mc, mc[:180])
-        add("金标准确认存在 mcmod.info",
-            g["mc"]["has_mcmod"] or len(g["mc"]["metadata_files"]) > 0,
-            str(g["mc"]["metadata_files"]))
-        add("非 MC 的 HMCL 负控不得报 1.8.9",
-            "1.8.9" not in neg["stdout_head"], neg["stdout_head"][:150])
-
-    elif mid == "M8":
-        v = m["metrics"]
-        add("条目数等于 zipfile 原始目录条目数",
-            v.get("entries") == g["entries"], f"{v.get('entries')} vs {g['entries']}")
-        add("容器 magic 由独立读取记录（未与工具输出比较）",
-            g["magic"] in ("4d5a", "504b"), g["magic"])
-        add("阴性对照为普通 PK jar",
-            ng["magic"] == "504b" and ng["entries"] > 0,
-            f"{ng['magic']} {ng['entries']}")
-
+    add(f"机制退出码在允许集合 {allowed}",
+        all(rc in allowed for rc in m["exit_codes"]), str(m["exit_codes"]))
+    _CHECKS[mid](add, m, g, neg, ng, out, key)
     for c in out_checks:
+        # a: real cross-check against independent ground truth; b: exit code /
+        # configuration / self-reported value; c: negative control; d: golden
+        # only. The split exists so the count cannot flatter itself.
         label = c["label"]
         if "退出码" in label:
             c["class"] = "b"
@@ -632,8 +744,9 @@ def main(argv: list[str] | None = None) -> int:
             "M1: real corpora contain no obfuscator flattening (unflattened=0); "
             "684 rewrites are javac switch(String) lowering, 7 are a unit fixture",
             "M1: behave union 342/411 with 1 real difference; 02 stays in progress",
-            "M3: 3899 lambda targets resolved, but both corpora use only JDK "
-            "vanilla bootstrap methods; no custom BSM was exercised",
+            "M3: every indy site yields its constant payload, but both corpora "
+            "use only JDK vanilla bootstrap methods; a custom bootstrap is "
+            "enumerated, never resolved",
             "M5: 0 DES ciphertext on either corpus; extraction is verified, "
             "decryption is not claimed",
             "ROADMAP:231-236 keeps ZKM/JNIC/BytecodeVM deep recovery out of the "

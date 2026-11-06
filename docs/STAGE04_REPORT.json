@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "stage": "04",
-  "generated_at": "2026-11-06T14:51:17.106670+00:00",
+  "generated_at": "2026-11-06T15:14:03.339893+00:00",
   "python": "3.13.14",
   "threshold": "6-8 mechanism classes with explicit support items, each backed by an independent sample regression",
   "corpus_sources": {
@@ -21,7 +21,7 @@
     },
     "truncated": {
       "coordinate": "src/tests/sample.jar",
-      "sha256": "cf84f42f5eab178701173f24f887018e2c4072761cc11946caf54b4afec34b11",
+      "sha256": "2b68edbdcf4aed8664c285159f73ff95040c27b0e43aa387ef8e819ba94a6c23",
       "role": "in-repo truncated-class negative control"
     }
   },
@@ -299,13 +299,17 @@
     {
       "id": "M3",
       "name": "invokedynamic / BootstrapMethods 站点枚举",
-      "support": "枚举 indy 站点并按 bootstrap owner 归类；对 LambdaMetafactory 站点解析 implMethod，还原 owner/name/desc 调用目标；站点数经独立 BootstrapMethods 属性计数交叉验证",
-      "not_covered": "不执行 bootstrap、不解密 recipe；StringConcatFactory 与 ObjectMethods 没有单一调用目标，不计入还原数；两个独立语料无非 vanilla BSM，自定义引导还原属独立研究线",
+      "support": "枚举 indy 站点并按 bootstrap owner 归类，然后还原每个站点携带的常量载荷：LambdaMetafactory 的调用目标、StringConcatFactory 的格式模板（含常量片段）、ObjectMethods 的 record 组件名；站点数与 owner 直方图经独立 BootstrapMethods 解析交叉验证",
+      "not_covered": "不执行 bootstrap；SwitchBootstraps 等引导没有可读常量，计入未还原而不是猜测；自定义引导（非 JDK vanilla）的站点只是被枚举，没有还原语义；两个独立语料都没有非 vanilla BSM，因此该路径只有单元级证据",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
       "metrics": {
         "sites": 6245,
-        "resolved": 3899
+        "lambda": 3899,
+        "concat": 1667,
+        "record": 679,
+        "payload": 6245,
+        "unresolved": 0
       },
       "exit_codes": [
         0
@@ -343,7 +347,11 @@
       },
       "negative_metrics": {
         "sites": 0,
-        "resolved": 0
+        "lambda": 0,
+        "concat": 0,
+        "record": 0,
+        "payload": 0,
+        "unresolved": 0
       },
       "negative_exit_codes": [
         0
@@ -362,9 +370,39 @@
           "class": "a"
         },
         {
-          "label": "LambdaMetafactory 调用目标已还原",
+          "label": "bootstrap owner 集合等于独立解析结果",
           "ok": true,
-          "detail": "resolved=3899 sites=6245",
+          "detail": "tool=['java/lang/invoke/LambdaMetafactory', 'java/lang/invoke/StringConcatFactory', 'java/lang/runtime/ObjectMethods'] golden=['java/lang/invoke/LambdaMetafactory', 'java/lang/invoke/StringConcatFactory', 'java/lang/runtime/ObjectMethods']",
+          "class": "a"
+        },
+        {
+          "label": "每个 owner 的站点数 ≥ 其独立条目数",
+          "ok": true,
+          "detail": "{'java/lang/invoke/LambdaMetafactory': 3899, 'java/lang/invoke/StringConcatFactory': 1667, 'java/lang/runtime/ObjectMethods': 679} vs {'java/lang/invoke/LambdaMetafactory': 3762, 'java/lang/invoke/StringConcatFactory': 1420, 'java/lang/runtime/ObjectMethods': 238}",
+          "class": "a"
+        },
+        {
+          "label": "载荷站点数等于三类之和",
+          "ok": true,
+          "detail": "{'sites': 6245, 'lambda': 3899, 'concat': 1667, 'record': 679, 'payload': 6245, 'unresolved': 0}",
+          "class": "a"
+        },
+        {
+          "label": "三类载荷 + 未还原 = 站点数",
+          "ok": true,
+          "detail": "{'sites': 6245, 'lambda': 3899, 'concat': 1667, 'record': 679, 'payload': 6245, 'unresolved': 0}",
+          "class": "a"
+        },
+        {
+          "label": "本语料没有「无可还原常量」的站点",
+          "ok": true,
+          "detail": "{'sites': 6245, 'lambda': 3899, 'concat': 1667, 'record': 679, 'payload': 6245, 'unresolved': 0}",
+          "class": "a"
+        },
+        {
+          "label": "还原出的每个常量载荷都存在于独立常量池",
+          "ok": true,
+          "detail": "1406 recovered, 0 invented []",
           "class": "a"
         },
         {
@@ -833,12 +871,12 @@
   "boundaries": [
     "M1: real corpora contain no obfuscator flattening (unflattened=0); 684 rewrites are javac switch(String) lowering, 7 are a unit fixture",
     "M1: behave union 342/411 with 1 real difference; 02 stays in progress",
-    "M3: 3899 lambda targets resolved, but both corpora use only JDK vanilla bootstrap methods; no custom BSM was exercised",
+    "M3: every indy site yields its constant payload, but both corpora use only JDK vanilla bootstrap methods; a custom bootstrap is enumerated, never resolved",
     "M5: 0 DES ciphertext on either corpus; extraction is verified, decryption is not claimed",
     "ROADMAP:231-236 keeps ZKM/JNIC/BytecodeVM deep recovery out of the 1.0 support promise"
   ],
   "check_breakdown": {
-    "a": 31,
+    "a": 36,
     "b": 9,
     "c": 10,
     "d": 2

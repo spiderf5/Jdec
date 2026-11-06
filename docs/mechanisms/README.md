@@ -34,7 +34,7 @@ ID 与名称严格对应 `src/tests/support_matrix.py` 的 `MECHANISMS` 注册�
 | --- | --- | --- | --- | --- |
 | M1 | 控制流去平坦化 / 常量折叠 / 不透明谓词 | [M1.md](M1.md) | 对含 goto-flood / irreducible-goto 的真实 jar 产出可重放指令级改写、重算 StackMapTable、全类过 `-Xverify:all` 并出改写清单 | 不还原任意自定义 VM；jsr/ret 明确拒绝；改写保持语义但不证明等价 |
 | M2 | 字节级往返与坏类隔离（改写底座） | [M2.md](M2.md) | 整 jar 逐类 parse→重汇编→逐字节比对，报告类与 Code 数组相等数，坏类隔离不拖垮整批 | 不做语义等价证明；jsr/ret 与不可解码类按边界拒绝 |
-| M3 | invokedynamic / BootstrapMethods 站点枚举 | [M3.md](M3.md) | 枚举 BSM 与 indy 站点并按 bootstrap owner / 站点名归类，两语料上如实报告非 vanilla 自定义 BSM 目标数为 0 | 不执行 bootstrap、不解密自定义引导逻辑；不承诺还原，目标数 0 不等于已攻克 |
+| M3 | invokedynamic / BootstrapMethods 站点与常量载荷还原 | [M3.md](M3.md) | 枚举 BSM 与 indy 站点并按 owner 归类，再还原 LambdaMetafactory 调用目标、StringConcatFactory 模板、ObjectMethods 组件名；HMCL 6245/6245、NeoRaven 150/150 站点全部还原 | 不执行 bootstrap；无常量的引导（如 SwitchBootstraps）计入未还原；非 vanilla 自定义 BSM 目标数为 0，不承诺还原 |
 | M4 | 混淆器结构指纹归因 | [M4.md](M4.md) | 基于 ≥2 个专属关键词 + 结构阈值做厂商归因、命中须带证据，对 NeoRaven 如实报未命中 ZKM 专属指纹 | 旧「ZKM 27 enhanced DES」是 ivparameterspec 关键词误报；词表不等于支持全部机制，不承诺还原 |
 | M5 | 字符串常量抽取与加密/威胁标签 | [M5.md](M5.md) | 抽取常量池字符串并按 url/path/credential/encrypted-blob/machine-id/class-loading 标注，encrypted-blob 须 base64 解码与 FQCN 排除复核 | 标签是启发式、抽取不等于解密；本语料不存在 ZKM DES 池，不据旧结论标注 |
 | M6 | native 分诊与 PE/JNI 库提取 | [M6.md](M6.md) | 从 MZ stub 自解压 PE / ELF 与 jar 资源提取 native 库，解析导出表与 JNINativeMethod，报告 Java 侧 native 方法与匹配 | 不反编译 native 函数体；不承诺 RegisterNatives 动态绑定还原 |

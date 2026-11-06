@@ -29,7 +29,7 @@ python jdec.py verify client.jar        # JVM 门禁：每个类都要过 -Xveri
 未达成的边界见 [docs/ROADMAP.md](docs/ROADMAP.md) 与 README 的“边界”一节。
 04 支持矩阵（8 类机制，52 项交叉检查）见 [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md)；
 头条数字的复现命令、内置生成式基准与 83.0% 口径见 [docs/REPRODUCE.md](docs/REPRODUCE.md)。
-当前状态：alpha，核心回归 1252 条断言（146 个用例）全绿（`python src/tests/run_tests.py`）；03 专项试用版（Java 级隔离重放、两类机制、独立样本）见 [docs/README.md](docs/README.md)。
+当前状态：alpha，核心回归 1274 条断言（147 个用例）全绿（`python src/tests/run_tests.py`）；03 专项试用版（Java 级隔离重放、两类机制、独立样本）见 [docs/README.md](docs/README.md)。
 
 ---
 

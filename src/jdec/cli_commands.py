@@ -848,8 +848,19 @@ def cmd_indy(args: argparse.Namespace) -> int:
     print(f"with indy sites    : {st['classes_with_sites']}")
     print(f"indy sites         : {st['sites']}")
     if getattr(args, "resolve", False):
-        print(f"resolved targets   : {st.get('resolved_targets', 0)} "
+        print(f"lambda targets     : {st.get('resolved_targets', 0)} "
               f"of {st['sites']} site(s)")
+        print(f"concat templates   : {st.get('resolved_concat', 0)} "
+              f"(StringConcatFactory recipe)")
+        print(f"record components  : {st.get('resolved_record', 0)} "
+              f"(ObjectMethods component list)")
+        print(f"payload recovered  : {st.get('payload_sites', 0)} "
+              f"of {st['sites']} site(s)")
+        print(f"unresolved         : {st.get('unresolved_sites', 0)} "
+              f"(bootstrap carries no readable constant)")
+        histogram = ";".join(f"{k}={v}" for k, v in sorted(
+            result["per_owner"].items(), key=lambda kv: (-kv[1], kv[0])))
+        print(f"owners             : {histogram}")
     if result["per_owner"]:
         print("bootstrap owners (top):")
         for owner, n in sorted(result["per_owner"].items(),
@@ -873,6 +884,7 @@ def cmd_indy(args: argparse.Namespace) -> int:
                                  "kind": s.bsm.kind}
                                 if s.bsm else None),
                         "target": BM.resolve_target(s),
+                        "payload": BM.resolve_site(s),
                         "dynargs": repr(s.dynargs)} for s in sites]}
                        for c, sites in result["sample"]]}
         out.write_text(json.dumps(payload, ensure_ascii=False, indent=1),

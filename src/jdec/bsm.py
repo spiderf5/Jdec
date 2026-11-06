@@ -303,6 +303,65 @@ def enum_sites(cf, bsm_cache: dict | None = None) -> list[IndySite]:
     return sites
 
 
+CONCAT_OWNER = "java/lang/invoke/StringConcatFactory"
+RECORD_OWNER = "java/lang/runtime/ObjectMethods"
+
+
+def resolve_concat(site: "IndySite") -> dict | None:
+    """Recover the format template of a StringConcatFactory site.
+
+    javac turns `"a" + x + "b"` into an invokedynamic whose first static
+    argument is a recipe: `\\u0001` marks a dynamic argument and `\\u0002`
+    marks the next entry of the constant list. The recipe is the string the
+    author actually wrote, so this is recovered data, not a heuristic.
+    """
+    bsm = getattr(site, "bsm", None)
+    if not bsm or (bsm.owner or "") != CONCAT_OWNER:
+        return None
+    args = getattr(bsm, "args", [])
+    if not args or not isinstance(args[0], tuple) or args[0][0] != "lit":
+        return None
+    recipe = str(args[0][1])
+    consts = [str(a[1]) for a in args[1:]
+              if isinstance(a, tuple) and a[0] == "lit"]
+    if recipe.count("\x02") != len(consts):
+        # A ConstantDynamic recipe or a truncated attribute: report the part
+        # that is certain instead of inventing the missing constants.
+        consts = consts[:recipe.count("\x02")]
+    return {"kind": "concat", "owner": bsm.owner, "recipe": recipe,
+            "template": recipe.replace("\x01", "{}").replace("\x02", "{c}"),
+            "arguments": recipe.count("\x01"), "constant_parts": consts,
+            "arity": _arity(site.desc or "")}
+
+
+def resolve_record(site: "IndySite") -> dict | None:
+    """Recover the component list of a record's ObjectMethods site.
+
+    `ObjectMethods.bootstrap` takes (ClassDesc, "name;other", getters...), so
+    the second static argument is the record's own component names - the field
+    names a decompiler would otherwise have to guess.
+    """
+    bsm = getattr(site, "bsm", None)
+    if not bsm or (bsm.owner or "") != RECORD_OWNER:
+        return None
+    args = getattr(bsm, "args", [])
+    owner = args[0][1] if args and isinstance(args[0], tuple) \
+        and args[0][0] == "cls" else None
+    if not owner or len(args) < 2:
+        return None
+    if not (isinstance(args[1], tuple) and args[1][0] == "lit"):
+        # A ConstantDynamic component list: the names are computed at run time,
+        # so report nothing rather than an empty list that looks like a fact.
+        return None
+    components = [c for c in str(args[1][1]).split(";") if c]
+    getters = [{"name": a[1].get("name"), "desc": a[1].get("desc")}
+               for a in args[2:]
+               if isinstance(a, tuple) and a[0] == "mh"
+               and isinstance(a[1], dict)]
+    return {"kind": "record", "owner": owner, "components": components,
+            "getters": getters}
+
+
 def resolve_target(site: "IndySite") -> dict | None:
     """The implementation target of a LambdaMetafactory site.
 
@@ -325,10 +384,32 @@ def resolve_target(site: "IndySite") -> dict | None:
     return None
 
 
+def resolve_site(site: "IndySite") -> dict | None:
+    """Whatever constant data this bootstrap carries, tagged by family.
+
+    LambdaMetafactory hands over a call target, StringConcatFactory a format
+    template, ObjectMethods a component list. One entry point keeps callers
+    from having to know which family a site belongs to; ``family`` is added
+    rather than overloading ``kind``, which stays the MethodHandle ref kind.
+    """
+    target = resolve_target(site)
+    if target:
+        return {"family": "lambda", **target}
+    concat = resolve_concat(site)
+    if concat:
+        return concat
+    record = resolve_record(site)
+    if record:
+        return record
+    return None
+
+
 def scan_jar(jar: Path, limit: int = 0) -> dict:
     """整个 jar 的 indy 站点普查：统计 + 逐类站点。"""
     stats = {"classes": 0, "classes_with_bsm": 0, "classes_with_sites": 0,
-             "sites": 0, "bsm_total": 0, "resolved_targets": 0}
+             "sites": 0, "bsm_total": 0, "resolved_targets": 0,
+             "resolved_concat": 0, "resolved_record": 0, "payload_sites": 0,
+             "unresolved_sites": 0}
     per_owner: dict[str, int] = {}
     per_name: dict[str, int] = {}
     out = []
@@ -354,8 +435,22 @@ def scan_jar(jar: Path, limit: int = 0) -> dict:
                 owner = s.bsm.owner if s.bsm else "?"
                 per_owner[owner] = per_owner.get(owner, 0) + 1
                 per_name[s.name] = per_name.get(s.name, 0) + 1
-                if resolve_target(s):
+                # Count each family separately: a lambda target, a concat
+                # template and a record component list are different payloads.
+                payload = resolve_site(s)
+                if not payload:
+                    # e.g. SwitchBootstraps carries only a type descriptor, so
+                    # there is no constant to recover. Counted, not hidden.
+                    stats["unresolved_sites"] += 1
+                    continue
+                stats["payload_sites"] += 1
+                family = payload.get("family") or payload.get("kind")
+                if family == "lambda":
                     stats["resolved_targets"] += 1
+                elif family == "concat":
+                    stats["resolved_concat"] += 1
+                elif family == "record":
+                    stats["resolved_record"] += 1
             if limit and len(out) < limit:
                 out.append((cf.name, sites))
     return {"stats": stats, "per_owner": per_owner, "per_name": per_name,

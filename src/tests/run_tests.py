@@ -7017,6 +7017,7 @@ def test_stage04_acceptance_harness() -> None:
     """The 04 acceptance layer: independent goldens and per-mechanism controls."""
     print("stage 04: acceptance evidence and corrected fingerprints")
     import io
+    import inspect
     import contextlib
     import goldens as G
     import stage04 as S
@@ -7107,6 +7108,23 @@ def test_stage04_acceptance_harness() -> None:
               and sum(data["check_breakdown"].values())
               == sum(len(m["checks"]) for m in data["mechanisms"]),
               str(data.get("check_breakdown")))
+        check("the check registry covers exactly the eight specs",
+              set(S._CHECKS) == {x["id"] for x in S.SPECS}
+              and all(callable(fn) for fn in S._CHECKS.values()),
+              str(sorted(S._CHECKS)))
+        check("_checks is a dispatcher, not a monolith",
+              len(inspect.getsource(S._checks).splitlines()) < 45,
+              f"{len(inspect.getsource(S._checks).splitlines())} lines")
+        m3 = next(m for m in data["mechanisms"] if m["id"] == "M3")
+        check("M3 accounts for every indy site",
+              m3["metrics"].get("lambda", 0) + m3["metrics"].get("concat", 0)
+              + m3["metrics"].get("record", 0)
+              + m3["metrics"].get("unresolved", -1)
+              == m3["metrics"].get("sites", -2) > 0,
+              str(m3["metrics"]))
+        check("M3 recovered a payload for every site on this corpus",
+              m3["metrics"].get("payload") == m3["metrics"].get("sites")
+              and m3["metrics"].get("unresolved") == 0, str(m3["metrics"]))
         m1 = next(m for m in data["mechanisms"] if m["id"] == "M1")
         check("M1 records that folding and opaque predicates did not fire",
               m1["metrics"].get("folded") == 0
@@ -7116,6 +7134,122 @@ def test_stage04_acceptance_harness() -> None:
               m1["metrics"].get("switch", 0) > 0
               and m1["metrics"].get("unflatten_methods") == 0,
               str(m1["metrics"]))
+
+def test_indy_payload_resolution() -> None:
+    """Every bootstrap payload must be recovered, counted, or reported absent."""
+    print("indy: bootstrap payloads are recovered against the constant pool")
+    import io
+    import re
+    import contextlib
+    import goldens as G
+    from jdec import bsm as BM
+    from jdec import cli as CL
+
+    jar = ROOT / "tests" / "sample.jar"   # ROOT here is src/
+    golden = G.bsm_facts(jar)
+    check("the independent parser sees the bootstrap entries",
+          golden["entries"] == 8, str(golden["entries"]))
+    check("the independent parser collects static payloads",
+          "x;y" in golden["payloads"] and "p\x01:\x01" in golden["payloads"],
+          str(golden["payloads"]))
+    check("the independent parser resolves all four owners",
+          len(golden["owners"]) == 4 and "java/lang/runtime/SwitchBootstraps"
+          in golden["owners"], str(golden["owners"]))
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = CL.main(["indy", str(jar), "--resolve"])
+    text = buf.getvalue()
+    check("indy --resolve exits 0", rc == 0, str(rc))
+
+    def grab(label: str) -> int:
+        m = re.search(rf"(?m)^{label}\s+: (\d+)", text)
+        return int(m.group(1)) if m else -1
+
+    sites = grab("indy sites")
+    payload = grab("payload recovered")
+    unresolved = grab("unresolved")
+    kinds = grab("lambda targets") + grab("concat templates") + grab(
+        "record components")
+    check("the four counts partition the sites",
+          sites > 0 and kinds + unresolved == sites and payload == kinds,
+          f"sites={sites} payload={payload} kinds={kinds} "
+          f"unresolved={unresolved}")
+    check("a bootstrap without constants is reported, not guessed",
+          unresolved == 1, f"unresolved={unresolved}")
+    check("the owner histogram reaches stdout",
+          "SwitchBootstraps=1" in text, text[-200:])
+
+    # Value level: every recovered string must exist in the constant pool.
+    recovered: set[str] = set()
+    import zipfile
+    from jdec import classfile as CF
+    with zipfile.ZipFile(jar) as z:
+        for info in z.infolist():
+            if not info.filename.endswith(".class"):
+                continue
+            try:
+                cf = CF.parse(z.read(info))
+            except Exception:      # noqa: BLE001 - sample.jar ships a truncated class
+                continue
+            for site in BM.enum_sites(cf):
+                concat = BM.resolve_concat(site)
+                if concat:
+                    recovered.add(concat["recipe"])
+                record = BM.resolve_record(site)
+                if record:
+                    recovered.add(";".join(record["components"]))
+    check("every recovered payload is a real constant-pool string",
+          bool(recovered) and recovered <= set(golden["payloads"]),
+          f"{len(recovered)} recovered, "
+          f"{sorted(recovered - set(golden['payloads']))[:2]} invented")
+
+    # Unit level: the three recipe shapes, including the defensive branches.
+    def concat_site(recipe: str, consts: list[str]) -> BM.IndySite:
+        return BM.IndySite(
+            cls="a/B", method="m", name="makeConcatWithConstants",
+            desc="(ILjava/lang/String;)Ljava/lang/String;",
+            bsm=BM.BsmEntry(index=0, kind=6, owner=BM.CONCAT_OWNER,
+                            name="makeConcatWithConstants", desc="()V",
+                            args=[("lit", recipe)] + [("lit", c) for c in consts]))
+
+    out = BM.resolve_concat(concat_site("id=\x01, n=\x02", ["x"]))
+    check("a concat recipe becomes a readable template",
+          out["template"] == "id={}, n={c}", out["template"])
+    check("the concat constants are recovered", out["constant_parts"] == ["x"],
+          str(out["constant_parts"]))
+    check("the concat argument count is counted", out["arguments"] == 1,
+          str(out["arguments"]))
+    odd = BM.resolve_concat(concat_site("no placeholder", ["x"]))
+    check("a constant with no \\u0002 placeholder is dropped, not invented",
+          odd["constant_parts"] == [], str(odd["constant_parts"]))
+    check("a non-concat owner is not treated as a concat",
+          BM.resolve_concat(BM.IndySite(
+              cls="a/B", method="m", name="n", desc="()V",
+              bsm=BM.BsmEntry(index=0, kind=6, owner="custom/Boot",
+                              name="b", desc="()V", args=[]))) is None)
+
+    def record_site(names, getters=()) -> BM.IndySite:
+        return BM.IndySite(
+            cls="a/R", method="toString", name="toString", desc="()V",
+            bsm=BM.BsmEntry(index=0, kind=6, owner=BM.RECORD_OWNER,
+                            name="bootstrap", desc="()V",
+                            args=[("cls", "a/R"), names] + list(getters)))
+
+    rec = BM.resolve_record(record_site(("lit", "x;y"), [
+        ("mh", {"kind": 1, "owner": "a/R", "name": "x", "desc": "I"})]))
+    check("record component names are recovered", rec["components"] == ["x", "y"],
+          str(rec["components"]))
+    check("record getters keep their descriptors",
+          rec["getters"] == [{"name": "x", "desc": "I"}], str(rec["getters"]))
+    empty = BM.resolve_record(record_site(("lit", "")))
+    check("a zero-component record resolves to an empty list",
+          empty["components"] == [], str(empty))
+    check("a dynamic component list is refused rather than emptied",
+          BM.resolve_record(record_site(("?", None))) is None)
+    check("resolve_site tags the lambda family",
+          BM.resolve_site(concat_site("a\x01", []))["kind"] == "concat")
+
 
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""
@@ -8510,6 +8644,7 @@ def main() -> int:
     test_support_matrix_per_corpus_gate()
     test_benchmark_report_hygiene()
     test_stage04_acceptance_harness()
+    test_indy_payload_resolution()
     test_nativedb_bundle()
     test_support_matrix_selfcheck()
     test_frame_generation()
