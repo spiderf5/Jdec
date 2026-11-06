@@ -366,14 +366,6 @@ def _case_map(switch) -> dict:
     return {k: t for k, t in zip(switch.switch_keys, switch.targets[1:])}
 
 
-def _retarget(insn, target: int) -> None:
-    insn.arg = target - insn.pc
-    if insn.op == OP_GOTO and not -32768 <= insn.arg <= 32767:
-        insn.op, insn.length = OP_GOTO_W, 5
-    elif insn.op == OP_GOTO_W:
-        insn.length = 5
-
-
 def _string_hashcode_switch(prog, cf) -> bool:
     """True when this method contains a ``String.hashCode()`` dispatch.
 

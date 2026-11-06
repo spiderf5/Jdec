@@ -845,15 +845,6 @@ def _jdiv(a: int, b: int, mask) -> int:
     return mask(q)
 
 
-def _jrem(a: int, b: int, mask) -> int:
-    if b == 0:
-        raise JavaThrow("java/lang/ArithmeticException", "/ by zero")
-    q = abs(a) // abs(b)
-    if (a < 0) != (b < 0):
-        q = -q
-    return mask(a - b * q)
-
-
 def _check_zero(op: int, a, b):
     # integer division/rem only; float division by zero is IEEE inf/nan
     if op in (0x6C, 0x6D, 0x70, 0x71) and b == 0:
@@ -917,10 +908,6 @@ def _f2i_clamp(v: float, lo: int, hi: int) -> int:
     if v <= lo:
         return lo
     return int(v)                       # Python int() truncates toward zero
-
-
-def _int_mask_op(fn):
-    return lambda a, b: i32(fn(a, b))
 
 
 # kind: i = int binop (1,1 -> 1), l = long binop (2,2 -> 2),

@@ -290,6 +290,79 @@ def ensure_procyon_bridge(engines_dir: Path, quiet: bool = False) -> bool:
     return True
 
 
+def _obtain_offline(fname: str, want_hash: str | None,
+                    src: Path | None) -> tuple[Path | None, str]:
+    """A verified copy from the bundle, or the reason there is none."""
+    candidate = (src / fname) if src else None
+    if candidate and _intact(candidate, want_hash):
+        return candidate, ""
+    return None, "no verified offline copy"
+
+
+def _obtain_online(fname: str, rel: str,
+                   want_hash: str | None) -> tuple[bytes | None, str]:
+    """Download and verify a jar, or return the reason it was rejected."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"{maven_base()}/{rel}", timeout=180) as r:
+            data = r.read()
+    except Exception as exc:  # noqa: BLE001 - network, TLS, HTTP status
+        return None, str(exc)
+    if want_hash and _sha1(data) != want_hash:
+        return None, "sha1 mismatch - refusing to install"
+    return data, ""
+
+
+def _install_atomic(dest: Path, copy_from: Path | None,
+                    data: bytes | None) -> str:
+    """Write a sibling file, then os.replace. Returns an error string."""
+    tmp = dest.with_name(dest.name + ".jdec-tmp")
+    try:
+        if copy_from is not None:
+            shutil.copy2(copy_from, tmp)
+        elif data is not None:
+            tmp.write_bytes(data)
+        else:
+            return "nothing to install"
+        os.replace(tmp, dest)
+        return ""
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        return str(exc)
+
+
+def _ensure_one(dest: Path, rel: str, want_hash: str | None, *,
+                offline: bool, src: Path | None, quiet: bool) -> bool:
+    """Install one jar when needed. True means it is usable afterwards."""
+    name = dest.name
+    if _intact(dest, want_hash):
+        return True
+    if dest.exists() and not quiet:
+        print(f"  ! {name} failed verification, replacing ...")
+    if offline:
+        source, reason = _obtain_offline(name, want_hash, src)
+        data = None
+    else:
+        if not quiet:
+            print(f"  downloading {name} ...")
+        source = None
+        data, reason = _obtain_online(name, rel, want_hash)
+    if reason:
+        if not quiet:
+            print(f"  ! {name}: {reason}")
+            if dest.exists():
+                print(f"  ! {name}: existing file left untouched")
+        return False
+    error = _install_atomic(dest, source, data)
+    if error:
+        if not quiet:
+            print(f"  ! {name}: cannot install replacement: {error}")
+        return False
+    if not quiet and source is not None:
+        print(f"  installed {name} from {src}")
+    return True
+
+
 def ensure_engines(engines_dir: Path, want: list[str] | None = None,
                    quiet: bool = False, *, offline: bool = False,
                    source_dir: Path | None = None) -> list[str]:
@@ -312,57 +385,8 @@ def ensure_engines(engines_dir: Path, want: list[str] | None = None,
     missing: list[str] = []
     for key in want or list(ENGINES):
         for fname, rel in _ARTIFACTS.get(key, []):
-            dest = engines_dir / fname
-            want_hash = _SHA1.get(fname)
-            if _intact(dest, want_hash):
-                continue
-            if dest.exists() and not quiet:
-                print(f"  ! {fname} failed verification, replacing ...")
-            copy_from: Path | None = None
-            new_data: bytes | None = None
-            if offline:
-                candidate = (src / fname) if src else None
-                if candidate and _intact(candidate, want_hash):
-                    copy_from = candidate
-                else:
-                    missing.append(key)
-                    if not quiet:
-                        print(f"  ! {fname}: no verified offline copy; "
-                              "existing file left untouched")
-                    break
-            else:
-                if not quiet:
-                    print(f"  downloading {fname} ...")
-                try:
-                    import urllib.request
-                    with urllib.request.urlopen(
-                            f"{maven_base()}/{rel}", timeout=180) as r:
-                        data = r.read()
-                    if want_hash and _sha1(data) != want_hash:
-                        raise ValueError("sha1 mismatch - refusing to install")
-                    new_data = data
-                except Exception as exc:  # noqa: BLE001
-                    if not quiet:
-                        print(f"  ! failed: {exc}")
-                        if dest.exists():
-                            print(f"  ! {fname}: existing file left untouched")
-                    missing.append(key)
-                    break
-            # Only now is the existing file replaced. Writing to a sibling and
-            # using os.replace keeps the old jar intact if the write fails.
-            tmp = dest.with_name(dest.name + ".jdec-tmp")
-            try:
-                if copy_from is not None:
-                    shutil.copy2(copy_from, tmp)
-                else:
-                    tmp.write_bytes(new_data if new_data is not None else b"")
-                os.replace(tmp, dest)
-                if not quiet and copy_from is not None:
-                    print(f"  installed {fname} from {src}")
-            except OSError as exc:
-                tmp.unlink(missing_ok=True)
-                if not quiet:
-                    print(f"  ! {fname}: cannot install replacement: {exc}")
+            if not _ensure_one(engines_dir / fname, rel, _SHA1.get(fname),
+                               offline=offline, src=src, quiet=quiet):
                 missing.append(key)
                 break
     ensure_procyon_bridge(engines_dir, quiet=quiet)
