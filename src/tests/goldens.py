@@ -229,6 +229,54 @@ def native_facts(path: Path) -> dict:
     return result
 
 
+_NATIVE_EXTS = (".dll", ".so", ".dylib", ".jnilib")
+
+
+def des_markers(path: Path) -> dict:
+    """Counts of the constants that would justify a ZKM/DES attribution.
+
+    Read from the constant-pool strings, so an attribution that has no such
+    marker in the corpus is a false positive by construction.
+    """
+    constants = jar_facts(path)["constants"]
+    return {k: sum(1 for c in constants if k.lower() in c.lower())
+            for k in ("DESKeySpec", "DES/CBC", "zelix", "$CodePool")}
+
+
+def native_libs_facts(path: Path) -> dict:
+    """Every native library inside a jar, parsed here rather than by jdec.
+
+    This is the Maven `natives` classifier layout: the main jar declares the
+    native methods and a second jar carries the libraries. Summing the exports
+    independently is what makes "52 JNI exports matched" checkable.
+    """
+    libs: dict[str, dict] = {}
+    try:
+        zf = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return {"libs": {}, "lib_count": 0, "total_exports": 0,
+                "total_jni": 0, "max_exports": 0}
+    with zf as z:
+        for info in z.infolist():
+            if not info.filename.lower().endswith(_NATIVE_EXTS):
+                continue
+            data = z.read(info.filename)
+            facts = pe_exports(data)
+            libs[info.filename.rsplit("/", 1)[-1]] = {
+                "exports": len(facts["exports"]),
+                "jni": sum(1 for e in facts["exports"]
+                           if e.startswith("Java_")),
+                "bytes": len(data),
+            }
+    return {
+        "libs": libs,
+        "lib_count": len(libs),
+        "total_exports": sum(v["exports"] for v in libs.values()),
+        "total_jni": sum(v["jni"] for v in libs.values()),
+        "max_exports": max((v["exports"] for v in libs.values()), default=0),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Independent Minecraft / loader metadata facts.
 # ---------------------------------------------------------------------------

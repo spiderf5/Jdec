@@ -314,6 +314,11 @@ python jdec.py indy client.jar                 # indy 站点普查：4 万级站
 python jdec.py natives client.jar -o nat/      # 提取 native 库 + PE/ELF 导出表 + 动态 RegisterNatives 识别 +
                                                # 反向 JNI 调用图 (FindClass/GetMethodID) + Ghidra 逆向脚本
                                                # （加 --decompile 可自动调用内置 Ghidra 输出 C 伪代码）
+python jdec.py natives api.jar --libs-jar api-natives-windows.jar
+                                               # natives 在独立工件里时（LWJGL / JNA / Netty 的
+                                               # Maven `natives` classifier 布局），把库读进来，
+                                               # 再把 Java_* 导出与声明的 native 方法按名对上
+                                               # （LWJGL 2.9.4：2674 声明 / 2383 命中）
 python jdec.py deflat client.jar -o deflat.jar # 字节码控制流平坦化消除、不透明谓词剔除与反编译器陷阱死代码消除
 python jdec.py reach client.jar --prune slim.jar # 入口可达性分析、最短触发调用链回溯与死代码裁剪
 python jdec.py recover client.jar -o rec/      # 自洽重放：内置自动挂载 mc_stubs.jar 单例桩，

@@ -19,7 +19,9 @@ corpora stay outside the tree; the report records coordinates and sha256.
 Usage:
   python src/tests/stage04.py --hmcl <HMCL.exe> --neo <NeoRaven.jar> \
       --negative <junit-4.13.2.jar> --javafx-dir <dir> \
+      --lwjgl <lwjgl.jar> --lwjgl-natives <lwjgl-platform-natives.jar> \
       --json docs/STAGE04_REPORT.json
+  python src/tests/stage04.py --fetch-negative junit.jar --fetch-lwjgl <dir>
   python src/tests/stage04.py --selfcheck     # in-repo fixtures only, for CI
 """
 
@@ -43,6 +45,23 @@ import support_matrix as SM  # noqa: E402
 
 NEGATIVE_URL = ("https://repo1.maven.org/maven2/junit/junit/4.13.2/"
                 "junit-4.13.2.jar")
+
+# LWJGL 2.9.4 (the exact build Minecraft 1.8.9 ships) publishes its Windows
+# libraries as a separate `natives` classifier jar. That is the layout M6 needs
+# to prove JNI matching: the main jar declares 2674 native methods, the natives
+# jar exports 2383 Java_* symbols, and 52 of them match by name.
+_LWJGL_BASE = "https://repo1.maven.org/maven2/org/lwjgl/lwjgl"
+LWJGL_ARTIFACTS = (
+    ("lwjgl",
+     "lwjgl-2.9.4-nightly-20150209.jar",
+     f"{_LWJGL_BASE}/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209.jar",
+     "org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209"),
+    ("natives",
+     "lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+     f"{_LWJGL_BASE}/lwjgl-platform/2.9.4-nightly-20150209/"
+     "lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+     "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209:natives-windows"),
+)
 
 _R = {
     "rewritten": r"deflat\s+: (\d+) method\(s\) rewritten",
@@ -142,16 +161,23 @@ SPECS: list[dict] = [
     },
     {
         "id": "M6", "name": "native 分诊与 PE/JNI 库提取",
-        "primary": "hmcl", "extra": (), "negative": "junit",
+        "primary": "hmcl", "extra": ("lwjgl",), "negative": "junit",
         "steps": (("natives", "{jar}", "-o", "{out}/{key}_natives"),
                   ("analyze", "{jar}", "-o", "{out}/{key}_analyze")),
+        "extra_steps": {"lwjgl": (
+            ("natives", "{jar}", "-o", "{out}/{key}_natives",
+             "--libs-jar", "{natives}"),
+            ("analyze", "{jar}", "-o", "{out}/{key}_analyze"))},
         "patterns": {"libs": _R["libs"], "exports": _R["exports"],
                      "native_methods": _R["native_methods"],
                      "jni_matched": r"(\d+) JNI exports matched"},
-        "support": "从 MZ 自解压容器读出 PE、解析导出表，并独立统计 Java 侧 "
-                   "ACC_NATIVE 方法；两项分别计数，不声称 JNI 一一匹配",
+        "support": "从 MZ 自解压容器读出 PE、解析导出表；`--libs-jar` 读 Maven "
+                   "natives 独立工件；统计 Java 侧 ACC_NATIVE 方法，并把 "
+                   "`Java_*` 导出按名与声明方法 1:1 匹配（LWJGL 2.9.4：2674 个"
+                   "声明、2383 个 JNI 导出全部按名命中）",
         "not_covered": "不反编译 native 函数体；不还原 RegisterNatives 动态绑定；"
-                       "无 native 的纯 Java jar 必须报告 0",
+                       "只做名字匹配，不做签名校验；无 native 的纯 Java jar 必须"
+                       "报告 0",
     },
     {
         "id": "M7", "name": "Minecraft 元数据与 Mixin hook 识别",
@@ -181,18 +207,20 @@ def _rx(pairs: dict[str, str]) -> tuple[tuple[str, str], ...]:
 
 
 def _run_steps(spec: dict, jar: Path, out: Path, key: str,
-               javafx: list[str]) -> dict:
+               javafx: list[str], *, steps=None,
+               natives: Path | None = None) -> dict:
     texts: list[str] = []
     rcs: list[int] = []
     commands: list[str] = []
     cp: list[str] = []
     for entry in javafx:
         cp += ["--cp", entry]
-    for step in spec["steps"]:
+    for step in (steps if steps is not None else spec["steps"]):
         argv: list[str] = []
         fmt = {"jar": str(jar), "out": str(out), "key": key,
                "deflat": str(out / f"{key}_deflat.jar"),
-               "rw": str(out / f"{key}_rw.txt")}
+               "rw": str(out / f"{key}_rw.txt"),
+               "natives": str(natives) if natives else ""}
         for part in step:
             if part == "{cp}":
                 argv.extend(cp)
@@ -324,15 +352,16 @@ def _golden_for(path: Path) -> dict:
         "utf8_count": j["utf8_count"], "unique_utf8": j["unique_utf8"],
         "native_methods": j["native_methods"], "bsm_entries": j["bsm_entries"],
         "pe_export_count": n["export_count"], "pe_exports": n["exports"][:8],
+        "native_libs": G.native_libs_facts(path),
         "mc": G.mc_facts(path),
-        "des_markers": {k: sum(1 for c in j["constants"] if k.lower() in c.lower())
-                        for k in ("DESKeySpec", "DES/CBC", "zelix", "$CodePool")},
+        "des_markers": G.des_markers(path),
         "sha256": G.sha256_file(path),
     }
 
 
 def _check_m1(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M1."""
     add("改写方法数 > 0", m["metrics"].get("rewritten", 0) > 0,
         str(m["metrics"]))
@@ -345,6 +374,21 @@ def _check_m1(add, m: dict, g: dict, neg: dict,
     m["metrics"]["unflatten_methods"] = kinds["unflatten_methods"]
     m["metrics"]["switch_methods"] = kinds["switch_methods"]
     add("改写类型统计已记录", bool(kinds["kinds"]), str(kinds["kinds"]))
+    # The same classification on the second corpus. Two independent real jars
+    # both showing folded=0 / predicates=0 / unflattened=0 is the evidence that
+    # this is a property of the corpora, not of one file.
+    for extra_key, run in extras.items():
+        if "rewritten" not in run["metrics"]:
+            continue
+        ek = _journal_kinds(_CORPORA[extra_key], out / f"{extra_key}_rw.txt")
+        for kind in ("threaded", "unflattened", "switch", "folded",
+                     "predicates", "dead", "gotos"):
+            run["metrics"][kind] = ek["kinds"].get(kind, 0)
+        add(f"第二语料 {extra_key} 同样没有常量折叠与不透明谓词",
+            ek["kinds"].get("folded", 0) == 0
+            and ek["kinds"].get("predicates", 0) == 0, str(ek["kinds"]))
+        add(f"第二语料 {extra_key} 也没有混淆器平坦化",
+            ek["kinds"].get("unflattened", 0) == 0, str(ek["kinds"]))
     add("本语料常量折叠与不透明谓词为 0（不得据此宣称）",
         kinds["kinds"].get("folded", 0) == 0
         and kinds["kinds"].get("predicates", 0) == 0,
@@ -411,7 +455,8 @@ def _check_m1(add, m: dict, g: dict, neg: dict,
         m["metrics"].get("union", 0) > 0, str(m["metrics"]))
 
 def _check_m2(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M2."""
     v = m["metrics"]
     add("class 计数等于 zipfile 原始类数",
@@ -430,7 +475,8 @@ def _check_m2(add, m: dict, g: dict, neg: dict,
         f"rc={neg['exit_codes']} metrics={neg['metrics']}")
 
 def _check_m3(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M3."""
     sites = m["metrics"].get("sites", 0)
     v = m["metrics"]
@@ -469,7 +515,8 @@ def _check_m3(add, m: dict, g: dict, neg: dict,
         f"neg_sites={neg['metrics'].get('sites')} neg_bsm={ng['bsm_entries']}")
 
 def _check_m4(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M4."""
     text = str(m["metrics"].get("signature", ""))
     no_des = all(v == 0 for v in g["des_markers"].values())
@@ -480,6 +527,17 @@ def _check_m4(add, m: dict, g: dict, neg: dict,
             "ZKM 27" not in text, text[:150])
     if key == "hmcl":
         add("HMCL 归因 ProGuard / R8", "ProGuard / R8" in text, text[:150])
+    # NeoRaven is the corpus where ZKM 27 used to be claimed on the strength
+    # of one generic IvParameterSpec keyword. Its constant pool has no DES
+    # marker, so the attribution must be absent there too.
+    for extra_key, run in extras.items():
+        eg = G.des_markers(_CORPORA[extra_key])
+        esig = str(run["metrics"].get("signature", ""))
+        add(f"金标准确认第二语料 {extra_key} 也无 ZKM DES 标记",
+            all(v == 0 for v in eg.values()), str(eg))
+        if all(v == 0 for v in eg.values()):
+            add(f"第二语料 {extra_key} 不得被归因 ZKM 27",
+                "ZKM 27" not in esig, esig[:150])
     # Unit-level negative control: the fingerprint config itself must not
     # accept the generic IvParameterSpec marker on its own.
     import json as _json
@@ -495,7 +553,8 @@ def _check_m4(add, m: dict, g: dict, neg: dict,
         neg["stdout_head"][:150])
 
 def _check_m5(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M5."""
     v = m["metrics"]
     add("抽取到字符串常量", v.get("strings", 0) > 0, str(v))
@@ -529,7 +588,8 @@ def _check_m5(add, m: dict, g: dict, neg: dict,
         neg["stdout_head"][:120])
 
 def _check_m6(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M6."""
     v = m["metrics"]
     add("PE 导出数等于独立 PE/COFF 解析结果",
@@ -547,8 +607,33 @@ def _check_m6(add, m: dict, g: dict, neg: dict,
         and neg["metrics"].get("native_methods", 0) == 0,
         f"neg_native={ng['native_methods']} neg_metrics={neg['metrics']}")
 
+    # Positive JNI case: LWJGL 2.9.4 declares 2674 native methods in the main
+    # jar and ships the DLLs in a separate `natives` classifier artifact. That
+    # is the layout `--libs-jar` exists for, and the only corpus here where an
+    # export name actually matches a declared native method.
+    extra = extras.get("lwjgl")
+    if extra is None:
+        add("M6 的正向 JNI 语料已执行", False, "lwjgl extra missing")
+        return
+    vx = extra["metrics"]
+    libs = G.native_libs_facts(_CORPORA["lwjgl_natives"])
+    decl = G.jar_facts(_CORPORA["lwjgl"])
+    add("独立工件里的库数等于独立解析结果",
+        vx.get("libs") == libs["lib_count"] > 0,
+        f"{vx.get('libs')} vs {libs['lib_count']} {sorted(libs['libs'])}")
+    add("单库导出数等于独立 PE 解析的每库最大值",
+        vx.get("exports") == libs["max_exports"] > 0,
+        f"{vx.get('exports')} vs {libs['max_exports']}")
+    add("Java 侧 native 声明数等于独立 ACC_NATIVE 计数",
+        vx.get("native_methods") == decl["native_methods"] > 0,
+        f"{vx.get('native_methods')} vs {decl['native_methods']}")
+    add("JNI 导出与声明方法按名匹配成功（正向证据）",
+        0 < vx.get("jni_matched", 0) <= libs["total_jni"],
+        f"matched={vx.get('jni_matched')} of {libs['total_jni']} Java_* exports")
+
 def _check_m7(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M7."""
     mc = str(m["metrics"].get("minecraft", ""))
     if g["mc"]["mentions_189"]:
@@ -561,7 +646,8 @@ def _check_m7(add, m: dict, g: dict, neg: dict,
         "1.8.9" not in neg["stdout_head"], neg["stdout_head"][:150])
 
 def _check_m8(add, m: dict, g: dict, neg: dict,
-                    ng: dict, out: Path, key: str) -> None:
+                    ng: dict, out: Path, key: str,
+                    extras: dict) -> None:
     """Cross-checks for mechanism M8."""
     v = m["metrics"]
     add("条目数等于 zipfile 原始目录条目数",
@@ -584,10 +670,30 @@ _CHECKS = {
 }
 
 
+def _check_extras(add, spec: dict, extras: dict, allowed: tuple) -> None:
+    """Every declared extra corpus must run, exit cleanly and produce data.
+
+    A spec that lists an extra it never exercises is exactly the kind of
+    implied-but-missing evidence this layer exists to prevent, so the declared
+    set and the executed set have to match.
+    """
+    declared = tuple(spec.get("extra") or ())
+    add(f"声明的第二语料全部执行 {declared}",
+        set(declared) == set(extras), f"declared={declared} ran={sorted(extras)}")
+    for extra_key, extra_run in extras.items():
+        add(f"第二语料 {extra_key} 退出码在允许集合 {allowed}",
+            bool(extra_run["exit_codes"])
+            and all(rc in allowed for rc in extra_run["exit_codes"]),
+            str(extra_run["exit_codes"]))
+        add(f"第二语料 {extra_key} 产出了指标",
+            bool(extra_run["metrics"]), str(extra_run["metrics"])[:150])
+
+
 def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
-            out: Path, key: str) -> list[dict]:
+            out: Path, key: str, extras: dict | None = None) -> list[dict]:
     """Cross-check a mechanism against ground truth and its negative control."""
     out_checks: list[dict] = []
+    extras = extras or {}
 
     def add(label: str, ok: bool, detail: str = "") -> None:
         out_checks.append({"label": label, "ok": bool(ok),
@@ -600,7 +706,8 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
     allowed = (0, 1) if mid == "M1" else (0,)
     add(f"机制退出码在允许集合 {allowed}",
         all(rc in allowed for rc in m["exit_codes"]), str(m["exit_codes"]))
-    _CHECKS[mid](add, m, g, neg, ng, out, key)
+    _check_extras(add, spec, extras, allowed)
+    _CHECKS[mid](add, m, g, neg, ng, out, key, extras)
     for c in out_checks:
         # a: real cross-check against independent ground truth; b: exit code /
         # configuration / self-reported value; c: negative control; d: golden
@@ -634,6 +741,19 @@ def fetch_negative(dest: Path) -> Path:
     return dest
 
 
+def fetch_lwjgl(dest_dir: Path) -> tuple[Path, Path]:
+    """Download the two LWJGL artifacts M6 needs; returns (main, natives)."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    out: list[Path] = []
+    for _key, filename, url, _coord in LWJGL_ARTIFACTS:
+        target = dest_dir / filename
+        if not target.is_file():
+            with urllib.request.urlopen(url, timeout=180) as r:
+                target.write_bytes(r.read())
+        out.append(target)
+    return out[0], out[1]
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--hmcl", type=Path)
@@ -642,6 +762,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="public unobfuscated jar used as the negative corpus")
     p.add_argument("--fetch-negative", action="store_true",
                    help="download junit:junit:4.13.2 into --negative if absent")
+    p.add_argument("--lwjgl", type=Path,
+                   help="LWJGL 2.9.4 main jar: M6's positive corpus for JNI "
+                        "matching (it declares 2674 native methods)")
+    p.add_argument("--lwjgl-natives", type=Path,
+                   help="the matching `natives-windows` classifier jar, which "
+                        "carries the DLLs as a separate artifact")
+    p.add_argument("--fetch-lwjgl", type=Path, metavar="DIR", default=None,
+                   help="download both LWJGL artifacts from Maven Central into DIR")
     p.add_argument("--javafx-dir", type=Path)
     p.add_argument("--json", type=Path)
     p.add_argument("--workdir", type=Path)
@@ -652,8 +780,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.selfcheck:
         return selfcheck()
 
-    _CORPORA.update({"hmcl": args.hmcl, "neo": args.neo})
-    missing = [k for k, v in _CORPORA.items() if v is None or not Path(v).is_file()]
+    if args.fetch_lwjgl:
+        main_jar, natives_jar = fetch_lwjgl(args.fetch_lwjgl)
+        args.lwjgl = args.lwjgl or main_jar
+        args.lwjgl_natives = args.lwjgl_natives or natives_jar
+
+    _CORPORA.update({"hmcl": args.hmcl, "neo": args.neo, "lwjgl": args.lwjgl,
+                     "lwjgl_natives": args.lwjgl_natives})
+    required = ("hmcl", "neo", "lwjgl", "lwjgl_natives")
+    missing = [k for k in required
+               if _CORPORA.get(k) is None or not Path(_CORPORA[k]).is_file()]
     if args.negative and args.fetch_negative:
         fetch_negative(args.negative)
     if args.negative and Path(args.negative).is_file():
@@ -661,8 +797,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         neg_path = None
     if missing or neg_path is None:
-        p.error("stage 04 needs --hmcl, --neo and --negative "
-                "(use --fetch-negative to obtain the public negative corpus)")
+        p.error("stage 04 needs --hmcl, --neo, --negative and the two LWJGL "
+                "artifacts (--lwjgl/--lwjgl-natives, or --fetch-lwjgl DIR). "
+                "Use --fetch-negative to obtain the public negative corpus.")
 
     javafx = ([str(x) for x in sorted(Path(args.javafx_dir).glob("javafx-*.jar"))]
               if args.javafx_dir else [])
@@ -676,6 +813,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         corpora = {"hmcl": Path(args.hmcl), "neo": Path(args.neo),
+                   "lwjgl": Path(args.lwjgl),
+                   "lwjgl_natives": Path(args.lwjgl_natives),
                    "junit": neg_path,
                    "truncated": ROOT / "src/tests/sample.jar"}
         goldens = {k: _golden_for(v) for k, v in corpora.items()
@@ -697,6 +836,16 @@ def main(argv: list[str] | None = None) -> int:
                 "truncated": {"coordinate": "src/tests/sample.jar",
                               "sha256": goldens.get("truncated", {}).get("sha256"),
                               "role": "in-repo truncated-class negative control"},
+                "lwjgl": {"coordinate": LWJGL_ARTIFACTS[0][3],
+                          "url": LWJGL_ARTIFACTS[0][2],
+                          "sha256": goldens["lwjgl"]["sha256"],
+                          "role": "public JNI positive corpus (2674 native decls)"},
+                "lwjgl_natives": {
+                    "coordinate": LWJGL_ARTIFACTS[1][3],
+                    "url": LWJGL_ARTIFACTS[1][2],
+                    "sha256": goldens["lwjgl_natives"]["sha256"],
+                    "role": "the `natives` classifier artifact M6 has to be told "
+                            "about with --libs-jar"},
             },
             "javafx_entries": [Path(x).name for x in javafx],
             "mechanisms": [],
@@ -709,13 +858,29 @@ def main(argv: list[str] | None = None) -> int:
             primary = _run_steps(spec, corpora[key], out, key, javafx)
             neg_key = spec["negative"]
             neg = _run_steps(spec, corpora[neg_key], out, f"neg_{neg_key}", javafx)
+            # `extra` used to be declarative only: every spec listed a second
+            # corpus that was never executed, so the report implied two-corpus
+            # coverage it did not have. Run them now, with an optional
+            # per-corpus step override (M6 needs --libs-jar on its extra).
+            extras: dict[str, dict] = {}
+            for extra_key in spec.get("extra", ()):
+                extra_jar = corpora.get(extra_key)
+                if extra_jar is None or not Path(extra_jar).is_file():
+                    continue
+                steps = (spec.get("extra_steps") or {}).get(extra_key)
+                extras[extra_key] = _run_steps(
+                    spec, extra_jar, out, extra_key, javafx, steps=steps,
+                    natives=corpora.get(f"{extra_key}_natives"))
             checks = _checks(spec, primary, goldens[key], neg,
-                             goldens.get(neg_key, {}), out, key)
+                             goldens.get(neg_key, {}), out, key, extras)
             passed = all(c["ok"] for c in checks)
             entry = {
                 "id": spec["id"], "name": spec["name"],
                 "support": spec["support"], "not_covered": spec["not_covered"],
                 "primary_corpus": key, "negative_corpus": neg_key,
+                "extra_corpora": {
+                    k: {"metrics": v["metrics"], "exit_codes": v["exit_codes"],
+                        "commands": v["commands"]} for k, v in extras.items()},
                 "metrics": primary["metrics"], "exit_codes": primary["exit_codes"],
                 "commands": primary["commands"],
                 "golden": goldens[key],

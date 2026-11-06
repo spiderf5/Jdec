@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "stage": "04",
-  "generated_at": "2026-11-06T15:14:03.339893+00:00",
+  "generated_at": "2026-11-06T16:16:13.996354+00:00",
   "python": "3.13.14",
   "threshold": "6-8 mechanism classes with explicit support items, each backed by an independent sample regression",
   "corpus_sources": {
@@ -23,6 +23,18 @@
       "coordinate": "src/tests/sample.jar",
       "sha256": "2b68edbdcf4aed8664c285159f73ff95040c27b0e43aa387ef8e819ba94a6c23",
       "role": "in-repo truncated-class negative control"
+    },
+    "lwjgl": {
+      "coordinate": "org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209",
+      "url": "https://repo1.maven.org/maven2/org/lwjgl/lwjgl/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209.jar",
+      "sha256": "833e721817f70d1445eec13d8ce5a86e12af70efac5014356302e2bbc68b3fe2",
+      "role": "public JNI positive corpus (2674 native decls)"
+    },
+    "lwjgl_natives": {
+      "coordinate": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209:natives-windows",
+      "url": "https://repo1.maven.org/maven2/org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+      "sha256": "f2e1f2c6bd7511a7504f389b8b716f5d8dc2fdc71e29c89b52644314cf0a228e",
+      "role": "the `natives` classifier artifact M6 has to be told about with --libs-jar"
     }
   },
   "javafx_entries": [
@@ -38,6 +50,36 @@
       "not_covered": "真实语料只有 javac switch 类（87 个方法、684 次改写），混淆器平坦化仅单元 fixture（7 次）；常量折叠与不透明谓词在真实语料为 0；行为对拍 342/411、1 个真实差异",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
+      "extra_corpora": {
+        "neo": {
+          "metrics": {
+            "rewritten": 196,
+            "verified": 1120,
+            "justified": 196,
+            "unexplained": 0,
+            "same": 108,
+            "diff": 1,
+            "union": 142,
+            "threaded": 411,
+            "unflattened": 0,
+            "switch": 273,
+            "folded": 0,
+            "predicates": 0,
+            "dead": 18,
+            "gotos": 39
+          },
+          "exit_codes": [
+            0,
+            0,
+            1
+          ],
+          "commands": [
+            "jdec deflat <NEO> -o <WORKDIR>\\neo_deflat.jar --rewritten <WORKDIR>\\neo_rw.txt --cp javafx-base-21-win.jar --cp javafx-controls-21-win.jar --cp javafx-graphics-21-win.jar",
+            "jdec reasons <NEO> <WORKDIR>\\neo_deflat.jar",
+            "jdec behave <NEO> <WORKDIR>\\neo_deflat.jar --derive --from <WORKDIR>\\neo_rw.txt --execute --engine both --cp javafx-base-21-win.jar --cp javafx-controls-21-win.jar --cp javafx-graphics-21-win.jar"
+          ]
+        }
+      },
       "metrics": {
         "rewritten": 411,
         "verified": 3693,
@@ -80,6 +122,24 @@
           "AmdPowerXpressRequestHighPerformance",
           "NvOptimusEnablement"
         ],
+        "native_libs": {
+          "libs": {
+            "libjnidispatch.jnilib": {
+              "exports": 0,
+              "jni": 0,
+              "bytes": 109824
+            },
+            "jnidispatch.dll": {
+              "exports": 71,
+              "jni": 0,
+              "bytes": 226304
+            }
+          },
+          "lib_count": 2,
+          "total_exports": 71,
+          "total_jni": 0,
+          "max_exports": 71
+        },
         "mc": {
           "has_mcmod": false,
           "mentions_forge": false,
@@ -116,6 +176,24 @@
           "class": "b"
         },
         {
+          "label": "声明的第二语料全部执行 ('neo',)",
+          "ok": true,
+          "detail": "declared=('neo',) ran=['neo']",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 退出码在允许集合 (0, 1)",
+          "ok": true,
+          "detail": "[0, 0, 1]",
+          "class": "b"
+        },
+        {
+          "label": "第二语料 neo 产出了指标",
+          "ok": true,
+          "detail": "{'rewritten': 196, 'verified': 1120, 'justified': 196, 'unexplained': 0, 'same': 108, 'diff': 1, 'union': 142}",
+          "class": "a"
+        },
+        {
           "label": "改写方法数 > 0",
           "ok": true,
           "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}",
@@ -131,6 +209,18 @@
           "label": "改写类型统计已记录",
           "ok": true,
           "detail": "{'threaded': 638, 'total': 1430, 'gotos': 48, 'switch': 684, 'dead': 60}",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 同样没有常量折叠与不透明谓词",
+          "ok": true,
+          "detail": "{'threaded': 411, 'total': 741, 'gotos': 39, 'dead': 18, 'switch': 273}",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 也没有混淆器平坦化",
+          "ok": true,
+          "detail": "{'threaded': 411, 'total': 741, 'gotos': 39, 'dead': 18, 'switch': 273}",
           "class": "a"
         },
         {
@@ -203,6 +293,24 @@
       "not_covered": "不做语义等价证明；jsr/ret 与不可解码类按边界拒绝",
       "primary_corpus": "hmcl",
       "negative_corpus": "truncated",
+      "extra_corpora": {
+        "neo": {
+          "metrics": {
+            "classes": 1534,
+            "unreadable": 0,
+            "cls_ok": 1534,
+            "cls_total": 1534,
+            "code_ok": 13553,
+            "code_total": 13553
+          },
+          "exit_codes": [
+            0
+          ],
+          "commands": [
+            "jdec ircheck <NEO> --limit 2"
+          ]
+        }
+      },
       "metrics": {
         "classes": 3740,
         "unreadable": 0,
@@ -231,6 +339,24 @@
           "AmdPowerXpressRequestHighPerformance",
           "NvOptimusEnablement"
         ],
+        "native_libs": {
+          "libs": {
+            "libjnidispatch.jnilib": {
+              "exports": 0,
+              "jni": 0,
+              "bytes": 109824
+            },
+            "jnidispatch.dll": {
+              "exports": 71,
+              "jni": 0,
+              "bytes": 226304
+            }
+          },
+          "lib_count": 2,
+          "total_exports": 71,
+          "total_jni": 0,
+          "max_exports": 71
+        },
         "mc": {
           "has_mcmod": false,
           "mentions_forge": false,
@@ -262,6 +388,24 @@
           "ok": true,
           "detail": "[0]",
           "class": "b"
+        },
+        {
+          "label": "声明的第二语料全部执行 ('neo',)",
+          "ok": true,
+          "detail": "declared=('neo',) ran=['neo']",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]",
+          "class": "b"
+        },
+        {
+          "label": "第二语料 neo 产出了指标",
+          "ok": true,
+          "detail": "{'classes': 1534, 'unreadable': 0, 'cls_ok': 1534, 'cls_total': 1534, 'code_ok': 13553, 'code_total': 13553}",
+          "class": "a"
         },
         {
           "label": "class 计数等于 zipfile 原始类数",
@@ -303,6 +447,24 @@
       "not_covered": "不执行 bootstrap；SwitchBootstraps 等引导没有可读常量，计入未还原而不是猜测；自定义引导（非 JDK vanilla）的站点只是被枚举，没有还原语义；两个独立语料都没有非 vanilla BSM，因此该路径只有单元级证据",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
+      "extra_corpora": {
+        "neo": {
+          "metrics": {
+            "sites": 150,
+            "lambda": 150,
+            "concat": 0,
+            "record": 0,
+            "payload": 150,
+            "unresolved": 0
+          },
+          "exit_codes": [
+            0
+          ],
+          "commands": [
+            "jdec indy <NEO> --resolve"
+          ]
+        }
+      },
       "metrics": {
         "sites": 6245,
         "lambda": 3899,
@@ -331,6 +493,24 @@
           "AmdPowerXpressRequestHighPerformance",
           "NvOptimusEnablement"
         ],
+        "native_libs": {
+          "libs": {
+            "libjnidispatch.jnilib": {
+              "exports": 0,
+              "jni": 0,
+              "bytes": 109824
+            },
+            "jnidispatch.dll": {
+              "exports": 71,
+              "jni": 0,
+              "bytes": 226304
+            }
+          },
+          "lib_count": 2,
+          "total_exports": 71,
+          "total_jni": 0,
+          "max_exports": 71
+        },
         "mc": {
           "has_mcmod": false,
           "mentions_forge": false,
@@ -362,6 +542,24 @@
           "ok": true,
           "detail": "[0]",
           "class": "b"
+        },
+        {
+          "label": "声明的第二语料全部执行 ('neo',)",
+          "ok": true,
+          "detail": "declared=('neo',) ran=['neo']",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]",
+          "class": "b"
+        },
+        {
+          "label": "第二语料 neo 产出了指标",
+          "ok": true,
+          "detail": "{'sites': 150, 'lambda': 150, 'concat': 0, 'record': 0, 'payload': 150, 'unresolved': 0}",
+          "class": "a"
         },
         {
           "label": "站点数 ≥ 独立 BootstrapMethods 属性条目数",
@@ -421,6 +619,19 @@
       "not_covered": "归因词表不等于支持该混淆器的全部机制；不承诺还原；对不含混淆器标记的真实 jar 必须如实报告未识别",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
+      "extra_corpora": {
+        "neo": {
+          "metrics": {
+            "score": 4
+          },
+          "exit_codes": [
+            0
+          ],
+          "commands": [
+            "jdec probe <NEO>"
+          ]
+        }
+      },
       "metrics": {
         "score": 0,
         "signature": "obfuscator signature: ProGuard / R8"
@@ -445,6 +656,24 @@
           "AmdPowerXpressRequestHighPerformance",
           "NvOptimusEnablement"
         ],
+        "native_libs": {
+          "libs": {
+            "libjnidispatch.jnilib": {
+              "exports": 0,
+              "jni": 0,
+              "bytes": 109824
+            },
+            "jnidispatch.dll": {
+              "exports": 71,
+              "jni": 0,
+              "bytes": 226304
+            }
+          },
+          "lib_count": 2,
+          "total_exports": 71,
+          "total_jni": 0,
+          "max_exports": 71
+        },
         "mc": {
           "has_mcmod": false,
           "mentions_forge": false,
@@ -473,6 +702,24 @@
           "class": "b"
         },
         {
+          "label": "声明的第二语料全部执行 ('neo',)",
+          "ok": true,
+          "detail": "declared=('neo',) ran=['neo']",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]",
+          "class": "b"
+        },
+        {
+          "label": "第二语料 neo 产出了指标",
+          "ok": true,
+          "detail": "{'score': 4}",
+          "class": "a"
+        },
+        {
           "label": "混淆度分数已结构化记录",
           "ok": true,
           "detail": "{'score': 0, 'signature': 'obfuscator signature: ProGuard / R8'}",
@@ -497,6 +744,18 @@
           "class": "a"
         },
         {
+          "label": "金标准确认第二语料 neo 也无 ZKM DES 标记",
+          "ok": true,
+          "detail": "{'DESKeySpec': 0, 'DES/CBC': 0, 'zelix': 0, '$CodePool': 0}",
+          "class": "d"
+        },
+        {
+          "label": "第二语料 neo 不得被归因 ZKM 27",
+          "ok": true,
+          "detail": "",
+          "class": "a"
+        },
+        {
           "label": "ZKM 27 指纹要求 ≥2 个专属标记",
           "ok": true,
           "detail": "['des/cbc/pkcs5padding', 'deskeyspec', 'zelix']",
@@ -518,6 +777,20 @@
       "not_covered": "标签是启发式；抽取不等于解密 ZKM 池；两语料经金标准确认无 DES 密文，故 encrypted-blob 为 0 属正确结果而非能力证明",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
+      "extra_corpora": {
+        "neo": {
+          "metrics": {
+            "strings": 9315,
+            "tagged": 101
+          },
+          "exit_codes": [
+            0
+          ],
+          "commands": [
+            "jdec strings <NEO> -o <WORKDIR>/neo_strings"
+          ]
+        }
+      },
       "metrics": {
         "strings": 15839,
         "tagged": 406
@@ -542,6 +815,24 @@
           "AmdPowerXpressRequestHighPerformance",
           "NvOptimusEnablement"
         ],
+        "native_libs": {
+          "libs": {
+            "libjnidispatch.jnilib": {
+              "exports": 0,
+              "jni": 0,
+              "bytes": 109824
+            },
+            "jnidispatch.dll": {
+              "exports": 71,
+              "jni": 0,
+              "bytes": 226304
+            }
+          },
+          "lib_count": 2,
+          "total_exports": 71,
+          "total_jni": 0,
+          "max_exports": 71
+        },
         "mc": {
           "has_mcmod": false,
           "mentions_forge": false,
@@ -568,6 +859,24 @@
           "ok": true,
           "detail": "[0]",
           "class": "b"
+        },
+        {
+          "label": "声明的第二语料全部执行 ('neo',)",
+          "ok": true,
+          "detail": "declared=('neo',) ran=['neo']",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]",
+          "class": "b"
+        },
+        {
+          "label": "第二语料 neo 产出了指标",
+          "ok": true,
+          "detail": "{'strings': 9315, 'tagged': 101}",
+          "class": "a"
         },
         {
           "label": "抽取到字符串常量",
@@ -611,10 +920,28 @@
     {
       "id": "M6",
       "name": "native 分诊与 PE/JNI 库提取",
-      "support": "从 MZ 自解压容器读出 PE、解析导出表，并独立统计 Java 侧 ACC_NATIVE 方法；两项分别计数，不声称 JNI 一一匹配",
-      "not_covered": "不反编译 native 函数体；不还原 RegisterNatives 动态绑定；无 native 的纯 Java jar 必须报告 0",
+      "support": "从 MZ 自解压容器读出 PE、解析导出表；`--libs-jar` 读 Maven natives 独立工件；统计 Java 侧 ACC_NATIVE 方法，并把 `Java_*` 导出按名与声明方法 1:1 匹配（LWJGL 2.9.4：2674 个声明、2383 个 JNI 导出全部按名命中）",
+      "not_covered": "不反编译 native 函数体；不还原 RegisterNatives 动态绑定；只做名字匹配，不做签名校验；无 native 的纯 Java jar 必须报告 0",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
+      "extra_corpora": {
+        "lwjgl": {
+          "metrics": {
+            "libs": 4,
+            "exports": 2386,
+            "native_methods": 2674,
+            "jni_matched": 2383
+          },
+          "exit_codes": [
+            0,
+            0
+          ],
+          "commands": [
+            "jdec natives <LWJGL> -o <WORKDIR>/lwjgl_natives --libs-jar D:\\MC\\HMCL\\.minecraft\\libraries\\org\\lwjgl\\lwjgl\\lwjgl-platform\\2.9.4-nightly-20150209\\lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+            "jdec analyze <LWJGL> -o <WORKDIR>/lwjgl_analyze"
+          ]
+        }
+      },
       "metrics": {
         "libs": 1,
         "exports": 2,
@@ -643,6 +970,24 @@
           "AmdPowerXpressRequestHighPerformance",
           "NvOptimusEnablement"
         ],
+        "native_libs": {
+          "libs": {
+            "libjnidispatch.jnilib": {
+              "exports": 0,
+              "jni": 0,
+              "bytes": 109824
+            },
+            "jnidispatch.dll": {
+              "exports": 71,
+              "jni": 0,
+              "bytes": 226304
+            }
+          },
+          "lib_count": 2,
+          "total_exports": 71,
+          "total_jni": 0,
+          "max_exports": 71
+        },
         "mc": {
           "has_mcmod": false,
           "mentions_forge": false,
@@ -673,6 +1018,24 @@
           "class": "b"
         },
         {
+          "label": "声明的第二语料全部执行 ('lwjgl',)",
+          "ok": true,
+          "detail": "declared=('lwjgl',) ran=['lwjgl']",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 lwjgl 退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0, 0]",
+          "class": "b"
+        },
+        {
+          "label": "第二语料 lwjgl 产出了指标",
+          "ok": true,
+          "detail": "{'libs': 4, 'exports': 2386, 'native_methods': 2674, 'jni_matched': 2383}",
+          "class": "a"
+        },
+        {
           "label": "PE 导出数等于独立 PE/COFF 解析结果",
           "ok": true,
           "detail": "2 vs 2 ['AmdPowerXpressRequestHighPerformance', 'NvOptimusEnablement']",
@@ -701,6 +1064,30 @@
           "ok": true,
           "detail": "neg_native=0 neg_metrics={'libs': 0, 'jni_matched': 0}",
           "class": "c"
+        },
+        {
+          "label": "独立工件里的库数等于独立解析结果",
+          "ok": true,
+          "detail": "4 vs 4 ['OpenAL32.dll', 'OpenAL64.dll', 'lwjgl.dll', 'lwjgl64.dll']",
+          "class": "a"
+        },
+        {
+          "label": "单库导出数等于独立 PE 解析的每库最大值",
+          "ok": true,
+          "detail": "2386 vs 2386",
+          "class": "a"
+        },
+        {
+          "label": "Java 侧 native 声明数等于独立 ACC_NATIVE 计数",
+          "ok": true,
+          "detail": "2674 vs 2674",
+          "class": "a"
+        },
+        {
+          "label": "JNI 导出与声明方法按名匹配成功（正向证据）",
+          "ok": true,
+          "detail": "matched=2383 of 2383 Java_* exports",
+          "class": "a"
         }
       ],
       "verdict": "PASS"
@@ -712,6 +1099,7 @@
       "not_covered": "映射表外置，离线不解析 hook 最终符号；非 MC 语料必须报告未识别，不得误报版本",
       "primary_corpus": "neo",
       "negative_corpus": "hmcl",
+      "extra_corpora": {},
       "metrics": {
         "minecraft": "yes 1.8.9 / Forge"
       },
@@ -734,6 +1122,13 @@
         "bsm_entries": 149,
         "pe_export_count": 0,
         "pe_exports": [],
+        "native_libs": {
+          "libs": {},
+          "lib_count": 0,
+          "total_exports": 0,
+          "total_jni": 0,
+          "max_exports": 0
+        },
         "mc": {
           "has_mcmod": true,
           "mentions_forge": false,
@@ -763,6 +1158,12 @@
           "class": "b"
         },
         {
+          "label": "声明的第二语料全部执行 ()",
+          "ok": true,
+          "detail": "declared=() ran=[]",
+          "class": "a"
+        },
+        {
           "label": "金标准 mcmod.info 含 1.8.9，机制报告一致",
           "ok": true,
           "detail": "yes 1.8.9 / Forge",
@@ -790,6 +1191,19 @@
       "not_covered": "不处理加密容器；multi-release 条目按同一基类备选排除",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
+      "extra_corpora": {
+        "neo": {
+          "metrics": {
+            "entries": 1767
+          },
+          "exit_codes": [
+            0
+          ],
+          "commands": [
+            "jdec probe <NEO>"
+          ]
+        }
+      },
       "metrics": {
         "entries": 4248
       },
@@ -813,6 +1227,24 @@
           "AmdPowerXpressRequestHighPerformance",
           "NvOptimusEnablement"
         ],
+        "native_libs": {
+          "libs": {
+            "libjnidispatch.jnilib": {
+              "exports": 0,
+              "jni": 0,
+              "bytes": 109824
+            },
+            "jnidispatch.dll": {
+              "exports": 71,
+              "jni": 0,
+              "bytes": 226304
+            }
+          },
+          "lib_count": 2,
+          "total_exports": 71,
+          "total_jni": 0,
+          "max_exports": 71
+        },
         "mc": {
           "has_mcmod": false,
           "mentions_forge": false,
@@ -839,6 +1271,24 @@
           "ok": true,
           "detail": "[0]",
           "class": "b"
+        },
+        {
+          "label": "声明的第二语料全部执行 ('neo',)",
+          "ok": true,
+          "detail": "declared=('neo',) ran=['neo']",
+          "class": "a"
+        },
+        {
+          "label": "第二语料 neo 退出码在允许集合 (0,)",
+          "ok": true,
+          "detail": "[0]",
+          "class": "b"
+        },
+        {
+          "label": "第二语料 neo 产出了指标",
+          "ok": true,
+          "detail": "{'entries': 1767}",
+          "class": "a"
         },
         {
           "label": "条目数等于 zipfile 原始目录条目数",
@@ -876,9 +1326,9 @@
     "ROADMAP:231-236 keeps ZKM/JNIC/BytecodeVM deep recovery out of the 1.0 support promise"
   ],
   "check_breakdown": {
-    "a": 36,
-    "b": 9,
+    "a": 58,
+    "b": 16,
     "c": 10,
-    "d": 2
+    "d": 3
   }
 }

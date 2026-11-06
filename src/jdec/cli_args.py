@@ -231,6 +231,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="output dir for extracted libs + report")
     snv.add_argument("--no-decl", action="store_true",
                      help="skip scanning java-side native declarations")
+    snv.add_argument("--libs-jar", action="append", default=None, metavar="JAR",
+                     help="also read native libraries from a separate artifact - the "
+                          "Maven `natives` classifier jar that LWJGL/JNA/Netty ship "
+                          "instead of bundling them in the main jar; repeatable")
+    snv.add_argument("--libs-dir", default=None, metavar="DIR",
+                     help="also read native libraries from a directory")
     snv.add_argument("--decompile", action="store_true",
                      help="decompile extracted native libraries to C pseudo-code using Ghidra Headless")
     snv.add_argument("--ghidra", default=None,

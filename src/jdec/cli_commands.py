@@ -790,12 +790,18 @@ def cmd_natives(args: argparse.Namespace) -> int:
         print(f"no such file: {raw}")
         return 2
     out_dir = Path(args.output) if args.output else raw.parent / (raw.stem + "_natives")
+    extra: list[Path] = [Path(p) for p in (getattr(args, "libs_jar", None) or [])]
+    if getattr(args, "libs_dir", None):
+        extra.append(Path(args.libs_dir))
     is_zip = raw.read_bytes()[:2] == b"PK"
     if is_zip:
-        tri = NS.triage(raw, out_dir, collect_decl=not args.no_decl)
+        tri = NS.triage(raw, out_dir, collect_decl=not args.no_decl,
+                        extra_libs=extra or None)
     else:
         # raw PE/ELF file (e.g. a DLL dumped by engines/frida payload dump)
         tri = NS.triage_raw(raw, out_dir)
+        if extra:
+            NS.add_libs(tri, extra, out_dir)
 
     decompiled_info = None
     if getattr(args, "decompile", False):
@@ -823,6 +829,10 @@ def cmd_natives(args: argparse.Namespace) -> int:
     report = out_dir / "native-triage.md"
     NS.write_report(tri, raw.name, report, decompiled_info=decompiled_info)
     print(f"libs      : {len(tri.libs)} extracted -> {out_dir}")
+    external = [lib for lib in tri.libs if lib.source]
+    if external:
+        print(f"external  : {len(external)} lib(s) from "
+              f"{len({lib.source for lib in external})} separate artifact(s)")
     for lib in tri.libs:
         extra = f"  ({lib.error})" if lib.error else ""
         print(f"  {lib.rel or lib.name}  {lib.size / 1048576:.1f} MB  {lib.format}"

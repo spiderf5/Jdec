@@ -41,6 +41,9 @@ class NativeLib:
     # differs from `name` when the jar ships the same basename for several
     # architectures, or when the entry lives in a subdirectory
     rel: str = ""
+    # artifact the library came from: "" for the input jar, otherwise the
+    # separate `natives` classifier jar / directory it was supplied as
+    source: str = ""
 
 
 @dataclass
@@ -77,9 +80,18 @@ class Triage:
 # ---------------------------------------------------------------- PE parsing
 
 def _rva_to_offset(sections: list[tuple[int, int, int]], rva: int) -> int | None:
-    """sections: (virtual_address, virtual_size, raw_ptr)."""
+    """Map an RVA to a file offset. sections: (virtual_address, size, raw_ptr).
+
+    The span must be the section's own VirtualSize. It used to be
+    ``max(vsz, 1 << 20)``, which made every 1 MiB window overlap the following
+    sections: an RVA in the third section was resolved against the first one,
+    so the export name table of a normal multi-section DLL was read from the
+    wrong place and produced thousands of bogus names (lwjgl64.dll: 6218
+    "exports" instead of 2386). A section with VirtualSize 0 - which some
+    packers emit - still gets the 1 MiB fallback.
+    """
     for va, vsz, raw in sections:
-        if va <= rva < va + max(vsz, 1 << 20):
+        if va <= rva < va + (vsz or (1 << 20)):
             if raw == 0:
                 return None
             return rva - va + raw
@@ -695,27 +707,70 @@ def triage_raw(path: Path, out_dir: Path) -> Triage:
     return tri
 
 
-def triage(jar: Path, out_dir: Path, collect_decl=True) -> Triage:
+def _lib_from_bytes(name: str, data: bytes, rel: str,
+                    source: str = "") -> NativeLib:
+    """Parse one extracted library into a NativeLib."""
+    lib = NativeLib(name=Path(name).name, size=len(data),
+                    format=detect_format(data), rel=rel)
+    lib.source = source
+    if lib.format == "PE":
+        lib.exports = parse_pe_exports(data)
+        lib.jni_exports = [s for s in lib.exports
+                           if s.startswith("Java_") or s.startswith("JNI_On")]
+    elif lib.format == "ELF":
+        lib.exports = parse_elf_exports(data)
+        lib.jni_exports = [s for s in lib.exports
+                           if s.startswith("Java_") or s.startswith("JNI_On")]
+    else:
+        lib.error = "PE / ELF 以外的格式仅提取不解析（Mach-O 待补）"
+    lib.strings = scan_strings(data)
+    lib.dynamic_methods = (scan_binary_register_natives(data, lib.format)
+                           + scan_binary_jni_descriptors(data))
+    return lib
+
+
+def _external_libs(paths: list[Path], out_dir: Path) -> list[NativeLib]:
+    """Libraries shipped as separate artifacts (the Maven `natives` classifier).
+
+    LWJGL, JNA and Netty all publish their natives as a second jar rather than
+    inside the main one, so triaging only the input jar reports zero libraries
+    for the most common real-world layout.
+    """
+    out: list[NativeLib] = []
+    for path in paths:
+        if path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if child.is_file() and child.name.lower().endswith(NATIVE_EXTS):
+                    out.append(_lib_from_bytes(child.name, child.read_bytes(),
+                                               child.name, source=path.name))
+            continue
+        if path.suffix.lower() in NATIVE_EXTS:
+            out.append(_lib_from_bytes(path.name, path.read_bytes(),
+                                       path.name, source=path.name))
+            continue
+        try:
+            extracted = extract_libs(path, out_dir)
+        except (OSError, zipfile.BadZipFile):
+            continue
+        for name, data, rel in extracted:
+            out.append(_lib_from_bytes(name, data, rel, source=path.name))
+    return out
+
+
+def add_libs(tri: Triage, paths: list[Path], out_dir: Path) -> None:
+    """Append libraries shipped as separate artifacts (mutable on `tri`)."""
+    tri.libs.extend(_external_libs([Path(p) for p in paths], out_dir))
+
+
+def triage(jar: Path, out_dir: Path, collect_decl=True,
+           extra_libs: list[Path] | None = None) -> Triage:
     from . import classfile as CF       # 延迟导入：仅 jar 路径才付出解析成本
 
-    libs = extract_libs(jar, out_dir)
     tri = Triage(libs=[])
-    for name, data, rel in libs:
-        lib = NativeLib(name=Path(name).name, size=len(data),
-                        format=detect_format(data), rel=rel)
-        if lib.format == "PE":
-            lib.exports = parse_pe_exports(data)
-            lib.jni_exports = [s for s in lib.exports
-                               if s.startswith("Java_") or s.startswith("JNI_On")]
-        elif lib.format == "ELF":
-            lib.exports = parse_elf_exports(data)
-            lib.jni_exports = [s for s in lib.exports
-                               if s.startswith("Java_") or s.startswith("JNI_On")]
-        else:
-            lib.error = "PE / ELF 以外的格式仅提取不解析（Mach-O 待补）"
-        lib.strings = scan_strings(data)
-        lib.dynamic_methods = scan_binary_register_natives(data, lib.format) + scan_binary_jni_descriptors(data)
-        tri.libs.append(lib)
+    for name, data, rel in extract_libs(jar, out_dir):
+        tri.libs.append(_lib_from_bytes(name, data, rel))
+    if extra_libs:
+        add_libs(tri, extra_libs, out_dir)
     if collect_decl:
         with zipfile.ZipFile(jar) as zf:
             for info in zf.infolist():
