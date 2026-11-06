@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "stage": "04",
-  "generated_at": "2026-11-05T15:38:47.500977+00:00",
+  "generated_at": "2026-11-06T14:07:16.947630+00:00",
   "python": "3.13.14",
   "threshold": "6-8 mechanism classes with explicit support items, each backed by an independent sample regression",
   "corpus_sources": {
@@ -34,8 +34,8 @@
     {
       "id": "M1",
       "name": "控制流去平坦化 / 常量折叠 / 不透明谓词",
-      "support": "对含 goto-flood / irreducible-goto 的真实 jar 产出指令级改写，重算 StackMapTable，改写后全部类通过 JVM -Xverify:all；产出改写清单",
-      "not_covered": "不证明语义等价（行为对拍属 02，当前 union 83.2%、1 个差异）；不处理自定义 VM 字节码；无 goto-flood 的 jar 报告 0 改写",
+      "support": "对真实 jar 产出指令级改写并通过 JVM -Xverify:all：goto 线程化、死代码消除、javac switch(String) 降级重构；产出改写清单供行为对拍",
+      "not_covered": "本语料上常量折叠与不透明谓词为 0（仅仓库内 fixture 证据）；87/87 次「去平坦化」命中 javac 字符串 switch，不是混淆器平坦化；不处理自定义 VM 字节码；行为对拍 342/411、1 个真实差异",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
       "metrics": {
@@ -45,7 +45,15 @@
         "unexplained": 0,
         "same": 215,
         "diff": 1,
-        "union": 342
+        "union": 342,
+        "threaded": 638,
+        "unflattened": 684,
+        "folded": 0,
+        "predicates": 0,
+        "dead": 60,
+        "gotos": 48,
+        "unflatten_string_switch": 87,
+        "unflatten_methods": 87
       },
       "exit_codes": [
         0,
@@ -103,52 +111,80 @@
         {
           "label": "机制退出码在允许集合 (0, 1)",
           "ok": true,
-          "detail": "[0, 0, 1]"
+          "detail": "[0, 0, 1]",
+          "class": "b"
         },
         {
           "label": "改写方法数 > 0",
           "ok": true,
-          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}",
+          "class": "a"
         },
         {
           "label": "JVM verify 通过类数 > 0",
           "ok": true,
-          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}",
+          "class": "a"
+        },
+        {
+          "label": "改写类型统计已记录",
+          "ok": true,
+          "detail": "{'threaded': 638, 'total': 1430, 'gotos': 48, 'unflattened': 684, 'dead': 60}",
+          "class": "a"
+        },
+        {
+          "label": "本语料常量折叠与不透明谓词为 0（不得据此宣称）",
+          "ok": true,
+          "detail": "{'threaded': 638, 'total': 1430, 'gotos': 48, 'unflattened': 684, 'dead': 60}",
+          "class": "a"
+        },
+        {
+          "label": "去平坦化命中 javac 字符串 switch，而非混淆器平坦化",
+          "ok": true,
+          "detail": "87/87",
+          "class": "a"
         },
         {
           "label": "改写清单里的方法独立存在于原 class 文件",
           "ok": true,
-          "detail": "verified=411 missing=0 []"
+          "detail": "verified=411 missing=0 []",
+          "class": "a"
         },
         {
           "label": "改写后的 class 字节确实变化",
           "ok": true,
-          "detail": "changed=281"
+          "detail": "changed=281",
+          "class": "a"
         },
         {
           "label": "阴性对照的改写全部可被 journal 解释",
           "ok": true,
-          "detail": "{'rewritten': 17, 'verified': 304, 'justified': 17, 'unexplained': 0, 'same': 12, 'diff': 0, 'union': 17}"
+          "detail": "{'rewritten': 17, 'verified': 304, 'justified': 17, 'unexplained': 0, 'same': 12, 'diff': 0, 'union': 17}",
+          "class": "c"
         },
         {
           "label": "阴性对照行为对拍 0 差异",
           "ok": true,
-          "detail": "same=12 diff=0"
+          "detail": "same=12 diff=0",
+          "class": "c"
         },
         {
           "label": "阴性对照改写规模显著小于混淆语料",
           "ok": true,
-          "detail": "17 vs 411"
+          "detail": "17 vs 411",
+          "class": "c"
         },
         {
           "label": "主样本改写全部可被 journal 解释",
           "ok": true,
-          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342, 'threaded': 638, 'unflattened': 684, 'folded': 0, 'predicates': 0, 'dead': 60, 'gotos': 48, 'unflatten_string_switch': 87, 'unflatten_methods': 87}",
+          "class": "a"
         },
         {
           "label": "主样本行为对拍产出 union 判定",
           "ok": true,
-          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342}"
+          "detail": "{'rewritten': 411, 'verified': 3693, 'justified': 411, 'unexplained': 0, 'same': 215, 'diff': 1, 'union': 342, 'threaded': 638, 'unflattened': 684, 'folded': 0, 'predicates': 0, 'dead': 60, 'gotos': 48, 'unflatten_string_switch': 87, 'unflatten_methods': 87}",
+          "class": "a"
         }
       ],
       "verdict": "PASS"
@@ -217,32 +253,38 @@
         {
           "label": "机制退出码在允许集合 (0,)",
           "ok": true,
-          "detail": "[0]"
+          "detail": "[0]",
+          "class": "b"
         },
         {
           "label": "class 计数等于 zipfile 原始类数",
           "ok": true,
-          "detail": "3740 vs 3740"
+          "detail": "3740 vs 3740",
+          "class": "a"
         },
         {
           "label": "类字节往返全等且分母等于原始类数",
           "ok": true,
-          "detail": "{'classes': 3740, 'unreadable': 0, 'cls_ok': 3740, 'cls_total': 3740, 'code_ok': 29395, 'code_total': 29395}"
+          "detail": "{'classes': 3740, 'unreadable': 0, 'cls_ok': 3740, 'cls_total': 3740, 'code_ok': 29395, 'code_total': 29395}",
+          "class": "a"
         },
         {
           "label": "Code 数组往返全等",
           "ok": true,
-          "detail": "{'classes': 3740, 'unreadable': 0, 'cls_ok': 3740, 'cls_total': 3740, 'code_ok': 29395, 'code_total': 29395}"
+          "detail": "{'classes': 3740, 'unreadable': 0, 'cls_ok': 3740, 'cls_total': 3740, 'code_ok': 29395, 'code_total': 29395}",
+          "class": "a"
         },
         {
           "label": "无不可读类",
           "ok": true,
-          "detail": "unreadable=0 readable=3740"
+          "detail": "unreadable=0 readable=3740",
+          "class": "a"
         },
         {
           "label": "截断类负控不得判为干净 PASS",
           "ok": true,
-          "detail": "rc=[3] metrics={'classes': 10, 'unreadable': 1, 'cls_ok': 10, 'cls_total': 10, 'code_ok': 45, 'code_total': 45}"
+          "detail": "rc=[3] metrics={'classes': 10, 'unreadable': 1, 'cls_ok': 10, 'cls_total': 10, 'code_ok': 45, 'code_total': 45}",
+          "class": "c"
         }
       ],
       "verdict": "PASS"
@@ -301,17 +343,20 @@
         {
           "label": "机制退出码在允许集合 (0,)",
           "ok": true,
-          "detail": "[0]"
+          "detail": "[0]",
+          "class": "b"
         },
         {
           "label": "站点数 ≥ 独立 BootstrapMethods 属性条目数",
           "ok": true,
-          "detail": "sites=6245 bsm=5420"
+          "detail": "sites=6245 bsm=5420",
+          "class": "a"
         },
         {
           "label": "阴性对照无 indy 站点",
           "ok": true,
-          "detail": "neg_sites=0 neg_bsm=0"
+          "detail": "neg_sites=0 neg_bsm=0",
+          "class": "c"
         }
       ],
       "verdict": "PASS"
@@ -323,7 +368,10 @@
       "not_covered": "归因词表不等于支持该混淆器的全部机制；不承诺还原；对不含混淆器标记的真实 jar 必须如实报告未识别",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
-      "metrics": {},
+      "metrics": {
+        "score": 0,
+        "signature": "obfuscator signature: ProGuard / R8"
+      },
       "exit_codes": [
         0
       ],
@@ -358,7 +406,9 @@
         },
         "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
       },
-      "negative_metrics": {},
+      "negative_metrics": {
+        "score": 0
+      },
       "negative_exit_codes": [
         0
       ],
@@ -366,32 +416,44 @@
         {
           "label": "机制退出码在允许集合 (0,)",
           "ok": true,
-          "detail": "[0]"
+          "detail": "[0]",
+          "class": "b"
+        },
+        {
+          "label": "混淆度分数已结构化记录",
+          "ok": true,
+          "detail": "{'score': 0, 'signature': 'obfuscator signature: ProGuard / R8'}",
+          "class": "a"
         },
         {
           "label": "金标准确认该语料无 ZKM DES 专属标记",
           "ok": true,
-          "detail": "{'DESKeySpec': 0, 'DES/CBC': 0, 'zelix': 0, '$CodePool': 0}"
+          "detail": "{'DESKeySpec': 0, 'DES/CBC': 0, 'zelix': 0, '$CodePool': 0}",
+          "class": "d"
         },
         {
           "label": "无 DES 标记时不得归因 ZKM 27",
           "ok": true,
-          "detail": "file           : HMCL-3.15.2.exe\nentries        : 4248  (classes 3740, resources 508)\nbytecode       : Java 17 x2174, Java 8 x1478, Java 9 x34, Java 6"
+          "detail": "obfuscator signature: ProGuard / R8",
+          "class": "a"
         },
         {
           "label": "HMCL 归因 ProGuard / R8",
           "ok": true,
-          "detail": "file           : HMCL-3.15.2.exe\nentries        : 4248  (classes 3740, resources 508)\nbytecode       : Java 17 x2174, Java 8 x1478, Java 9 x34, Java 6"
+          "detail": "obfuscator signature: ProGuard / R8",
+          "class": "a"
         },
         {
           "label": "ZKM 27 指纹要求 ≥2 个专属标记",
           "ok": true,
-          "detail": "['des/cbc/pkcs5padding', 'deskeyspec', 'zelix']"
+          "detail": "['des/cbc/pkcs5padding', 'deskeyspec', 'zelix']",
+          "class": "b"
         },
         {
           "label": "阴性对照不误报混淆器",
           "ok": true,
-          "detail": "file           : junit-4.13.2.jar\nentries        : 389  (classes 350, resources 39)\nbytecode       : Java 5 x350\nobfuscation    : 0/100\ntop packages  "
+          "detail": "file           : junit-4.13.2.jar\nentries        : 389  (classes 350, resources 39)\nbytecode       : Java 5 x350\nobfuscation    : 0/100\ntop packages  ",
+          "class": "c"
         }
       ],
       "verdict": "PASS"
@@ -451,37 +513,44 @@
         {
           "label": "机制退出码在允许集合 (0,)",
           "ok": true,
-          "detail": "[0]"
+          "detail": "[0]",
+          "class": "b"
         },
         {
           "label": "抽取到字符串常量",
           "ok": true,
-          "detail": "{'strings': 15839, 'tagged': 406}"
+          "detail": "{'strings': 15839, 'tagged': 406}",
+          "class": "a"
         },
         {
           "label": "字符串数不超过独立常量池 UTF8 总数",
           "ok": true,
-          "detail": "15839 <= 313905"
+          "detail": "15839 <= 313905",
+          "class": "a"
         },
         {
-          "label": "内部类名不得标为 encrypted-blob（单元负控）",
+          "label": "独立复核：内部类名不是 blob",
           "ok": true,
-          "detail": "org/spongepowered/asm/lib/tree/AbstractInsnNode"
+          "detail": "org/spongepowered/asm/lib/tree/AbstractInsnNode",
+          "class": "a"
         },
         {
-          "label": "真高熵 blob 仍能被标出（单元正控）",
+          "label": "独立复核：高熵 blob 仍被识别",
           "ok": true,
-          "detail": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd"
+          "detail": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd",
+          "class": "a"
         },
         {
-          "label": "独立复核后无 encrypted-blob 假阳性",
+          "label": "每个 encrypted-blob 标签都通过独立复核",
           "ok": true,
-          "detail": "tagged_blobs=0"
+          "detail": "0 tagged, 0 false positives",
+          "class": "a"
         },
         {
           "label": "阴性对照无加密 blob",
           "ok": true,
-          "detail": "scanned    : 350 classes (0 unreadable)\nstrings    : 439 total, 439 written\ntsv        : <WORKDIR>\\neg_junit_strings\\str"
+          "detail": "scanned    : 350 classes (0 unreadable)\nstrings    : 439 total, 439 written\ntsv        : <WORKDIR>\\neg_junit_strings\\str",
+          "class": "c"
         }
       ],
       "verdict": "PASS"
@@ -489,14 +558,15 @@
     {
       "id": "M6",
       "name": "native 分诊与 PE/JNI 库提取",
-      "support": "从 MZ 自解压容器提取内嵌 PE，独立解析导出表，统计 Java 侧 ACC_NATIVE 方法并与导出名交叉验证",
+      "support": "从 MZ 自解压容器读出 PE、解析导出表，并独立统计 Java 侧 ACC_NATIVE 方法；两项分别计数，不声称 JNI 一一匹配",
       "not_covered": "不反编译 native 函数体；不还原 RegisterNatives 动态绑定；无 native 的纯 Java jar 必须报告 0",
       "primary_corpus": "hmcl",
       "negative_corpus": "junit",
       "metrics": {
         "libs": 1,
         "exports": 2,
-        "native_methods": 69
+        "native_methods": 69,
+        "jni_matched": 0
       },
       "exit_codes": [
         0,
@@ -535,7 +605,8 @@
         "sha256": "632c2d8873f5a11dd2ffd8418564174995c6a248de5206668c6be114e943e372"
       },
       "negative_metrics": {
-        "libs": 0
+        "libs": 0,
+        "jni_matched": 0
       },
       "negative_exit_codes": [
         0,
@@ -545,27 +616,38 @@
         {
           "label": "机制退出码在允许集合 (0,)",
           "ok": true,
-          "detail": "[0, 0]"
+          "detail": "[0, 0]",
+          "class": "b"
         },
         {
           "label": "PE 导出数等于独立 PE/COFF 解析结果",
           "ok": true,
-          "detail": "2 vs 2 ['AmdPowerXpressRequestHighPerformance', 'NvOptimusEnablement']"
+          "detail": "2 vs 2 ['AmdPowerXpressRequestHighPerformance', 'NvOptimusEnablement']",
+          "class": "a"
         },
         {
           "label": "Java 侧 native 方法数等于独立 ACC_NATIVE 计数",
           "ok": true,
-          "detail": "69 vs 69"
+          "detail": "69 vs 69",
+          "class": "a"
         },
         {
-          "label": "提取到内嵌 PE 库",
+          "label": "读出的 libs 计数为 1（即输入容器自身的 PE stub）",
           "ok": true,
-          "detail": "{'libs': 1, 'exports': 2, 'native_methods': 69}"
+          "detail": "{'libs': 1, 'exports': 2, 'native_methods': 69, 'jni_matched': 0}",
+          "class": "a"
+        },
+        {
+          "label": "JNI 匹配数如实记录（本语料 0，导出不是 JNI 符号）",
+          "ok": true,
+          "detail": "{'libs': 1, 'exports': 2, 'native_methods': 69, 'jni_matched': 0}",
+          "class": "a"
         },
         {
           "label": "纯 Java 阴性对照报告 0 native",
           "ok": true,
-          "detail": "neg_native=0 neg_metrics={'libs': 0}"
+          "detail": "neg_native=0 neg_metrics={'libs': 0, 'jni_matched': 0}",
+          "class": "c"
         }
       ],
       "verdict": "PASS"
@@ -577,7 +659,9 @@
       "not_covered": "映射表外置，离线不解析 hook 最终符号；非 MC 语料必须报告未识别，不得误报版本",
       "primary_corpus": "neo",
       "negative_corpus": "hmcl",
-      "metrics": {},
+      "metrics": {
+        "minecraft": "yes 1.8.9 / Forge"
+      },
       "exit_codes": [
         0,
         0
@@ -622,22 +706,26 @@
         {
           "label": "机制退出码在允许集合 (0,)",
           "ok": true,
-          "detail": "[0, 0]"
+          "detail": "[0, 0]",
+          "class": "b"
         },
         {
           "label": "金标准 mcmod.info 含 1.8.9，机制报告一致",
           "ok": true,
-          "detail": "file           : NeoRaven1.1.jar\nentries        : 1767  (classes 1534, resources 233)\nbytecode       : Java 8 x957, Java 6 x485, Java 5 x92\nobfuscation    : 4/100\nminecraft      : "
+          "detail": "yes 1.8.9 / Forge",
+          "class": "a"
         },
         {
           "label": "金标准确认存在 mcmod.info",
           "ok": true,
-          "detail": "['mcmod.info']"
+          "detail": "['mcmod.info']",
+          "class": "d"
         },
         {
           "label": "非 MC 的 HMCL 负控不得报 1.8.9",
           "ok": true,
-          "detail": "file           : HMCL-3.15.2.exe\nentries        : 4248  (classes 3740, resources 508)\nbytecode       : Java 17 x2174, Java 8 x1478, Java 9 x34, Java 6"
+          "detail": "file           : HMCL-3.15.2.exe\nentries        : 4248  (classes 3740, resources 508)\nbytecode       : Java 17 x2174, Java 8 x1478, Java 9 x34, Java 6",
+          "class": "c"
         }
       ],
       "verdict": "PASS"
@@ -696,22 +784,26 @@
         {
           "label": "机制退出码在允许集合 (0,)",
           "ok": true,
-          "detail": "[0]"
+          "detail": "[0]",
+          "class": "b"
         },
         {
           "label": "条目数等于 zipfile 原始目录条目数",
           "ok": true,
-          "detail": "4248 vs 4248"
+          "detail": "4248 vs 4248",
+          "class": "a"
         },
         {
-          "label": "容器 magic 与独立读取一致",
+          "label": "容器 magic 由独立读取记录（未与工具输出比较）",
           "ok": true,
-          "detail": "4d5a"
+          "detail": "4d5a",
+          "class": "a"
         },
         {
           "label": "阴性对照为普通 PK jar",
           "ok": true,
-          "detail": "504b 389"
+          "detail": "504b 389",
+          "class": "c"
         }
       ],
       "verdict": "PASS"
@@ -721,5 +813,19 @@
   "passed": 8,
   "total": 8,
   "verdict": "PASS",
-  "acceptance_evidence_complete": true
+  "mechanism_regressions_pass": true,
+  "stage_04_threshold_met": false,
+  "threshold_reasons": [
+    "M1: folded=0 and predicates=0 on both real corpora; 87/87 unflatten hits are javac switch(String) lowering",
+    "M1: behave union 342/411 with 1 real difference; 02 stays in progress",
+    "M3/M4/M5: no positive target on either corpus (0 non-vanilla BSM, 0 DES ciphertext, 0 encrypted blobs)",
+    "ROADMAP:226 names ZKM/JNIC/BytecodeVM/OPS; none has a positive support item here",
+    "the acceptance work changed no src/jdec mechanism implementation"
+  ],
+  "check_breakdown": {
+    "a": 29,
+    "b": 9,
+    "c": 10,
+    "d": 2
+  }
 }

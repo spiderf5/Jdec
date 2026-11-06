@@ -78,10 +78,11 @@ SPECS: list[dict] = [
                      "same": r"(?m)^same\s+: (\d+)",
                      "diff": r"(?m)^diff\s+: (\d+)",
                      "union": r"(?m)^union\s+: (\d+)/"},
-        "support": "对含 goto-flood / irreducible-goto 的真实 jar 产出指令级改写，重算 "
-                   "StackMapTable，改写后全部类通过 JVM -Xverify:all；产出改写清单",
-        "not_covered": "不证明语义等价（行为对拍属 02，当前 union 83.2%、1 个差异）；"
-                       "不处理自定义 VM 字节码；无 goto-flood 的 jar 报告 0 改写",
+        "support": "对真实 jar 产出指令级改写并通过 JVM -Xverify:all：goto 线程化、"
+                   "死代码消除、javac switch(String) 降级重构；产出改写清单供行为对拍",
+        "not_covered": "本语料上常量折叠与不透明谓词为 0（仅仓库内 fixture 证据）；"
+                       "87/87 次「去平坦化」命中 javac 字符串 switch，不是混淆器平坦化；"
+                       "不处理自定义 VM 字节码；行为对拍 342/411、1 个真实差异",
     },
     {
         "id": "M2", "name": "字节级往返与坏类隔离",
@@ -109,7 +110,8 @@ SPECS: list[dict] = [
         "id": "M4", "name": "混淆器结构指纹归因",
         "primary": "hmcl", "extra": ("neo",), "negative": "junit",
         "steps": (("probe", "{jar}"),),
-        "patterns": {},
+        "patterns": {"score": r"obfuscation\s+: (\d+)/100",
+                     "signature": r"signatures\s+: (.+)"},
         "support": "按结构阈值与专属关键词归因，命中必须带证据；"
                    "ZKM 27 需 ≥2 个专属标记，避免 AES-CBC 的 IvParameterSpec 误报",
         "not_covered": "归因词表不等于支持该混淆器的全部机制；不承诺还原；"
@@ -132,9 +134,10 @@ SPECS: list[dict] = [
         "steps": (("natives", "{jar}", "-o", "{out}/{key}_natives"),
                   ("analyze", "{jar}", "-o", "{out}/{key}_analyze")),
         "patterns": {"libs": _R["libs"], "exports": _R["exports"],
-                     "native_methods": _R["native_methods"]},
-        "support": "从 MZ 自解压容器提取内嵌 PE，独立解析导出表，"
-                   "统计 Java 侧 ACC_NATIVE 方法并与导出名交叉验证",
+                     "native_methods": _R["native_methods"],
+                     "jni_matched": r"(\d+) JNI exports matched"},
+        "support": "从 MZ 自解压容器读出 PE、解析导出表，并独立统计 Java 侧 "
+                   "ACC_NATIVE 方法；两项分别计数，不声称 JNI 一一匹配",
         "not_covered": "不反编译 native 函数体；不还原 RegisterNatives 动态绑定；"
                        "无 native 的纯 Java jar 必须报告 0",
     },
@@ -143,7 +146,7 @@ SPECS: list[dict] = [
         "primary": "neo", "extra": (), "negative": "hmcl",
         "steps": (("probe", "{jar}"),
                   ("analyze", "{jar}", "-o", "{out}/{key}_analyze")),
-        "patterns": {},
+        "patterns": {"minecraft": r"minecraft\s+: (.+)"},
         "support": "从 mcmod.info / 注解独立识别 MC 版本与加载器，"
                    "扫描 Mixin hook 并在无映射时保留目标名",
         "not_covered": "映射表外置，离线不解析 hook 最终符号；非 MC 语料"
@@ -202,6 +205,58 @@ def _run_steps(spec: dict, jar: Path, out: Path, key: str,
             "stdout_head": head}
 
 
+def _journal_kinds(jar: Path, rw_path: Path) -> dict:
+    """What the rewrite actually did, by pass, on this corpus."""
+    import zipfile
+    from jdec import bytecode as BC
+    from jdec import classfile as CF
+    from jdec.ir import assemble as ASM
+    from jdec.ir import transforms as TR
+
+    totals: dict[str, int] = {}
+    unflatten = 0
+    string_switch = 0
+    if not rw_path.is_file():
+        return {"kinds": totals, "unflatten_methods": 0,
+                "unflatten_string_switch": 0}
+    with zipfile.ZipFile(jar) as z:
+        cache: dict[str, object] = {}
+        for line in rw_path.read_text(encoding="utf-8").splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            cls, meth = parts[0], parts[1]
+            desc = parts[2] if len(parts) > 2 else ""
+            if cls not in cache:
+                try:
+                    cache[cls] = CF.parse(z.read(cls + ".class"))
+                except (KeyError, ValueError):
+                    cache[cls] = None
+            cf = cache[cls]
+            if cf is None:
+                continue
+            member = next((m for m in cf.methods
+                           if cf.utf8(m.name_index) == meth
+                           and cf.utf8(m.descriptor_index) == desc), None)
+            if member is None:
+                continue
+            ci = BC.method_code(cf, member, decode_insns=False)
+            if ci is None or not ci.code:
+                continue
+            prog = ASM.Program.parse(ci.code, ci.handlers)
+            counts = TR.optimize(prog, cf)
+            for kind, n in counts.items():
+                if n:
+                    totals[kind] = totals.get(kind, 0) + n
+            if counts.get("unflattened"):
+                unflatten += 1
+                raw = z.read(cls + ".class")
+                if b"java/lang/String" in raw and b"hashCode" in raw:
+                    string_switch += 1
+    return {"kinds": totals, "unflatten_methods": unflatten,
+            "unflatten_string_switch": string_switch}
+
+
 def _golden_for(path: Path) -> dict:
     z = G.zip_facts(path)
     j = G.jar_facts(path)
@@ -239,6 +294,21 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
             str(m["metrics"]))
         add("JVM verify 通过类数 > 0", m["metrics"].get("verified", 0) > 0,
             str(m["metrics"]))
+        kinds = _journal_kinds(_CORPORA[key], out / f"{key}_rw.txt")
+        for kind in ("threaded", "unflattened", "folded", "predicates",
+                     "dead", "gotos"):
+            m["metrics"][kind] = kinds["kinds"].get(kind, 0)
+        m["metrics"]["unflatten_string_switch"] = kinds["unflatten_string_switch"]
+        m["metrics"]["unflatten_methods"] = kinds["unflatten_methods"]
+        add("改写类型统计已记录", bool(kinds["kinds"]), str(kinds["kinds"]))
+        add("本语料常量折叠与不透明谓词为 0（不得据此宣称）",
+            kinds["kinds"].get("folded", 0) == 0
+            and kinds["kinds"].get("predicates", 0) == 0,
+            str(kinds["kinds"]))
+        add("去平坦化命中 javac 字符串 switch，而非混淆器平坦化",
+            kinds["unflatten_methods"] > 0
+            and kinds["unflatten_string_switch"] == kinds["unflatten_methods"],
+            f"{kinds['unflatten_string_switch']}/{kinds['unflatten_methods']}")
         # Independent: every method named in the rewritten list must really
         # exist in the ORIGINAL class file, and the rewritten jar must differ.
         rows_file = out / f"{key}_rw.txt"
@@ -318,8 +388,9 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
             f"neg_sites={neg['metrics'].get('sites')} neg_bsm={ng['bsm_entries']}")
 
     elif mid == "M4":
-        text = m["stdout_head"]
+        text = str(m["metrics"].get("signature", ""))
         no_des = all(v == 0 for v in g["des_markers"].values())
+        add("混淆度分数已结构化记录", "score" in m["metrics"], str(m["metrics"]))
         add("金标准确认该语料无 ZKM DES 专属标记", no_des, str(g["des_markers"]))
         if no_des:
             add("无 DES 标记时不得归因 ZKM 27",
@@ -346,30 +417,29 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
         add("字符串数不超过独立常量池 UTF8 总数",
             v.get("strings", 0) <= g["utf8_count"],
             f"{v.get('strings')} <= {g['utf8_count']}")
-        # Independent re-check of every blob label: read the tool's own JSON,
-        # then validate each tagged literal with a second implementation.
-        from jdec import strings as ST
+        # Independent re-check: goldens.is_blob_literal is a second
+        # implementation that never imports jdec.strings.
         fqcn = "org/spongepowered/asm/lib/tree/AbstractInsnNode"
-        add("内部类名不得标为 encrypted-blob（单元负控）",
-            "encrypted-blob" not in ST.classify(fqcn), fqcn)
+        add("独立复核：内部类名不是 blob", not G.is_blob_literal(fqcn), fqcn)
         import base64 as _b64
         real = _b64.b64encode(bytes(range(64))).decode()
-        add("真高熵 blob 仍能被标出（单元正控）",
-            "encrypted-blob" in ST.classify(real), real[:40])
+        add("独立复核：高熵 blob 仍被识别", G.is_blob_literal(real), real[:40])
         report_json = out / f"{key}_strings" / "strings.json"
-        tagged_blobs = 0
+        tagged: list[str] = []
         if report_json.is_file():
             try:
                 data = _json_load(report_json)
                 rows = data.get("rows", data if isinstance(data, list) else [])
                 for row in rows:
-                    tags = row[2] if isinstance(row, (list, tuple)) and len(row) > 2 else []
-                    if "encrypted-blob" in tags:
-                        tagged_blobs += 1
+                    if (isinstance(row, (list, tuple)) and len(row) > 2
+                            and "encrypted-blob" in row[2]):
+                        tagged.append(str(row[1]) if len(row) > 1 else "")
             except (ValueError, TypeError):
                 pass
-        add("独立复核后无 encrypted-blob 假阳性",
-            tagged_blobs == 0, f"tagged_blobs={tagged_blobs}")
+        false_pos = [t for t in tagged if not G.is_blob_literal(t)]
+        add("每个 encrypted-blob 标签都通过独立复核",
+            not false_pos,
+            f"{len(tagged)} tagged, {len(false_pos)} false positives")
         add("阴性对照无加密 blob", "encrypted-blob" not in neg["stdout_head"],
             neg["stdout_head"][:120])
 
@@ -381,17 +451,20 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
         add("Java 侧 native 方法数等于独立 ACC_NATIVE 计数",
             v.get("native_methods") == g["native_methods"] > 0,
             f"{v.get('native_methods')} vs {g['native_methods']}")
-        add("提取到内嵌 PE 库", v.get("libs", 0) >= 1, str(v))
+        add("读出的 libs 计数为 1（即输入容器自身的 PE stub）",
+            v.get("libs", 0) >= 1, str(v))
+        add("JNI 匹配数如实记录（本语料 0，导出不是 JNI 符号）",
+            v.get("jni_matched", -1) == 0, str(v))
         add("纯 Java 阴性对照报告 0 native",
             g["native_methods"] > 0 and ng["native_methods"] == 0
             and neg["metrics"].get("native_methods", 0) == 0,
             f"neg_native={ng['native_methods']} neg_metrics={neg['metrics']}")
 
     elif mid == "M7":
-        text = m["stdout_head"]
+        mc = str(m["metrics"].get("minecraft", ""))
         if g["mc"]["mentions_189"]:
             add("金标准 mcmod.info 含 1.8.9，机制报告一致",
-                "1.8.9" in text, text[:180])
+                "1.8.9" in mc, mc[:180])
         add("金标准确认存在 mcmod.info",
             g["mc"]["has_mcmod"] or len(g["mc"]["metadata_files"]) > 0,
             str(g["mc"]["metadata_files"]))
@@ -402,12 +475,24 @@ def _checks(spec: dict, m: dict, g: dict, neg: dict, ng: dict,
         v = m["metrics"]
         add("条目数等于 zipfile 原始目录条目数",
             v.get("entries") == g["entries"], f"{v.get('entries')} vs {g['entries']}")
-        add("容器 magic 与独立读取一致",
+        add("容器 magic 由独立读取记录（未与工具输出比较）",
             g["magic"] in ("4d5a", "504b"), g["magic"])
         add("阴性对照为普通 PK jar",
             ng["magic"] == "504b" and ng["entries"] > 0,
             f"{ng['magic']} {ng['entries']}")
 
+    for c in out_checks:
+        label = c["label"]
+        if "退出码" in label:
+            c["class"] = "b"
+        elif "阴性" in label or label.startswith("非 MC") or "负控" in label:
+            c["class"] = "c"
+        elif label.startswith("金标准确认"):
+            c["class"] = "d"
+        elif "指纹要求" in label:
+            c["class"] = "b"
+        else:
+            c["class"] = "a"
     return out_checks
 
 
@@ -526,9 +611,25 @@ def main(argv: list[str] | None = None) -> int:
         report["passed"] = passed
         report["total"] = len(SPECS)
         report["verdict"] = "PASS" if passed == len(SPECS) else "FAIL"
-        # Whether the ROADMAP status column advances is a documented
-        # decision, not something a test runner should claim.
-        report["acceptance_evidence_complete"] = report["verdict"] == "PASS"
+        # A runner must not certify the stage threshold. It reports whether
+        # the mechanism regressions pass, and why the threshold is still open.
+        report["mechanism_regressions_pass"] = report["verdict"] == "PASS"
+        report["stage_04_threshold_met"] = False
+        report["threshold_reasons"] = [
+            "M1: folded=0 and predicates=0 on both real corpora; 87/87 "
+            "unflatten hits are javac switch(String) lowering",
+            "M1: behave union 342/411 with 1 real difference; 02 stays in progress",
+            "M3/M4/M5: no positive target on either corpus (0 non-vanilla BSM, "
+            "0 DES ciphertext, 0 encrypted blobs)",
+            "ROADMAP:226 names ZKM/JNIC/BytecodeVM/OPS; none has a positive "
+            "support item here",
+            "the acceptance work changed no src/jdec mechanism implementation",
+        ]
+        breakdown = {"a": 0, "b": 0, "c": 0, "d": 0}
+        for entry in report["mechanisms"]:
+            for c in entry["checks"]:
+                breakdown[c.get("class", "a")] += 1
+        report["check_breakdown"] = breakdown
         if args.json:
             args.json.parent.mkdir(parents=True, exist_ok=True)
             args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False),
@@ -546,7 +647,6 @@ def main(argv: list[str] | None = None) -> int:
 def selfcheck() -> int:
     """In-repo only: prove the goldens and unit controls are honest."""
     import base64
-    from jdec import strings as ST
     ok = True
 
     def expect(label: str, cond: bool, detail: str = "") -> None:
@@ -560,12 +660,11 @@ def selfcheck() -> int:
            str(G.methods_of(flow, "demo/flow/GotoFlood")))
     expect("独立类数等于 zipfile 目录类数",
            G.jar_facts(flow)["class_count"] == G.zip_facts(flow)["class_count"])
-    expect("FQCN 不标为 encrypted-blob",
-           "encrypted-blob" not in ST.classify(
+    expect("独立复核：FQCN 不是 blob",
+           not G.is_blob_literal(
                "org/spongepowered/asm/lib/tree/AbstractInsnNode"))
-    expect("高熵 base64 仍标为 encrypted-blob",
-           "encrypted-blob" in ST.classify(
-               base64.b64encode(bytes(range(64))).decode()))
+    expect("独立复核：高熵 base64 仍是 blob",
+           G.is_blob_literal(base64.b64encode(bytes(range(64))).decode()))
     fp = json.loads((ROOT / "src/jdec/fingerprints.json").read_text("utf-8"))
     zkm = next(x for x in fp["obfuscators"]
                if x["name"] == "ZKM 27 enhanced 字符串加密（DES）")

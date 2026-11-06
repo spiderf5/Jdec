@@ -7072,9 +7072,26 @@ def test_stage04_acceptance_harness() -> None:
                   for m in data["mechanisms"]))
         check("the negative corpus is publicly reproducible",
               "junit:junit:4.13.2" in str(data["corpus_sources"]))
-        check("the acceptance report is not self-certifying",
-              data.get("acceptance_evidence_complete") is True
-              and "stage_04_threshold_met" not in data)
+        check("the acceptance report does not certify the stage threshold",
+              data.get("stage_04_threshold_met") is False
+              and data.get("mechanism_regressions_pass") is True
+              and len(data.get("threshold_reasons", [])) >= 3,
+              str(data.get("threshold_reasons"))[:200])
+        check("every check is classified and the counts add up",
+              data.get("check_breakdown", {}).get("a", 0) > 0
+              and sum(data["check_breakdown"].values())
+              == sum(len(m["checks"]) for m in data["mechanisms"]),
+              str(data.get("check_breakdown")))
+        m1 = next(m for m in data["mechanisms"] if m["id"] == "M1")
+        check("M1 records that folding and opaque predicates did not fire",
+              m1["metrics"].get("folded") == 0
+              and m1["metrics"].get("predicates") == 0,
+              str(m1["metrics"]))
+        check("M1 records the javac switch(String) share of unflatten",
+              m1["metrics"].get("unflatten_methods", 0) > 0
+              and m1["metrics"].get("unflatten_string_switch")
+              == m1["metrics"].get("unflatten_methods"),
+              str(m1["metrics"]))
 
 def test_replay_safety_gate() -> None:
     """REVIEW 2.1 negative: dynamic replay used to start a JVM with no opt-in."""

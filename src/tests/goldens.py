@@ -1,9 +1,11 @@
 """Independent ground truth for the stage-04 acceptance run.
 
 Nothing here imports a jdec analysis module.  Every fact is recomputed from
-the container bytes, the class-file structure, the JVM's own ``javap`` or the
-PE/COFF headers, so it can be compared against a mechanism's own output
-without the mechanism certifying itself.
+the container bytes, the class-file structure or the PE/COFF headers, so it
+can be compared against a mechanism's own output without the mechanism
+certifying itself.  It is a second implementation, not a third-party
+oracle: it guards against implementation bugs, not against a shared
+misreading of the format.
 
 This is deliberately a SECOND, small implementation: a bug shared with the
 production parser would not be an independent check.
@@ -13,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import struct
-import subprocess
 import zipfile
 from pathlib import Path
 
@@ -253,19 +254,40 @@ def mc_facts(path: Path) -> dict:
                                if n.lower().endswith(("mcmod.info", "mods.toml"))]}
 
 
-def javap_methods(path: Path, internal_name: str) -> list[str]:
-    """JDK's own view of one class, used for spot checks."""
-    import shutil
-    exe = shutil.which("javap")
-    if not exe:
-        return []
-    try:
-        proc = subprocess.run(
-            [exe, "-p", "-classpath", str(path), internal_name],
-            capture_output=True, text=True, errors="replace", timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    return [ln.strip() for ln in proc.stdout.splitlines() if " native " in ln]
+def is_blob_literal(text: str) -> bool:
+    """Second implementation of the encrypted-blob test (no jdec import).
+
+    Deliberately different in structure from strings._encrypted_blob: it
+    decodes first, then applies entropy/printability and internal-name tests.
+    """
+    import base64
+    import math
+    import re
+    if len(text) < 48:
+        return False
+    if re.fullmatch(r"[0-9A-Za-z_$][\w$]*(?:/[A-Za-z_$][\w$]*){2,}", text):
+        return False
+    raw = None
+    if len(text) % 4 == 0 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", text):
+        try:
+            raw = base64.b64decode(text, validate=True)
+        except ValueError:
+            raw = None
+    elif len(text) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", text):
+        try:
+            raw = bytes.fromhex(text)
+        except ValueError:
+            raw = None
+    if raw is None or len(raw) < 32:
+        return False
+    printable = sum(1 for b in raw if 32 <= b < 127) / len(raw)
+    if printable >= 0.9:
+        return False
+    counts = {}
+    for b in raw:
+        counts[b] = counts.get(b, 0) + 1
+    entropy = -sum((n / len(raw)) * math.log2(n / len(raw)) for n in counts.values())
+    return entropy >= 4.0
 
 
 def sha256_file(path: Path) -> str:
