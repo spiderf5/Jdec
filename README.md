@@ -6,6 +6,20 @@ CFR / Vineflower / Procyon 各自跑，按“成员名命中率”（对照 clas
 方法签名）逐类择优；控制流平坦化消除、Minecraft 符号重映射、indy 与字符串池解密
 重放、native 分诊、可编译 Gradle 工程导出，都在引擎之外完成。
 
+## 文档
+
+本页是短概览，同时也是 PyPI 的项目说明。**完整手册与路线图在仓库的 `docs/`
+目录**，以下链接均可直接打开（`HEAD` 跟随默认分支，改名也不会失效）：
+
+| 文档 | 内容 |
+| --- | --- |
+| **[完整手册](https://github.com/spiderf5/Jdec/blob/HEAD/docs/README.md)** | 全部能力、实测数据与设计取舍（约 50 KB 长文） |
+| **[路线图](https://github.com/spiderf5/Jdec/blob/HEAD/docs/ROADMAP.md)** | 01–04 阶段状态、未达成的边界与硬门槛 |
+| [04 支持矩阵](https://github.com/spiderf5/Jdec/blob/HEAD/docs/SUPPORT_MATRIX.md) | 8 类机制、87 项交叉检查与保留边界 |
+| [复现说明](https://github.com/spiderf5/Jdec/blob/HEAD/docs/REPRODUCE.md) | 头条数字的逐字口径、内置生成式基准与 83.0% 口径 |
+| [02 可达性](https://github.com/spiderf5/Jdec/blob/HEAD/docs/REACHABILITY_02.md) | 剩余 195 个 inconclusive 的 API 级归因 |
+| [离线交付](https://github.com/spiderf5/Jdec/blob/HEAD/docs/OFFLINE.md) | 离线引擎包与断网 CI 门禁 |
+
 ## 快速开始
 
 需要 JDK 9+。`java` / `javac` 按 `JAVA_HOME` → `PATH` → 常见安装目录查找，
@@ -30,17 +44,7 @@ python jdec.py verify client.jar        # JVM 门禁：每个类都要过 -Xveri
 `jdec engines` 按 sha1 校验后下载到引擎缓存，也可走离线引擎包。CI 的
 wheel-smoke 会解包检查这条边界。
 
-## 文档
-
-本页是短概览，也是 PyPI 的项目说明；完整能力、实测数据与设计取舍见
-**[完整手册](https://github.com/spiderf5/Jdec/blob/main/docs/README.md)**。
-
-- 未达成的边界：[路线图](https://github.com/spiderf5/Jdec/blob/main/docs/ROADMAP.md)
-- 04 支持矩阵（8 类机制、87 项交叉检查）：[支持矩阵](https://github.com/spiderf5/Jdec/blob/main/docs/SUPPORT_MATRIX.md)
-- 头条数字的复现命令、内置生成式基准与 83.0% 口径：[复现说明](https://github.com/spiderf5/Jdec/blob/main/docs/REPRODUCE.md)
-- 离线交付：[离线引擎包](https://github.com/spiderf5/Jdec/blob/main/docs/OFFLINE.md)
-
-当前状态：alpha，核心回归 **1297 条断言 / 150 个用例**全绿
+当前状态：alpha，核心回归 **1300 条断言 / 151 个用例**全绿
 （`python src/tests/run_tests.py`）。测试素材与回归套件仅存在于源码仓库。
 
 ---

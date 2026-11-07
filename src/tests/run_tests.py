@@ -66,6 +66,7 @@ def main() -> int:
     H._run(core.test_tool_hardening)
     H._run(core.test_polish)
     H._run(core.test_cli_exit_codes)
+    H._run(core.test_readme_doc_links)
     H._run(rewrite.test_ir_roundtrip)
     H._run(rewrite.test_toolchain_single_entry)
     H._run(rewrite.test_verify_gate)

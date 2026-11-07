@@ -5,6 +5,8 @@ engine cache, which `main` prepares before this module runs."""
 
 from __future__ import annotations
 
+import re
+
 from harness import (  # noqa: F401
     AN, BC, BROKEN_SAMPLE, CF, CG, CL, DV, ENGINES_DIR, JAVAC, MM, PIPE, PL,
     Path, RC, ROOT, SAMPLE, SCORE, ST, SimpleNamespace, _iso_buckets,
@@ -815,3 +817,26 @@ def test_cli_exit_codes() -> None:
             rc = CL.main(["decompile", str(SAMPLE), "-o", str(Path(td) / "out")])
         check("decompile returns 2 when no engine is usable", rc == 2, str(rc))
 
+
+
+def test_readme_doc_links() -> None:
+    """The overview must actually lead a reader to the long manual and roadmap.
+
+    The root README is what both GitHub and PyPI render, so its links are the
+    only path to `docs/`. They once used `blob/main` while the default branch
+    was `master`: all five links 404'd and the documents looked absent even
+    though they were committed. `HEAD` follows the default branch, so renaming
+    it cannot break them again. This check is offline and needs no network.
+    """
+    print("readme: docs links resolve")
+    repo = ROOT.parent
+    text = (repo / "README.md").read_text(encoding="utf-8")
+    links = re.findall(
+        r"https://github\.com/spiderf5/Jdec/blob/([^/]+)/([^\s)]+)", text)
+    check("the overview links into docs/", len(links) >= 5, str(len(links)))
+    bad_ref = sorted({ref for ref, _ in links if ref != "HEAD"})
+    check("docs links follow the default branch via HEAD",
+          not bad_ref, ", ".join(bad_ref))
+    missing = [rel for _, rel in links if not (repo / rel).is_file()]
+    check("every linked document is committed", not missing,
+          ", ".join(missing))
