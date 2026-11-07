@@ -682,6 +682,29 @@ Minecraft 1.20.4 客户端（7787 个类，Java 17，官方混淆）：
 | 冲突类    | 孪生类各自独立还原，磁盘上 723 个源文件互不覆盖（修复前 637 个）               |
 | 逐类独立验证 | 84 组冲突两两 sha256 全不同；抽查命中率 100%；无任何类 score < 40      |
 
+## 04 验收链（随包发布）
+
+`stage04.py`、`support_matrix.py`、`goldens.py`、`mechanisms.py` 是 **`jdec`
+包内的模块**，不是测试素材，`pip install` 会装上。第三方可在自己的语料上
+复跑 04 的验收：
+
+```bash
+python -m jdec.stage04 \
+    --hmcl <...> --neo <...> --negative <junit.jar> --truncated <...> \
+    --lwjgl <...> --lwjgl-natives <...> --json report.json
+```
+
+- `goldens.py` 是独立第二实现，**不 import 任何 jdec 分析模块**；有回归用
+  AST 钉住这条边界，防止它随包发布后退化成产品自检。
+- `--selfcheck` 是仓库内模式，需要 `src/tests/*.jar` 夹具；在安装包里运行会
+  明确提示改用完整模式，不会抛栈。
+- 验收链输出的是检查结论，**不是阶段判定**。04 状态只在
+  [ROADMAP.md](ROADMAP.md) 记录，运行器不自称门槛达成。
+- 完整验收仍需外置授权语料，头条数字第三方不可复现，见
+  [REPRODUCE.md](REPRODUCE.md)。
+
+回归套件与夹具源码仍在 `src/tests/`，只属于源码仓库，不进 wheel。
+
 ## 测试
 
 ```bash

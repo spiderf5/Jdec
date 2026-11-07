@@ -110,7 +110,11 @@ jobs:
           required = {"jdec/fingerprints.json", "jdec/web_assets/index.html",
                       "jdec/engines_src/ProcyonBridge.java",
                       "jdec/recover_driver_template.java"}
-          missing = sorted(required - set(names))
+          # The 04 acceptance chain is a shipped capability, not test corpus:
+          # a third party can run it on their own corpora after pip install.
+          shipped = {"jdec/stage04.py", "jdec/support_matrix.py",
+                     "jdec/goldens.py", "jdec/mechanisms.py"}
+          missing = sorted((required | shipped) - set(names))
           print(f"{len(names)} entries in {wheels[0]}")
           if bad:
               print("unexpected corpus material:", *bad, sep="\n  ")
@@ -124,6 +128,20 @@ jobs:
         run: |
           python -m venv /tmp/jdec-wheel-venv
           /tmp/jdec-wheel-venv/bin/pip install dist/jdec-*.whl
+      - name: Acceptance chain works from the wheel install
+        # Must run OUTSIDE the checkout. The repo root has a jdec.py shim that
+        # otherwise resolves `import jdec` to the source tree, so this step
+        # would silently prove nothing about the installed wheel. The path
+        # assertion makes that failure loud. The full acceptance run needs the
+        # caller's own corpora; --selfcheck is deliberately an in-repo mode.
+        run: |
+          cd /tmp
+          VENV=/tmp/jdec-wheel-venv/bin/python
+          $VENV -c "import jdec; assert 'site-packages' in jdec.__file__, jdec.__file__; from jdec import goldens, mechanisms, stage04, support_matrix; assert len(mechanisms.MECHANISMS) == 8"
+          $VENV -m jdec.stage04 --help > /dev/null
+          $VENV -m jdec.support_matrix --help > /dev/null
+          OUT=$($VENV -m jdec.stage04 --selfcheck 2>&1) || true
+          echo "$OUT" | grep -q "in-repo mode"
       - name: Version and engines from the wheel install
         run: |
           /tmp/jdec-wheel-venv/bin/jdec --version
@@ -243,14 +261,15 @@ jobs:
       # registry and its negative controls still work with in-repo fixtures.
       - name: Build fixtures
         run: python src/tests/build_fixtures.py
-      # The support matrix harness lives in src/tests/ and is deliberately
-      # NOT shipped in the wheel, so this job imports from the source tree.
+      # The 04 acceptance modules ship inside jdec now. This job runs the
+      # source-tree entry point; wheel-smoke separately proves the installed
+      # entry point. Both must keep working.
       - name: Support matrix negative controls
         run: |
           set -euo pipefail
-          python src/tests/support_matrix.py --selfcheck --json matrix-selfcheck.json
+          python src/jdec/support_matrix.py --selfcheck --json matrix-selfcheck.json
           python -c "import json; d=json.load(open('matrix-selfcheck.json')); assert d['verdict']=='PASS' and d['stage_04_threshold_met'] is False and len(d['negative_controls'])==2"
       # The 04 acceptance runner needs external corpora; CI proves only that
       # its independent goldens and unit-level controls still work.
       - name: Stage 04 acceptance selfcheck
-        run: python src/tests/stage04.py --selfcheck
+        run: python src/jdec/stage04.py --selfcheck

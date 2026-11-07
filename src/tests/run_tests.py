@@ -90,6 +90,7 @@ def main() -> int:
     H._run(acceptance.test_native_libs_and_rva)
     H._run(acceptance.test_nativedb_bundle)
     H._run(acceptance.test_support_matrix_selfcheck)
+    H._run(acceptance.test_acceptance_chain_is_shipped_and_independent)
     H._run(semantics.test_frame_generation)
     H._run(semantics.test_ir_transforms)
     H._run(semantics.test_pipeline_gate)

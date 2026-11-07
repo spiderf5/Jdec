@@ -39,12 +39,18 @@ python jdec.py verify client.jar        # JVM 门禁：每个类都要过 -Xveri
 
 ## 发布内容
 
-`pip install` 只装 `jdec` 包（含运行时模板、指纹表与 web 资源）。**wheel 里没有
-任何测试素材、样本 jar 或第三方引擎 jar**：前者只属于源码仓库，后者由
-`jdec engines` 按 sha1 校验后下载到引擎缓存，也可走离线引擎包。CI 的
-wheel-smoke 会解包检查这条边界。
+`pip install` 只装 `jdec` 包：运行时代码、模板、指纹表、web 资源，以及 04
+验收链（`python -m jdec.stage04` / `jdec.support_matrix`）。装了包的人可以在
+自己的语料上复跑验收，判据实现 `jdec.goldens` 随包提供但**不 import 任何
+分析模块**。**wheel 里没有任何测试素材、样本 jar 或第三方引擎 jar**：回归套件
+与夹具只属于源码仓库；引擎由 `jdec engines` 按 sha1 校验后下载到缓存，也可走
+离线引擎包。CI 的 wheel-smoke 解包检查两侧边界，并在干净 venv 里验证验收模块
+确实可导入。
 
-当前状态：alpha，核心回归 **1300 条断言 / 151 个用例**全绿
+验收链产出的是检查结论，**不是阶段判定**：04 的状态由 `docs/ROADMAP.md` 记录，
+运行器不自称门槛达成。完整验收需自备外置授权语料；`--selfcheck` 是仓库内模式。
+
+当前状态：alpha，核心回归 **1302 条断言 / 152 个用例**全绿
 （`python src/tests/run_tests.py`）。测试素材与回归套件仅存在于源码仓库。
 
 ---

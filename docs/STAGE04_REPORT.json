@@ -1312,7 +1312,7 @@
       "verdict": "PASS"
     }
   ],
-  "note": "Ground truth is recomputed by src/tests/goldens.py from zip/class/PE bytes, never read from a jdec analysis command. Negative controls are per mechanism.",
+  "note": "Ground truth is recomputed by the independent goldens implementation from zip/class/PE bytes, never read from a jdec analysis command. Negative controls are per mechanism.",
   "passed": 8,
   "total": 8,
   "verdict": "PASS",

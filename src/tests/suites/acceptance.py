@@ -13,7 +13,7 @@ def test_support_matrix_per_corpus_gate() -> None:
     print("support matrix: per-corpus rules and report hygiene")
     import io
     import contextlib
-    import support_matrix as SM
+    from jdec import support_matrix as SM
 
     spec = SM.MECHANISMS[0]
     original = SM._capture
@@ -135,8 +135,8 @@ def test_stage04_acceptance_harness() -> None:
     import io
     import inspect
     import contextlib
-    import goldens as G
-    import stage04 as S
+    from jdec import goldens as G
+    from jdec import stage04 as S
     from jdec import strings as ST
 
     buf = io.StringIO()
@@ -258,7 +258,7 @@ def test_indy_payload_resolution() -> None:
     import io
     import re
     import contextlib
-    import goldens as G
+    from jdec import goldens as G
     from jdec import bsm as BM
     from jdec import cli as CL
 
@@ -528,7 +528,7 @@ def test_support_matrix_selfcheck() -> None:
     print("support matrix: in-repo negative controls")
     import io
     import contextlib
-    import support_matrix as SM
+    from jdec import support_matrix as SM
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -542,3 +542,38 @@ def test_support_matrix_selfcheck() -> None:
           all(m.corpora and set(m.corpora) <= {"hmcl", "neo"}
               for m in SM.MECHANISMS))
 
+
+
+def test_acceptance_chain_is_shipped_and_independent() -> None:
+    """Moving the 04 chain into jdec must not make it certify itself.
+
+    goldens.py used to live outside the package, so "it never imports a jdec
+    analysis module" was a physical boundary. Now that it ships with jdec,
+    that boundary is only a convention: one `from jdec import bsm` would turn
+    the independent ground truth into a product self-check without any visible
+    failure. Both halves of the move are pinned here — the modules are in the
+    shipped package, and the ground truth still imports none of it.
+    """
+    print("goldens: shipped with jdec, still independent of it")
+    import ast
+    from jdec import goldens as G
+    from jdec import mechanisms as M
+    from jdec import stage04 as S
+    from jdec import support_matrix as SM
+
+    mods = (G, M, S, SM)
+    check("the acceptance chain ships inside the jdec package",
+          all(Path(m.__file__).parent.name == "jdec" for m in mods),
+          ", ".join(m.__name__ for m in mods))
+    tree = ast.parse(Path(G.__file__).read_text(encoding="utf-8"))
+    bad: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            bad |= {a.name for a in node.names
+                    if a.name.split(".")[0] == "jdec"}
+        elif isinstance(node, ast.ImportFrom) and (
+                node.level
+                or (node.module or "").split(".")[0] == "jdec"):
+            bad.add(node.module or f"relative level {node.level}")
+    check("goldens imports no jdec analysis module", not bad,
+          ", ".join(sorted(bad)))

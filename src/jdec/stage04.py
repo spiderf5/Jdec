@@ -17,12 +17,16 @@ Generated fixtures are never counted as independent samples. The three real
 corpora stay outside the tree; the report records coordinates and sha256.
 
 Usage:
-  python src/tests/stage04.py --hmcl <HMCL.exe> --neo <NeoRaven.jar> \
+  python src/jdec/stage04.py --hmcl <HMCL.exe> --neo <NeoRaven.jar> \
       --negative <junit-4.13.2.jar> --javafx-dir <dir> \
       --lwjgl <lwjgl.jar> --lwjgl-natives <lwjgl-platform-natives.jar> \
       --json docs/STAGE04_REPORT.json
-  python src/tests/stage04.py --fetch-negative junit.jar --fetch-lwjgl <dir>
-  python src/tests/stage04.py --selfcheck     # in-repo fixtures only, for CI
+  python src/jdec/stage04.py --fetch-negative junit.jar --fetch-lwjgl <dir>
+  python src/jdec/stage04.py --selfcheck   # in-repo fixtures only, for CI
+  python -m jdec.stage04 --hmcl ...        # from an installed wheel
+
+--selfcheck needs the in-repo fixture jars, so it is a checkout/CI mode.
+An installed wheel uses the full form with the caller's own corpora.
 """
 
 from __future__ import annotations
@@ -37,12 +41,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "src" / "tests"))
+# Two entry points. From a checkout: `python src/jdec/stage04.py ...` (script
+# form, needs src/ on sys.path). From an installed wheel: `python -m
+# jdec.stage04 ...`, where `jdec` already resolves. Only the former needs the
+# shim. ROOT is only meaningful in the checkout form: it locates the fixture
+# jars used by --selfcheck, which is deliberately an in-repo mode.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(ROOT / "src"))
 
-import goldens as G  # noqa: E402
-import support_matrix as SM  # noqa: E402
-from mechanisms import MECHANISMS as MECH  # noqa: E402
+from jdec import goldens as G  # noqa: E402
+from jdec import support_matrix as SM  # noqa: E402
+from jdec.mechanisms import MECHANISMS as MECH  # noqa: E402
 
 NEGATIVE_URL = ("https://repo1.maven.org/maven2/junit/junit/4.13.2/"
                 "junit-4.13.2.jar")
@@ -418,7 +427,7 @@ def _check_m4(add, m: dict, g: dict, neg: dict,
     # Unit-level negative control: the fingerprint config itself must not
     # accept the generic IvParameterSpec marker on its own.
     import json as _json
-    fp = _json.loads((ROOT / "src/jdec/fingerprints.json").read_text("utf-8"))
+    fp = _json.loads((Path(__file__).parent / "fingerprints.json").read_text("utf-8"))
     zkm = next(x for x in fp["obfuscators"]
                if x["name"] == "ZKM 27 enhanced 字符串加密（DES）")
     add("ZKM 27 指纹要求 ≥2 个专属标记",
@@ -637,6 +646,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--neo", type=Path)
     p.add_argument("--negative", type=Path,
                    help="public unobfuscated jar used as the negative corpus")
+    p.add_argument("--truncated", type=Path,
+                   help="jar holding a deliberately truncated class (M8 "
+                        "negative control); defaults to the in-repo fixture")
     p.add_argument("--fetch-negative", action="store_true",
                    help="download junit:junit:4.13.2 into --negative if absent")
     p.add_argument("--lwjgl", type=Path,
@@ -693,7 +705,8 @@ def main(argv: list[str] | None = None) -> int:
                    "lwjgl": Path(args.lwjgl),
                    "lwjgl_natives": Path(args.lwjgl_natives),
                    "junit": neg_path,
-                   "truncated": ROOT / "src/tests/sample.jar"}
+                   "truncated": args.truncated
+                   or ROOT / "src/tests/sample.jar"}
         goldens = {k: _golden_for(v) for k, v in corpora.items()
                    if v and Path(v).is_file()}
         report = {
@@ -726,9 +739,10 @@ def main(argv: list[str] | None = None) -> int:
             },
             "javafx_entries": [Path(x).name for x in javafx],
             "mechanisms": [],
-            "note": ("Ground truth is recomputed by src/tests/goldens.py from "
-                     "zip/class/PE bytes, never read from a jdec analysis "
-                     "command. Negative controls are per mechanism."),
+            "note": ("Ground truth is recomputed by the independent goldens "
+                     "implementation from zip/class/PE bytes, never read from "
+                     "a jdec analysis command. Negative controls are per "
+                     "mechanism."),
         }
         for spec in SPECS:
             key = spec["primary"]
@@ -824,6 +838,13 @@ def selfcheck() -> int:
         ok = ok and cond
 
     flow = ROOT / "src/tests/flow.jar"
+    if not flow.is_file():
+        print("selfcheck is an in-repo mode: it needs the fixture jars at "
+              f"{flow.parent}. From an installed wheel, run the full "
+              "acceptance with your own corpora (--hmcl/--neo/--negative/"
+              "--lwjgl/--lwjgl-natives), or run `python src/tests/run_tests.py` "
+              "from a checkout.", file=sys.stderr)
+        return 2
     expect("独立 class 解析器读出方法名",
            "dispatch" in G.methods_of(flow, "demo/flow/GotoFlood"),
            str(G.methods_of(flow, "demo/flow/GotoFlood")))
@@ -834,7 +855,7 @@ def selfcheck() -> int:
                "org/spongepowered/asm/lib/tree/AbstractInsnNode"))
     expect("独立复核：高熵 base64 仍是 blob",
            G.is_blob_literal(base64.b64encode(bytes(range(64))).decode()))
-    fp = json.loads((ROOT / "src/jdec/fingerprints.json").read_text("utf-8"))
+    fp = json.loads((Path(__file__).parent / "fingerprints.json").read_text("utf-8"))
     zkm = next(x for x in fp["obfuscators"]
                if x["name"] == "ZKM 27 enhanced 字符串加密（DES）")
     expect("ZKM 27 指纹要求两个专属标记",

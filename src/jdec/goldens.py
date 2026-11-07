@@ -8,7 +8,10 @@ oracle: it guards against implementation bugs, not against a shared
 misreading of the format.
 
 This is deliberately a SECOND, small implementation: a bug shared with the
-production parser would not be an independent check.
+production parser would not be an independent check. It now lives inside the
+`jdec` package so it can be shipped, but that is a distribution decision,
+not a licence to import from it: this module must never import a jdec
+analysis module (even a sibling). A regression parses its AST to enforce it.
 """
 
 from __future__ import annotations

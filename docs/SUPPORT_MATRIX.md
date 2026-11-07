@@ -2,7 +2,7 @@
 
 **结论：04 达成。** `docs/ROADMAP.md:19` 的状态列按修订纪律推进为
 「✅ 已达成」，依据是本文件、`docs/STAGE04_REPORT.json` 的 87 项交叉检查与
-`run_tests.py` 的 1300 条断言 / 151 个用例。
+`run_tests.py` 的 1302 条断言 / 152 个用例。
 
 本版与 11-05 两版的关键区别：**先补了 `src/jdec` 的机制代码，再谈验收**。
 
@@ -74,10 +74,10 @@ d=3（只验金标准）。报告里每条带 `class` 字段，可逐条复核�
 | `src/jdec/bsm.py` | 新增 `resolve_concat` / `resolve_record` / `resolve_site`；`scan_jar` 统计三类载荷与 `unresolved_sites` | M3 从「数站点」升级为「还原常量载荷」，并把无可还原常量的站点显式计数 |
 | `src/jdec/cli_args.py` / `cli_commands.py` | `jdec indy --resolve`，输出三类还原数、未还原数与 owner 直方图 | 让能力可从 CLI 使用与复核 |
 | `src/tests/samples/shapes/` | `Flattened` / `StringSwitch` 两个 fixture + 独立 `shapes.jar` | 双向钉住分类；`flow.jar` 保持「普通编译器控制流」语义 |
-| `src/tests/stage04.py` | M1 记录真实 kind、M3 记录三类载荷与分区；`_checks` 按机制拆成 8 个函数；检查打 a/b/c/d | 报告可核，不再自称门槛；新增判据不再堆在一个 228 行分支链里 |
+| `src/jdec/stage04.py` | M1 记录真实 kind、M3 记录三类载荷与分区；`_checks` 按机制拆成 8 个函数；检查打 a/b/c/d | 报告可核，不再自称门槛；新增判据不再堆在一个 228 行分支链里 |
 | `src/jdec/native_scan.py` | 新增 `--libs-jar` / `--libs-dir`（`add_libs` / `_external_libs`），`NativeLib.source` 记录来源工件 | Maven 的 `natives-<classifier>` 是 LWJGL/JNA/Netty 的常规布局；只扫单一输入必然报 0 库，把「没找对地方」显示成「没有 native」 |
 | `src/jdec/native_scan.py` | 修 `_rva_to_offset`：区间从 `max(VirtualSize, 1 MiB)` 改为该节自己的 `VirtualSize`（为 0 时退回 1 MiB） | 1 MiB 窗口互相覆盖，第三节的 RVA 被解析到第一节：`lwjgl64.dll` 报 6218 个导出（真值 2386）、JNI 只认出 53（真值 2383） |
-| `src/tests/stage04.py` | `extra` 语料真正执行（含 `extra_steps` 覆盖）、新增 lwjgl 语料、M1/M4 的结论在第二语料上重复验证 | 声明与执行不一致等于虚报覆盖；M4 的 ZKM 误报正是发生在 NeoRaven 上 |
+| `src/jdec/stage04.py` | `extra` 语料真正执行（含 `extra_steps` 覆盖）、新增 lwjgl 语料、M1/M4 的结论在第二语料上重复验证 | 声明与执行不一致等于虚报覆盖；M4 的 ZKM 误报正是发生在 NeoRaven 上 |
 
 ## 5. 机制清单来源与 `:226` 的差异
 
@@ -88,7 +88,7 @@ d=3（只验金标准）。报告里每条带 `class` 字段，可逐条复核�
 差异**，不宣称按 `study/` 原件验收。
 
 另：机制笔记里的 `javap -v` 是推荐的人工复核手段，自动回归用的是
-`src/tests/goldens.py` 的第二套解析（zip / class / PE），**未调用 javap**。
+`src/jdec/goldens.py` 的第二套解析（zip / class / PE），**未调用 javap**。
 
 ## 6. 已知不覆盖（诚实边界）
 
@@ -111,7 +111,7 @@ d=3（只验金标准）。报告里每条带 `class` 字段，可逐条复核�
 
   ```bash
   # 两个外置语料需自备（03 授权前提）；LWJGL 可从 Maven Central 拉取
-  python src/tests/stage04.py \
+  python -m jdec.stage04 \
       --hmcl <HMCL-3.15.2.exe> --neo <NeoRaven1.1.jar> \
       --negative junit-4.13.2.jar --fetch-negative \
       --fetch-lwjgl <dir> --javafx-dir <javafx-21-win> \

@@ -34,11 +34,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "src"))
+if __package__ in (None, ""):
+    sys.path.insert(0, str(ROOT / "src"))
 
 from jdec import cli as CL  # noqa: E402
-from mechanisms import MECHANISMS as MECH  # noqa: E402
 from jdec import container as CT  # noqa: E402
+from jdec.mechanisms import MECHANISMS as MECH  # noqa: E402
 
 
 @dataclass
