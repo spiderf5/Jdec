@@ -70,8 +70,7 @@ def segment(ops, markers):
                 buf = []
             if line.startswith("===ENTER"):
                 current = line[len("===ENTER "):].strip()
-        if fn == "FindClass" or True:
-            buf.append((fn, args))
+        buf.append((fn, args))
     if current and buf:
         segs.append((current, buf))
     return segs

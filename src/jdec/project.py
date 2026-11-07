@@ -442,6 +442,7 @@ class CompilationReport:
     issues: list[CompilationIssue] = field(default_factory=list)
     repaired_count: int = 0
     javac_output: str = ""
+    classes_dir: Path | None = None
 
     def summary(self) -> str:
         status = "SUCCESS" if self.success else "FAILED"
@@ -1208,8 +1209,8 @@ def export_project(
     # 6. REVIEW 2.4: self-heal audit log. Evidence ladder:
     #    readable < compilable < JVM-verified < behaviour-parity.
     #    Export alone proves "readable"; --compile proves "compilable" at best.
-    #    The ladder's top two levels are not produced by this tool yet and are
-    #    explicitly reported as such instead of being implied.
+    #    The top two levels require the explicit --evidence opt-in, which writes
+    #    a measured level or "partial" -- they are never implied by a clean javac.
     if repairs:
         stats["repair_rules_applied"] = sum(len(r["rules"]) for r in repairs)
         log_path = out_dir / "repair-log.md"
@@ -1224,8 +1225,9 @@ def export_project(
             "",
             "> **Evidence ladder**: readable < compilable < JVM-verified < behaviour-parity.",
             "> This export is at evidence level **readable**; with `--compile` success it",
-            "> reaches **compilable**. JVM verification and behaviour-parity checks are",
-            "> NOT implemented yet - a compiling project is not proven to behave like the",
+            "> reaches **compilable**. The top two levels require the explicit",
+            "> `--evidence jvm|behave` opt-in, which writes `evidence.md` with a measured",
+            "> level or `partial`. A compiling project is not proven to behave like the",
             "> original target. Every rule below may have changed semantics.",
             "",
             "| File | Rules applied | Lines (orig -> repaired) |",
@@ -1244,8 +1246,15 @@ def verify_compilation(
     javac_bin: str = "javac",
     max_repair_passes: int = 3,
     intermediary_jar: Path | str | None = None,
+    classes_out: Path | None = None,
 ) -> CompilationReport:
-    """Run an automated javac compile loop, diagnosing and auto-repairing compile errors."""
+    """Run an automated javac compile loop, diagnosing and auto-repairing compile errors.
+
+    ``classes_out`` is optional: when given, the successful compilation's class
+    files are copied there (and reported as ``CompilationReport.classes_dir``)
+    so the caller can run further evidence checks.  Leaving it ``None`` keeps
+    the historical behaviour exactly -- the temporary classes are discarded.
+    """
     java_src_root = project_dir / "src" / "main" / "java"
     libs_dir = project_dir / "libs"
     try:
@@ -1301,6 +1310,19 @@ def verify_compilation(
             output = (proc.stderr or "") + (proc.stdout or "")
 
             if proc.returncode == 0:
+                kept_classes = None
+                if classes_out is not None:
+                    # Only .class files belong in the evidence jar: tmp_classes
+                    # also holds sources.txt, and a reused out_dir must not keep
+                    # stale classes from an earlier export.
+                    if classes_out.exists():
+                        shutil.rmtree(classes_out, ignore_errors=True)
+                    classes_out.mkdir(parents=True, exist_ok=True)
+                    for cls in tmp_classes.rglob("*.class"):
+                        dest = classes_out / cls.relative_to(tmp_classes)
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(cls, dest)
+                    kept_classes = classes_out
                 shutil.rmtree(tmp_classes, ignore_errors=True)
                 return CompilationReport(
                     success=True,
@@ -1308,6 +1330,7 @@ def verify_compilation(
                     compiled_files=len(java_files),
                     repaired_count=total_repaired,
                     javac_output=output,
+                    classes_dir=kept_classes,
                 )
 
             # Parse javac errors supporting Windows drive letters, Unix paths, and English/localized tags

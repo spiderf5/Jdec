@@ -948,11 +948,155 @@ def test_selfheal_audit() -> None:
         txt = log.read_text(encoding="utf-8") if log.is_file() else ""
         check("repair-log written with evidence ladder",
               log.is_file() and "readable < compilable" in txt
-              and "NOT implemented" in txt)
+              and "--evidence" in txt)
+        check("default export produces no evidence.md",
+              not (out / "evidence.md").is_file())
         check("repair-log lists the healed file and rules",
               "`a/Healing.java`" in txt and "keyword" in txt.lower())
         check("stats counters consistent", stats.get("files_repaired") == 1
               and stats.get("repair_rules_applied", 0) >= 2, str(stats))
+
+
+def test_evidence_ladder_optional() -> None:
+    print("project: --evidence is opt-in, authorized and failure-tolerant")
+    from jdec import cli_args as CA
+    from jdec import cli_commands as CC
+    from jdec import project as PJ
+
+    def _args(mode="jvm", **over):
+        base = dict(evidence=mode, evidence_from=None, execute=False,
+                    no_sandbox=False, evidence_timeout=900)
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def _failed_rep():
+        return SimpleNamespace(success=False, classes_dir=None)
+
+    parser = CA.build_parser()
+    default_args = parser.parse_args(["project", "x.jar"])
+    check("--evidence defaults to none",
+          getattr(default_args, "evidence", None) == "none",
+          str(getattr(default_args, "evidence", None)))
+    check("--execute defaults to false", default_args.execute is False)
+    jvm_args = parser.parse_args(["project", "x.jar", "--compile",
+                                  "--evidence", "jvm"])
+    check("--evidence jvm parses", jvm_args.evidence == "jvm")
+    behave_args = parser.parse_args(["project", "x.jar", "--evidence", "behave",
+                                     "--evidence-from", "cases.txt"])
+    check("--evidence-from parses", behave_args.evidence_from == "cases.txt")
+    exec_args = parser.parse_args(["project", "x.jar", "--evidence", "behave",
+                                   "--execute", "--no-sandbox",
+                                   "--evidence-timeout", "120"])
+    check("execute / no-sandbox / timeout parse",
+          exec_args.execute is True and exec_args.no_sandbox is True
+          and exec_args.evidence_timeout == 120)
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        CC._run_evidence(_args(), d / "x.jar", d, _failed_rep(), "jvm")
+        ev = (d / "evidence.md").read_text(encoding="utf-8")
+        check("failed compile reports partial, never a higher level",
+              "evidence_level: **partial**" in ev and "Why not higher" in ev,
+              ev[:200])
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        CC._run_evidence(_args("behave"), d / "x.jar", d,
+                         SimpleNamespace(success=True, classes_dir=None),
+                         "behave")
+        ev = (d / "evidence.md").read_text(encoding="utf-8")
+        check("behave without --execute refuses to run any check",
+              "--execute" in ev and "## JVM verification" not in ev
+              and "evidence_level: **partial**" in ev, ev[:250])
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "evidence.md").mkdir()  # write_text raises IsADirectoryError
+        CC._run_evidence(_args(), d / "x.jar", d, _failed_rep(), "jvm")
+        check("unwritable evidence.md degrades to a warning",
+              (d / "evidence.md").is_dir())
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        log = d / "repair-log.md"
+        log.write_text("# audit\n", encoding="utf-8")
+        for _ in range(2):
+            CC._run_evidence(_args(), d / "x.jar", d, _failed_rep(), "jvm")
+        check("repair-log evidence marker is idempotent",
+              log.read_text(encoding="utf-8").count("Measured evidence level:") == 1,
+              log.read_text(encoding="utf-8"))
+
+    if not JAVAC:
+        print("  skipped javac-dependent checks: no JDK")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        src = d / "proj" / "src" / "main" / "java"
+        src.mkdir(parents=True)
+        (src / "Plain.java").write_text(
+            "public class Plain { public static int add(int a, int b) "
+            "{ return a + b; } }\n", encoding="utf-8")
+        plain = PJ.verify_compilation(d / "proj")
+        check("default compile still discards classes",
+              plain.success and plain.classes_dir is None,
+              str(plain.classes_dir))
+        out = d / "classes"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "Stale.class").write_bytes(b"old")
+        kept = PJ.verify_compilation(d / "proj", classes_out=out)
+        check("classes_out retains compiled classes",
+              kept.success and kept.classes_dir == out
+              and (out / "Plain.class").is_file(),
+              str(kept.classes_dir))
+        check("classes_out clears stale classes and non-class files",
+              not (out / "Stale.class").exists()
+              and all(p.suffix == ".class" for p in out.rglob("*") if p.is_file()),
+              str([p.name for p in out.rglob("*")]))
+
+
+def test_evidence_compare_classpath_excludes_original() -> None:
+    print("project: behaviour comparison never loads the original jar on both sides")
+    from unittest import mock
+    from jdec import cli_commands as CC
+
+    class _Report:
+        def to_dict(self):
+            return {"verdict": "PASS", "checked": 1, "invalid": [],
+                    "unresolved": [], "diffs": []}
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        classes = d / "classes"
+        classes.mkdir()
+        (classes / "A.class").write_bytes(b"\xca\xfe\xba\xbe")
+        libs = d / "libs"
+        libs.mkdir()
+        lib = libs / "dep.jar"
+        lib.write_bytes(b"PK\x03\x04")
+        raw = d / "target.jar"
+        raw.write_bytes(b"PK\x03\x04")
+        spec = d / "cases.txt"
+        spec.write_text("A\tm\t|\t\n", encoding="utf-8")
+        args = SimpleNamespace(evidence="behave", evidence_from=str(spec),
+                               execute=True, no_sandbox=False,
+                               evidence_timeout=60)
+        rep = SimpleNamespace(success=True, classes_dir=classes)
+        with mock.patch("jdec.verify.verify", return_value=_Report()) as mv, \
+                mock.patch("jdec.behave.parse_spec", return_value=[object()]), \
+                mock.patch("jdec.behave.compare", return_value=_Report()) as mc:
+            CC._run_evidence(args, raw, d, rep, "behave")
+
+        check("verify may resolve supertypes from the original jar",
+              raw in mv.call_args.kwargs.get("classpath", ()),
+              str(mv.call_args.kwargs.get("classpath")))
+        compare_cp = mc.call_args.kwargs.get("classpath", ())
+        check("compare does NOT put the original jar on either loader",
+              raw not in compare_cp, str(compare_cp))
+        check("compare still sees the bundled libraries",
+              lib in compare_cp, str(compare_cp))
+        ev = (d / "evidence.md").read_text(encoding="utf-8")
+        check("mocked happy path reaches behaviour-parity",
+              "behaviour-parity" in ev, ev[:200])
 
 
 def test_cfg_and_dynamic_mocks() -> None:

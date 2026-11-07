@@ -793,7 +793,10 @@ def cmd_natives(args: argparse.Namespace) -> int:
     extra: list[Path] = [Path(p) for p in (getattr(args, "libs_jar", None) or [])]
     if getattr(args, "libs_dir", None):
         extra.append(Path(args.libs_dir))
-    is_zip = raw.read_bytes()[:2] == b"PK"
+    # Only the 2-byte magic is needed; read_bytes() loaded the whole (possibly
+    # hundreds of MB) input jar/exe into memory just to look at its prefix.
+    with raw.open("rb") as magic_fh:
+        is_zip = magic_fh.read(2) == b"PK"
     if is_zip:
         tri = NS.triage(raw, out_dir, collect_decl=not args.no_decl,
                         extra_libs=extra or None)
@@ -1446,6 +1449,128 @@ def cmd_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_evidence(args: argparse.Namespace, raw: Path, out_dir: Path,
+                  rep, mode: str) -> None:
+    """Optional measured evidence-ladder upgrade after a successful compile.
+
+    Writes ``evidence.md`` with either a confirmed level or ``partial`` plus
+    the reasons. The command exit code and the default export are unaffected:
+    even a failure to write the report only produces a warning.
+    """
+    from . import behave as BH
+    from . import verify as VF
+
+    lines = [
+        "# jdec Export Evidence",
+        "",
+        f"- target: `{raw.name}`",
+        f"- requested: `--evidence {mode}`",
+        "- ladder: readable < compilable < JVM-verified < behaviour-parity",
+        "",
+    ]
+    level = "partial"
+    reasons: list[str] = []
+    classes = getattr(rep, "classes_dir", None)
+    timeout = max(1, int(getattr(args, "evidence_timeout", 900)))
+    # behave executes the target's code. Every other jdec command that does so
+    # (behave / recover / pool harvest) requires an explicit --execute; the
+    # evidence opt-in must not become a back door around that gate.
+    authorized = mode != "behave" or bool(getattr(args, "execute", False))
+    if not authorized:
+        reasons.append("--evidence behave requires --execute (it EXECUTES "
+                       "code from the target jar)")
+
+    class_files: list[Path] = []
+    if classes is not None and classes.is_dir():
+        class_files = sorted(classes.rglob("*.class"))
+
+    if not rep.success:
+        reasons.append("javac compilation did not succeed")
+    elif not authorized:
+        pass  # never run any JVM check on an unauthorised behave request
+    elif not class_files:
+        reasons.append("no compiled classes were retained")
+    else:
+        libs_cp = sorted((out_dir / "libs").glob("*.jar"))
+        # verify needs the original jar to resolve supertypes; behave must NOT:
+        # compare() appends classpath to BOTH loaders, so putting `raw` there
+        # lets the right loader fall back to the original implementation for
+        # any class the recompiled jar is missing -- a false "same" verdict.
+        verify_cp = [raw] + libs_cp
+        try:
+            vd = VF.verify(classes, classpath=verify_cp, timeout=timeout).to_dict()
+            lines += ["## JVM verification (`-Xverify:all`)", "",
+                      f"- verdict: `{vd.get('verdict')}`",
+                      f"- checked: {vd.get('checked', 0)}",
+                      f"- invalid: {len(vd.get('invalid', []))}",
+                      f"- unresolved: {len(vd.get('unresolved', []))}", ""]
+            if vd.get("verdict") == "PASS":
+                level = "JVM-verified"
+            else:
+                reasons.append("JVM verification did not return PASS")
+        except Exception as exc:  # noqa: BLE001 - evidence is optional
+            reasons.append(f"JVM verification failed: {exc}")
+
+        if mode == "behave":
+            spec = getattr(args, "evidence_from", None)
+            sandbox = not getattr(args, "no_sandbox", False)
+            if not spec or not Path(spec).is_file():
+                reasons.append("--evidence behave needs --evidence-from <spec>")
+            else:
+                try:
+                    cases = BH.parse_spec(Path(spec).read_text(encoding="utf-8"))
+                    if not cases:
+                        reasons.append("behave spec contains no cases")
+                    else:
+                        jar_path = out_dir / "evidence" / "recompiled.jar"
+                        jar_path.parent.mkdir(parents=True, exist_ok=True)
+                        with zipfile.ZipFile(jar_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for cls in class_files:
+                                zf.write(cls, cls.relative_to(classes).as_posix())
+                        bd = BH.compare(raw, jar_path, cases,
+                                        classpath=libs_cp, timeout=timeout,
+                                        sandbox=sandbox).to_dict()
+                        lines += ["## Behaviour parity", "",
+                                  f"- sandbox: {'on' if sandbox else 'off'}",
+                                  f"- verdict: `{bd.get('verdict')}`",
+                                  f"- cases: {len(cases)}",
+                                  f"- diffs: {len(bd.get('diffs', []))}", ""]
+                        if bd.get("verdict") == "PASS" and not bd.get("diffs"):
+                            level = "behaviour-parity"
+                        else:
+                            reasons.append(
+                                "behaviour comparison did not return PASS with 0 diffs")
+                except Exception as exc:  # noqa: BLE001 - evidence is optional
+                    reasons.append(f"behaviour comparison failed: {exc}")
+
+    lines += [f"- evidence_level: **{level}**", ""]
+    if reasons:
+        lines += ["## Why not higher", ""] + [f"- {r}" for r in reasons] + [""]
+    lines += ["> A compiling project is not proven to behave like the original target.",
+              "> This file records a measurement, not a product guarantee.", ""]
+    report = "\n".join(lines)
+    try:
+        (out_dir / "evidence.md").write_text(report, encoding="utf-8")
+    except OSError as exc:
+        print(f"  ! could not write evidence.md: {exc}")
+        return
+
+    # Idempotent: re-exporting into the same dir replaces the old marker line
+    # instead of appending another copy of it on every run.
+    marker = "> Measured evidence level:"
+    log = out_dir / "repair-log.md"
+    try:
+        if log.is_file():
+            head = log.read_text(encoding="utf-8").split(marker)[0].rstrip("\n")
+            log.write_text(
+                head + f"\n\n{marker} **{level}** (see `evidence.md`).\n",
+                encoding="utf-8")
+    except OSError as exc:
+        print(f"  ! could not update repair-log.md: {exc}")
+    print(f"  evidence      : {level}"
+          + (f" ({'; '.join(reasons)})" if reasons else ""))
+
+
 def _do_project_export(args: argparse.Namespace, raw: Path, out_dir: Path,
                        src_dir: Path) -> None:
     from . import project
@@ -1472,15 +1597,20 @@ def _do_project_export(args: argparse.Namespace, raw: Path, out_dir: Path,
 
     if getattr(args, "compile", False):
         print("\nrunning javac verification loop ...")
+        mode = getattr(args, "evidence", "none") or "none"
+        classes_out = (out_dir / "evidence" / "classes") if mode != "none" else None
         rep = project.verify_compilation(
             out_dir,
             intermediary_jar=getattr(args, "intermediary_jar", None),
+            classes_out=classes_out,
         )
         print(rep.summary())
         if not rep.success and rep.issues:
             print(f"  remaining compilation issues ({len(rep.issues)}):")
             for iss in rep.issues[:5]:
                 print(f"    - {iss.file_path.name}:{iss.line_number}: {iss.message}")
+        if mode != "none":
+            _run_evidence(args, raw, out_dir, rep, mode)
 
     print(f"\nProject is ready! Open with IntelliJ IDEA: File -> Open -> {out_dir / 'build.gradle'}")
 

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import shutil
 import sys
 import tempfile
 import urllib.request
@@ -60,16 +61,26 @@ NEGATIVE_URL = ("https://repo1.maven.org/maven2/junit/junit/4.13.2/"
 # libraries as a separate `natives` classifier jar. That is the layout M6 needs
 # to prove JNI matching: the main jar declares 2674 native methods, the natives
 # jar exports 2383 Java_* symbols, and 52 of them match by name.
-_LWJGL_BASE = "https://repo1.maven.org/maven2/org/lwjgl/lwjgl"
+# 2.9.4-nightly-20150209 is the exact build Minecraft 1.8.9 ships.  It was
+# never published to Maven Central (org.lwjgl.lwjgl:lwjgl stops at 2.9.3
+# there); Mojang's library host is the actual publisher.  The coordinates and
+# the report's sha256 stay unchanged -- only the download source is fixed.
+_LWJGL_MOJANG = "https://libraries.minecraft.net/org/lwjgl/lwjgl"
+_LWJGL_CENTRAL = "https://repo1.maven.org/maven2/org/lwjgl/lwjgl"
 LWJGL_ARTIFACTS = (
     ("lwjgl",
      "lwjgl-2.9.4-nightly-20150209.jar",
-     f"{_LWJGL_BASE}/lwjgl/2.9.4-nightly-20150209/lwjgl-2.9.4-nightly-20150209.jar",
+     (f"{_LWJGL_MOJANG}/lwjgl/2.9.4-nightly-20150209/"
+      "lwjgl-2.9.4-nightly-20150209.jar",
+      f"{_LWJGL_CENTRAL}/lwjgl/2.9.4-nightly-20150209/"
+      "lwjgl-2.9.4-nightly-20150209.jar"),
      "org.lwjgl.lwjgl:lwjgl:2.9.4-nightly-20150209"),
     ("natives",
      "lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
-     f"{_LWJGL_BASE}/lwjgl-platform/2.9.4-nightly-20150209/"
-     "lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+     (f"{_LWJGL_MOJANG}/lwjgl-platform/2.9.4-nightly-20150209/"
+      "lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+      f"{_LWJGL_CENTRAL}/lwjgl-platform/2.9.4-nightly-20150209/"
+      "lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar"),
      "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209:natives-windows"),
 )
 
@@ -627,15 +638,56 @@ def fetch_negative(dest: Path) -> Path:
     return dest
 
 
+def _valid_artifact(path: Path) -> bool:
+    """A downloaded Maven artifact must at least be a zip/jar (PK magic)."""
+    if not path.is_file():
+        return False
+    try:
+        with path.open("rb") as fh:
+            return fh.read(2) == b"PK"
+    except OSError:
+        return False
+
+
 def fetch_lwjgl(dest_dir: Path) -> tuple[Path, Path]:
-    """Download the two LWJGL artifacts M6 needs; returns (main, natives)."""
+    """Download the two LWJGL artifacts M6 needs; returns (main, natives).
+
+    Transfers go to a ``.part`` file and are atomically renamed, so an
+    interrupted download can never leave a truncated jar that a later run
+    would mistake for a cached artifact. Existing files are validated too,
+    which self-heals leftovers from older versions of this function.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     out: list[Path] = []
-    for _key, filename, url, _coord in LWJGL_ARTIFACTS:
+    for _key, filename, urls, coord in LWJGL_ARTIFACTS:
         target = dest_dir / filename
-        if not target.is_file():
-            with urllib.request.urlopen(url, timeout=180) as r:
-                target.write_bytes(r.read())
+        if _valid_artifact(target):
+            out.append(target)
+            continue
+        if target.is_dir():
+            raise RuntimeError(
+                f"{target} is a directory; remove it or pass --lwjgl / "
+                "--lwjgl-natives with explicit file paths")
+        target.unlink(missing_ok=True)
+        part = dest_dir / (filename + ".part")
+        last: Exception | None = None
+        for url in urls:
+            try:
+                with urllib.request.urlopen(url, timeout=180) as r, \
+                        part.open("wb") as fh:
+                    shutil.copyfileobj(r, fh)
+                if not _valid_artifact(part):
+                    raise ValueError("response is not a jar/zip (PK magic missing)")
+                part.replace(target)
+                break
+            except Exception as exc:  # noqa: BLE001 - try the next source
+                part.unlink(missing_ok=True)
+                last = exc
+        else:
+            raise RuntimeError(
+                f"cannot fetch {coord} from any source: {last}. "
+                "Pass --lwjgl / --lwjgl-natives with local copies instead."
+            ) from last
         out.append(target)
     return out[0], out[1]
 
@@ -727,12 +779,12 @@ def main(argv: list[str] | None = None) -> int:
                               "sha256": goldens.get("truncated", {}).get("sha256"),
                               "role": "in-repo truncated-class negative control"},
                 "lwjgl": {"coordinate": LWJGL_ARTIFACTS[0][3],
-                          "url": LWJGL_ARTIFACTS[0][2],
+                          "url": LWJGL_ARTIFACTS[0][2][0],
                           "sha256": goldens["lwjgl"]["sha256"],
                           "role": "public JNI positive corpus (2674 native decls)"},
                 "lwjgl_natives": {
                     "coordinate": LWJGL_ARTIFACTS[1][3],
-                    "url": LWJGL_ARTIFACTS[1][2],
+                    "url": LWJGL_ARTIFACTS[1][2][0],
                     "sha256": goldens["lwjgl_natives"]["sha256"],
                     "role": "the `natives` classifier artifact M6 has to be told "
                             "about with --libs-jar"},

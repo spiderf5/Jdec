@@ -555,6 +555,29 @@ def build_parser() -> argparse.ArgumentParser:
                             help="skip bundling mc_stubs.jar into libs/")
         parser.add_argument("--compile", action="store_true",
                             help="run javac compilation diagnostic and auto-repair loop")
+        parser.add_argument("--evidence", choices=("none", "jvm", "behave"),
+                            default="none",
+                            help="optional evidence-ladder upgrade after a successful "
+                                 "--compile: 'jvm' runs -Xverify:all on the compiled "
+                                 "classes; 'behave' additionally compares behaviour "
+                                 "(EXECUTES code from the target jar, needs "
+                                 "--evidence-from). Default 'none' keeps the "
+                                 "historical readable/compilable behaviour.")
+        parser.add_argument("--evidence-from", default=None, metavar="SPEC",
+                            help="behave case spec (class|method|argTypes|argValues) "
+                                 "for --evidence behave; without it the run is "
+                                 "reported as partial")
+        parser.add_argument("--execute", action="store_true",
+                            help="allow --evidence behave to EXECUTE code from "
+                                 "the target jar (required, as for the behave / "
+                                 "recover / pool commands)")
+        parser.add_argument("--no-sandbox", action="store_true",
+                            help="with --evidence behave, run the comparison "
+                                 "without the Java sandbox (unsafe on untrusted jars)")
+        parser.add_argument("--evidence-timeout", type=int, default=900,
+                            metavar="SEC",
+                            help="per-check timeout for the optional evidence "
+                                 "verification / comparison (default 900s)")
         parser.set_defaults(handler="cmd_project")
 
     sproj = sub.add_parser("project",

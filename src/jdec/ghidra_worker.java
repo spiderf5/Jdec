@@ -37,6 +37,7 @@ public class ghidra_worker extends GhidraScript {
 
         Set<String> filterSymbols = null;
         java.util.List<Object[]> addrEntries = new java.util.ArrayList<>();
+        int badMappingLines = 0;
         // args[1..] 按 内容 判别:含制表符 = 地址表(mappings),否则 = 符号过滤表
         for (int ai = 1; ai < args.length; ai++) {
             File f = new File(args[ai]);
@@ -53,19 +54,36 @@ public class ghidra_worker extends GhidraScript {
             }
             if (isMappings) {
                 for (String line : lines) {
-                    line = line.trim();
-                    if (line.isEmpty() || line.startsWith("#")) continue;
-                    String[] pp = line.split("\t");
-                    if (pp.length < 2) continue;
+                    if (line.isBlank() || line.stripLeading().startsWith("#")) continue;
+                    // -1 keeps trailing empty columns: "name<TAB>ptr<TAB>" must
+                    // be reported as a bad row, not silently become base = -1.
+                    String[] pp = line.split("\t", -1);
+                    for (int ci = 0; ci < pp.length; ci++) {
+                        pp[ci] = pp[ci].strip();
+                    }
+                    if (pp.length < 2) {
+                        badMappingLines++;
+                        println("[jdec-ghidra] ! bad mapping line (too few columns): " + line);
+                        continue;
+                    }
                     try {
-                        long ptr = Long.parseLong(pp[1].replace("0x", ""), 16);
+                        // (?i) also strips an uppercase 0X prefix; the Python
+                        // normalizer canonicalizes it, but hand-written tables
+                        // may reach this script directly.
+                        long ptr = Long.parseLong(
+                                pp[1].replaceFirst("(?i)^0x", ""), 16);
                         // 第 3 列 = 运行时模块基址(frida 转储);缺省 -1 表示 ptr 已是偏移
                         long base = (pp.length > 2 && !pp[2].equals("-"))
-                                ? Long.parseLong(pp[2].replace("0x", ""), 16) : -1;
+                                ? Long.parseLong(
+                                        pp[2].replaceFirst("(?i)^0x", ""), 16) : -1;
                         addrEntries.add(new Object[]{pp[0], ptr, base});
-                    } catch (NumberFormatException ignored) {
+                    } catch (NumberFormatException bad) {
+                        badMappingLines++;
+                        println("[jdec-ghidra] ! bad mapping line: " + line);
                     }
                 }
+                println("[jdec-ghidra] address-table rows: " + addrEntries.size()
+                        + ", bad lines: " + badMappingLines);
             } else if (filterSymbols == null) {
                 filterSymbols = new HashSet<String>(lines);
             }
@@ -204,7 +222,8 @@ public class ghidra_worker extends GhidraScript {
 
         jsonSummary.append("\n  ],\n");
         jsonSummary.append("  \"total_matched\": ").append(totalFound).append(",\n");
-        jsonSummary.append("  \"decompiled_count\": ").append(decompiledCount).append("\n");
+        jsonSummary.append("  \"decompiled_count\": ").append(decompiledCount).append(",\n");
+        jsonSummary.append("  \"bad_mapping_lines\": ").append(badMappingLines).append("\n");
         jsonSummary.append("}\n");
 
         File summaryFile = new File(outDir, "decompiled_summary.json");

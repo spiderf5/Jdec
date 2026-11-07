@@ -607,6 +607,240 @@ def test_ghidra_integration() -> None:
         check("decompile_library returns clean dict on error", isinstance(res_dec, dict) and "ok" in res_dec)
 
 
+def test_ghidra_mappings_normalization() -> None:
+    print("ghidra: frida regnatives TSV normalized to the address-table contract")
+    from jdec import ghidra_engine as GE
+
+    six = (
+        "com/example/Target\tdecrypt\t(Ljava/lang/String;)Ljava/lang/String;"
+        "\t0x7ffb1234\t0x7ffb0000\tmod.dll\n"
+        "com/example/Target\tresolve\t()V\t0x7ffb5678\t0x7ffb0000\tmod.dll\n"
+    )
+    rows = [ln.split("\t") for ln in GE.normalize_mappings(six).strip().splitlines()]
+    check("6-column TSV becomes 3-column rows", len(rows) == 2
+          and all(len(r) == 3 for r in rows), str(rows))
+    check("name carries class and method",
+          rows[0][0] == "com/example/Target.decrypt", rows[0][0])
+    check("ptr taken from column 4", rows[0][1] == "0x7ffb1234", rows[0][1])
+    check("runtime base taken from column 5", rows[0][2] == "0x7ffb0000", rows[0][2])
+
+    four = GE.normalize_mappings(
+        "com/example/Target\tdecrypt\t()V\t0x1234\n").strip().split("\t")
+    check("4-column TSV gets a '-' base", four[2] == "-", str(four))
+
+    three = "Java_com_x_Y_z\t0x1234\t0x1000\n"
+    check("already-normalized 3-column table passes through",
+          GE.normalize_mappings(three).strip() == three.strip())
+    check("comment and blank lines are ignored",
+          GE.normalize_mappings("# note\n\n" + three).strip() == three.strip())
+
+    bad = "com/example/Target\tdecrypt\t()V\tnot-a-pointer\t0x1000\tmod.dll\n"
+    try:
+        GE.normalize_mappings(bad)
+        check("undecodable mapping row raises instead of being dropped", False)
+    except ValueError as exc:
+        check("undecodable mapping row raises instead of being dropped", True)
+        check("error names the offending line", "line 1" in str(exc), str(exc))
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "bad.tsv"
+        src.write_text(bad, encoding="utf-8")
+        fake_gh = Path(td) / "fake_gh"
+        (fake_gh / "support").mkdir(parents=True)
+        res = GE.decompile_library(fake_gh, Path(td) / "x.dll",
+                                   Path(td) / "out", mappings_tsv=src, quiet=True)
+        check("decompile_library surfaces a bad TSV instead of a silent empty result",
+              res.get("ok") is False and "invalid --mappings TSV" in res.get("error", ""),
+              str(res))
+        check("failed normalization leaves no filter input behind",
+              not (Path(td) / "out" / "_filter_symbols.txt").exists())
+
+
+def test_mappings_hardening() -> None:
+    print("ghidra: normalization rejects everything the Java worker would reject")
+    from jdec import ghidra_engine as GE
+
+    for tok in ("+1", "-1", "1_000", "0x0x1", "0x", "g", "12 34"):
+        check(f"Python-only hex rejected: {tok!r}", not GE._is_hex_token(tok))
+    for tok in ("0x1A", "0X1a", "  0x1234  ", "deadBEEF"):
+        check(f"Java-parseable hex accepted: {tok!r}", GE._is_hex_token(tok))
+
+    canon = GE.normalize_mappings("Java_x\t0X1a\t0X1000\n").strip()
+    check("uppercase 0X prefix is canonicalized before reaching the worker",
+          canon == "Java_x\t0x1a\t0x1000", canon)
+    check("no 0X prefix survives normalization", "0X" not in canon)
+
+    header =("cls\tmethod\tsig\tptr\tbase\tmodule\n"
+              "com/x/T\tm\t()V\t0x1000\t0x10000000\tmod.dll\n")
+    expected = "com/x/T.m\t0x1000\t0x10000000"
+    check("header row skipped without poisoning the table",
+          GE.normalize_mappings(header).strip() == expected,
+          GE.normalize_mappings(header))
+    check("BOM stripped from the first column",
+          GE.normalize_mappings("\ufeff" + header).strip() == expected)
+
+    for bad in ("\tmethod\t()V\t0x1000\t0x1\tm\n",
+                "com/x/T\tm\t()V\t+1\t0x1\tm\n",
+                "Java_x\t0x1234\t+1\n"):
+        try:
+            GE.normalize_mappings(bad)
+            check(f"invalid row raises: {bad[:18]!r}", False)
+        except ValueError:
+            check(f"invalid row raises: {bad[:18]!r}", True)
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        src, dst = d / "in.tsv", d / "out.tsv"
+        src.write_text("\ufeff# comment\n" + header
+                       + "\ncom/x/T\tn\t()V\t0x2000\t0x10000000\tmod.dll\n",
+                       encoding="utf-8")
+        count = GE.normalize_mappings_file(src, dst)
+        streamed = dst.read_text(encoding="utf-8")
+        check("streamed normalization matches the in-memory one",
+              count == 2 and streamed
+              == GE.normalize_mappings(src.read_text(encoding="utf-8-sig")),
+              streamed)
+        check("streamed output carries no BOM", not streamed.startswith("\ufeff"))
+
+
+def test_stage04_lwjgl_fetch_hardening() -> None:
+    print("stage04: LWJGL fetch is atomic and self-heals corrupt leftovers")
+    import io
+    from unittest import mock
+    from jdec import stage04 as S4
+
+    check("report keeps a single string url",
+          isinstance(S4.LWJGL_ARTIFACTS[0][2][0], str),
+          str(type(S4.LWJGL_ARTIFACTS[0][2])))
+    check("multiple download sources remain available",
+          all(len(art[2]) >= 2 for art in S4.LWJGL_ARTIFACTS))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / S4.LWJGL_ARTIFACTS[0][1]).write_bytes(b"truncated-download")
+        calls: list[int] = []
+
+        def _open(*a, **k):
+            calls.append(1)
+            return _Resp(b"PK\x03\x04fake")
+
+        with mock.patch.object(S4.urllib.request, "urlopen", side_effect=_open):
+            main, natives = S4.fetch_lwjgl(d)
+        check("corrupt leftover is replaced by a valid jar",
+              main.read_bytes().startswith(b"PK")
+              and natives.read_bytes().startswith(b"PK"))
+        check("no .part files leak", not list(d.glob("*.part")))
+        check("both artifacts fetched exactly once", len(calls) == 2, str(calls))
+        with mock.patch.object(
+                S4.urllib.request, "urlopen",
+                side_effect=AssertionError("unexpected download")):
+            again, _ = S4.fetch_lwjgl(d)
+        check("valid cache is reused without downloading",
+              len(calls) == 2 and again == main, str(calls))
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / S4.LWJGL_ARTIFACTS[0][1]).mkdir()
+        try:
+            S4.fetch_lwjgl(d)
+            check("same-name directory is reported, not crashed", False)
+        except RuntimeError as exc:
+            check("same-name directory is reported, not crashed",
+                  "directory" in str(exc), str(exc))
+
+
+def test_trace2java_dead_condition() -> None:
+    print("frida: trace2java segment keeps its v1 output without the dead branch")
+    import importlib.util
+    src = Path(__file__).resolve().parents[3] / "engines" / "frida" / "trace2java.py"
+    spec = importlib.util.spec_from_file_location("jdec_trace2java", src)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    check("trace2java has no dead or-True branch",
+          "or True" not in src.read_text(encoding="utf-8"))
+
+    with tempfile.TemporaryDirectory() as td:
+        markers = Path(td) / "markers.txt"
+        markers.write_text("===ENTER a.B.c\n===ENTER a.B.d\n", encoding="utf-8")
+        ops = [("1", "FindClass", ["com/x/Y"]),
+               ("1", "NewStringUTF", ["hello"]),
+               ("1", "GetMethodID", ["m", "()V"])]
+        segs = mod.segment(ops, str(markers))
+        expected = [("a.B.c", []),
+                    ("a.B.d", [(fn, args) for _, fn, args in ops])]
+        check("segment output byte-for-byte unchanged after cleanup",
+              segs == expected, str(segs))
+
+
+def test_ghidra_headless_smoke() -> None:
+    print("ghidra: real headless smoke on a public PE (opt-in)")
+    if os.environ.get("JDEC_GHIDRA_SMOKE") != "1":
+        print("  skipped: set JDEC_GHIDRA_SMOKE=1 and GHIDRA_HOME to run")
+        return
+    from jdec import ghidra_engine as GE
+    gh = GE.find_ghidra()
+    if gh is None:
+        print("  skipped: no Ghidra installation found")
+        return
+    natives_dir = os.environ.get("JDEC_NATIVES_DIR")
+    if not natives_dir:
+        print("  skipped: set JDEC_NATIVES_DIR to the LWJGL natives dir")
+        return
+    natives = Path(natives_dir)
+    jars = sorted(natives.glob("*natives-windows*.jar"))
+    if not jars:
+        print("  skipped: LWJGL natives jar not fetched yet")
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td)
+        with zipfile.ZipFile(jars[0]) as archive:
+            dlls = [n for n in archive.namelist() if n.lower().endswith(".dll")]
+            if not dlls:
+                print("  skipped: natives jar contains no PE")
+                return
+            dll = work / "public.dll"
+            dll.write_bytes(archive.read(dlls[0]))
+        tsv = work / "mappings.tsv"
+        tsv.write_text(
+            "org/lwjgl/DefaultWidget\tnCreate\t()V\t0x10001000\t0x10000000\tpublic.dll\n",
+            encoding="utf-8")
+        out = work / "out"
+        res = GE.decompile_library(gh, dll, out, mappings_tsv=tsv,
+                                   timeout=600, quiet=True)
+        # Without this the three checks below only prove the Python-side
+        # normalization and would all pass even if headless never ran.
+        check("headless run actually completed", res.get("ok") is True,
+              str(res)[:200])
+
+        written = out / "_addr_mappings.tsv"
+        rows = [ln.split("\t") for ln in written.read_text(
+            encoding="utf-8").strip().splitlines()]
+        check("worker received a 3-column address table",
+              len(rows) == 1 and len(rows[0]) == 3, str(rows))
+        check("worker received ptr/base from the Frida columns",
+              rows[0][1] == "0x10001000" and rows[0][2] == "0x10000000", str(rows))
+        if res.get("ok"):
+            check("headless run log written", (out / "_ghidra_run.log").is_file())
+        check("worker rejected zero mapping lines",
+              res.get("bad_mapping_lines", 0) == 0,
+              str(res.get("bad_mapping_lines")))
+        summary = out / "decompiled_summary.json"
+        if summary.is_file():
+            data = json.loads(summary.read_text(encoding="utf-8"))
+            check("summary records the bad-line counter",
+                  "bad_mapping_lines" in data, str(sorted(data)))
+
+
 def test_native_elf_and_ghidra_annotate() -> None:
     print("natives: ELF (.so) export parsing and Ghidra annotation script generation")
     from jdec import native_scan as NS
