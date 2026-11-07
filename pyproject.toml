@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "jdec"
 dynamic = ["version"]
 description = "Multi-engine Java decompiler driver with bytecode-verified output selection"
-readme = "docs/README.md"
+readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [

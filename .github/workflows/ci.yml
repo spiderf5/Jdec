@@ -91,6 +91,35 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip wheel . -w dist --no-deps
+      - name: Wheel carries no corpus or sample material
+        # A released install must not ship the test corpus, sample jars or
+        # downloaded engines. Runtime templates (*.java), web assets and
+        # fingerprints.json are package data on purpose, so the gate names
+        # archives, compiled classes and test directories instead of banning
+        # every non-Python file.
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheels = glob.glob("dist/jdec-*.whl")
+          assert len(wheels) == 1, wheels
+          names = zipfile.ZipFile(wheels[0]).namelist()
+          banned = {"tests", "samples", "fixtures", "build"}
+          bad = [n for n in names
+                 if n.lower().endswith((".jar", ".class"))
+                 or any(part in banned for part in n.split("/")[:-1])]
+          required = {"jdec/fingerprints.json", "jdec/web_assets/index.html",
+                      "jdec/engines_src/ProcyonBridge.java",
+                      "jdec/recover_driver_template.java"}
+          missing = sorted(required - set(names))
+          print(f"{len(names)} entries in {wheels[0]}")
+          if bad:
+              print("unexpected corpus material:", *bad, sep="\n  ")
+          if missing:
+              # Without this half the gate passes on an empty wheel: stripping
+              # all package data would also strip every sample.
+              print("missing runtime package data:", *missing, sep="\n  ")
+          sys.exit(1 if bad or missing else 0)
+          PY
       - name: Install the wheel into a clean venv
         run: |
           python -m venv /tmp/jdec-wheel-venv
@@ -102,9 +131,14 @@ jobs:
           grep -q 'CFR 0.152.*available' engines.txt
           grep -q 'Vineflower 1.11.1.*available' engines.txt
           grep -q 'Procyon 0.6.0.*available' engines.txt
-      - name: Engine cache must not live under site-packages
+      - name: Engine cache and corpus stay out of site-packages
         run: |
-          test ! -d /tmp/jdec-wheel-venv/lib/python3.11/site-packages/engines
+          SITE=/tmp/jdec-wheel-venv/lib/python3.11/site-packages
+          test ! -d "$SITE/engines"
+          test ! -d "$SITE/jdec/tests"
+          test ! -d "$SITE/jdec/samples"
+          test ! -d "$SITE/tests"
+          test -z "$(find "$SITE/jdec" -name '*.jar' -o -name '*.class' | head -1)"
       - name: Build fixtures
         # src/tests/*.jar is gitignored, so a fresh checkout has none and the
         # probe below would fail with "no such file". run_tests.py builds them

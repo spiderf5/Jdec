@@ -23,13 +23,25 @@ python jdec.py verify client.jar        # JVM 门禁：每个类都要过 -Xveri
 退出码：0 成功 / 1 部分成功 / 2 失败。`decompile` 按**还原结果**判定（全失败或没有可用引擎 / java → 2）；
 `auto` 按**阶段状态**判定（任一阶段 failed → 2）。
 
+## 发布内容
+
+`pip install` 只装 `jdec` 包（含运行时模板、指纹表与 web 资源）。**wheel 里没有
+任何测试素材、样本 jar 或第三方引擎 jar**：前者只属于源码仓库，后者由
+`jdec engines` 按 sha1 校验后下载到引擎缓存，也可走离线引擎包。CI 的
+wheel-smoke 会解包检查这条边界。
+
 ## 文档
 
-完整能力、实测数据与设计取舍见 **[docs/README.md](docs/README.md)**；
-未达成的边界见 [docs/ROADMAP.md](docs/ROADMAP.md) 与 README 的“边界”一节。
-04 支持矩阵（8 类机制，52 项交叉检查）见 [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md)；
-头条数字的复现命令、内置生成式基准与 83.0% 口径见 [docs/REPRODUCE.md](docs/REPRODUCE.md)。
-当前状态：alpha，核心回归 1294 条断言（149 个用例）全绿（`python src/tests/run_tests.py`）；03 专项试用版（Java 级隔离重放、两类机制、独立样本）见 [docs/README.md](docs/README.md)。
+本页是短概览，也是 PyPI 的项目说明；完整能力、实测数据与设计取舍见
+**[完整手册](https://github.com/spiderf5/Jdec/blob/main/docs/README.md)**。
+
+- 未达成的边界：[路线图](https://github.com/spiderf5/Jdec/blob/main/docs/ROADMAP.md)
+- 04 支持矩阵（8 类机制、87 项交叉检查）：[支持矩阵](https://github.com/spiderf5/Jdec/blob/main/docs/SUPPORT_MATRIX.md)
+- 头条数字的复现命令、内置生成式基准与 83.0% 口径：[复现说明](https://github.com/spiderf5/Jdec/blob/main/docs/REPRODUCE.md)
+- 离线交付：[离线引擎包](https://github.com/spiderf5/Jdec/blob/main/docs/OFFLINE.md)
+
+当前状态：alpha，核心回归 **1297 条断言 / 150 个用例**全绿
+（`python src/tests/run_tests.py`）。测试素材与回归套件仅存在于源码仓库。
 
 ---
 
