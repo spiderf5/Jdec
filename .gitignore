@@ -15,13 +15,13 @@ dist/
 # jdec: downloaded engines and build artifacts, restorable via
 #   python jdec.py engines                  (engine jars)
 #   python src/tests/build_fixtures.py     (sample/mixin/flow/collide jars)
-src/engines/*.jar
-src/engines/ghidra/
-src/engines/bridge/*.class
-src/engines/tap/*.jar
-src/engines/tap/*.class
-src/engines/tap/classes/
-src/engines/tests/
+engines/*.jar
+engines/ghidra/
+engines/bridge/*.class
+engines/tap/*.jar
+engines/tap/*.class
+engines/tap/classes/
+engines/tests/
 src/tests/build/
 src/tests/*.jar
 
@@ -63,15 +63,15 @@ out*/
 
 # native 分析工件（样本转储与工作区，local-only；工具本身入库）
 src/_ghproj_rt/
-src/engines/frida/native/
-src/engines/frida/config/
-src/engines/frida/mappings*.tsv
-src/engines/frida/_smoke_out.tsv
-src/engines/frida/.mixin.out/
+engines/frida/native/
+engines/frida/config/
+engines/frida/mappings*.tsv
+engines/frida/_smoke_out.tsv
+engines/frida/.mixin.out/
 
 # 外部研究材料（含 DMCA 敏感源码），永不入库
 study/
 # resident JDK for class v69 (installed via tsinghua adoptium mirror)
 jdk25/
 # stub-jar cache fingerprints (rebuilt from STUB_SOURCES)
-src/engines/*.sha256
+engines/*.sha256

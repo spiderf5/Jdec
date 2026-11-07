@@ -236,7 +236,7 @@ def _get_source_for_engine(work_dir: Path, cls: str, engine: str) -> str:
                     target_class_file.parent.mkdir(parents=True, exist_ok=True)
                     target_class_file.write_bytes(z.read(exact))
 
-                    engines_dir = Path(__file__).resolve().parent.parent / "engines"
+                    engines_dir = Path(__file__).resolve().parents[2] / "engines"
                     if not engines_dir.exists():
                         engines_dir = work_dir.parent / "engines"
 

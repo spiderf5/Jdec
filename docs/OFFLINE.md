@@ -3,7 +3,7 @@
 04 的两项交付之一。按 2026-11-04 拍板，采用**离线引擎包 + 断网 CI 门禁**：
 第三方引擎 jar **不进 wheel**（再分发许可、体积，以及 wheel-smoke 里
 「引擎缓存不得落在 site-packages」的断言都不允许），也不入库
-（`.gitignore` 忽略 `src/engines/*.jar`，`git ls-files '*.jar'` 恒为空）。
+（`.gitignore` 忽略 `engines/*.jar`，`git ls-files '*.jar'` 恒为空）。
 
 ## 为什么需要一层
 
@@ -36,7 +36,8 @@ python scripts/verify_engine_bundle.py --build /path/to/jdec-engines \
 ## 在离线机器上安装
 
 wheel 安装后，引擎目录由 `toolchain.default_engines_dir()` 决定：源码检出用
-`src/engines/`，wheel 安装用每用户缓存
+仓库根的 `engines/`（下载的工具，不是包内容，所以不放在 `src/` 下），
+wheel 安装用每用户缓存
 （Windows `%LOCALAPPDATA%/jdec/engines`，Linux `$XDG_CACHE_HOME/jdec/engines`，
 macOS `~/Library/Caches/jdec/engines`）。**绝不写 site-packages**。
 

@@ -468,7 +468,7 @@ python jdec.py strings client.jar --grep api         # 只留含某个词的
 
 静态还原强混淆（如 ZKM 27 的三层链：indy 引导 session key → 常量折叠引擎 →  
 DES）逐版本易变，不划算。原则：**让混淆器自己解，只盯着出口**。按成本  
-递增分四层；`src/engines/tap/` 覆盖第一层（解密器重放）与运行时捕获挂钩  
+递增分四层；`engines/tap/` 覆盖第一层（解密器重放）与运行时捕获挂钩  
 （StringsSpy 家族），更深层的 agent 按目标适配（方法论见 skill  
 `references/dynamic-analysis.md`）：
 

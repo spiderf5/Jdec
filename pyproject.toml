@@ -66,7 +66,17 @@ jdec = [
 line-length = 100
 target-version = "py310"
 # Downloaded engines and generated fixtures are not source.
-extend-exclude = ["src/engines", "src/tests/build"]
+extend-exclude = ["engines", "src/tests/build"]
+
+[tool.ruff.lint.per-file-ignores]
+# harness.py is a re-export hub: every name it imports exists so a suite can
+# import it, not because harness.py itself uses it.
+"src/tests/harness.py" = ["F401", "F811"]
+# The cases were moved here verbatim; many keep a function-local `import` for
+# a module the harness already provides. That shadowing is harmless, and
+# rewriting 150 bodies to satisfy F811 would bury the move in noise. F821
+# (a name that exists nowhere) stays on, which is the check that matters.
+"src/tests/suites/*.py" = ["F811"]
 
 [tool.ruff.lint]
 # Deliberately narrow. This is the set that catches a defect rather than a

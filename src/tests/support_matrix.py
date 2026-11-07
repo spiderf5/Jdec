@@ -5,7 +5,8 @@ Stage 04 asks for 6-8 mechanism classes with explicit support items, each
 backed by an independent sample regression. This module is the registry and
 the runner. It does NOT ship the corpora: real jars stay outside the tree and
 are supplied with --hmcl / --neo or the JDEC_MATRIX_* environment variables.
-Only the measured report is committed.
+The report is generated on demand and not committed: it is evidence
+for the code state that produced it, and it went stale twice.
 
 Two modes:
   * full       - run every mechanism against the two real corpora and write a
@@ -36,6 +37,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from jdec import cli as CL  # noqa: E402
+from mechanisms import MECHANISMS as MECH  # noqa: E402
 from jdec import container as CT  # noqa: E402
 
 
@@ -97,139 +99,57 @@ class MechanismSpec:
     expected: dict[str, str] = field(default_factory=dict)
 
 
-def _rx(label: str, pattern: str) -> tuple[str, str]:
-    return label, pattern
+#: What "this command still works" means, per mechanism. The claim itself
+#: (support / not_covered), the corpora and the CLI chain live in
+#: `mechanisms.py`: this layer used to carry a second copy and the two drifted
+#: (the diagnostic copy still described M1 as goto-flood rewriting after the
+#: acceptance layer had separated javac's switch lowering from flattening).
+_RULES: dict[str, tuple[tuple[Rule, ...], str]] = {
+    "M1": ((Rule("all_zero_rc"), Rule("min", "rewritten", 1),
+            Rule("min", "verified", 1)),
+           "退出 0；改写方法数 > 0；verify 通过类数 > 0 且无拒绝"),
+    "M2": ((Rule("all_zero_rc"), Rule("min", "cls_ok", 1),
+            Rule("pair_equal", "cls_ok/cls_total"),
+            Rule("pair_equal", "code_ok/code_total")),
+           "退出 0；result=PASS；类与 Code 数组的相等数等于总数"),
+    "M3": ((Rule("all_zero_rc"), Rule("min", "sites", 1)),
+           "退出 0；两个语料都枚举出 > 0 个 indy 站点"),
+    "M4": ((Rule("all_zero_rc"),
+            Rule("contains", "signature", equals="ProGuard / R8", scope="any"),
+            Rule("absent", "signature", equals="ZKM 27 enhanced", scope="any")),
+           "退出 0；HMCL 命中 ProGuard/R8；两语料均不得误报 ZKM 27 "
+           "（独立金标准确认常量池无 DESKeySpec / DES-CBC / zelix）"),
+    "M5": ((Rule("all_zero_rc"), Rule("min", "strings", 1),
+            Rule("min", "tagged", 1),
+            Rule("max", "encrypted_blob", 0, scope="any")),
+           "退出 0；字符串数与标签数 > 0；独立金标准确认无 DES 密文的语料"
+           "不得标出 encrypted-blob（旧规则的 8 个全是内部类名假阳性）"),
+    "M6": ((Rule("all_zero_rc"), Rule("min", "libs", 1),
+            Rule("min", "exports", 1), Rule("min", "native_methods", 1)),
+           "退出 0；HMCL 提取出 PE 库、导出表项与 Java 侧 native 方法"),
+    "M7": ((Rule("all_zero_rc"),
+            Rule("contains", "minecraft", equals="1.8.9"),
+            Rule("contains", "minecraft", equals="Forge")),
+           "退出 0；NeoRaven 识别为 1.8.9 / Forge，且 analyze 输出 Mixin 说明"),
+    "M8": ((Rule("all_zero_rc"), Rule("min", "entries", 1),
+            Rule("min", "classes", 1),
+            Rule("magic", "magic_hmcl", equals="4d5a", scope="any"),
+            Rule("magic", "magic_neo", equals="504b", scope="any")),
+           "退出 0；按 magic 区分 MZ 自解压 stub (4d5a) 与普通 PK jar (504b)，"
+           "两者都能读出条目与类数"),
+}
 
 
-MECHANISMS: tuple[MechanismSpec, ...] = (
+MECHANISMS: tuple[MechanismSpec, ...] = tuple(
     MechanismSpec(
-        id="M1", name="控制流去平坦化 / 常量折叠 / 不透明谓词",
-        support="对含 goto-flood、irreducible-goto 的真实 jar 产出可重放的指令级改写，"
-                "重算 StackMapTable，并让全部类通过 -Xverify:all；产出改写清单供对拍",
-        not_covered="不承诺还原任意自定义 VM；jsr/ret 明确拒绝；改写保持语义但不证明等价",
-        corpora=("hmcl", "neo"),
-        steps=(("deflat", "{jar}", "-o", "{out}/{key}_deflat.jar",
-                "--rewritten", "{out}/{key}_rw.txt", "{cp}"),),
-        metrics=(
-            _rx("rewritten", r"deflat\s+: (\d+) method\(s\) rewritten"),
-            _rx("verified", r"verify\s+: (\d+) class\(es\) pass"),
-        ),
-        rules=(Rule("all_zero_rc"), Rule("min", "rewritten", 1),
-               Rule("min", "verified", 1)),
-        rule_text="退出 0；改写方法数 > 0；verify 通过类数 > 0 且无拒绝",
-    ),
-    MechanismSpec(
-        id="M2", name="字节级往返与坏类隔离（改写底座）",
-        support="对整份真实 jar 逐类 parse→重汇编→逐字节比对，报告类与 Code 数组"
-                "的相等数；坏类被隔离而不是拖垮整批",
-        not_covered="不进行语义等价性证明；jsr/ret 与不可解码类按边界拒绝",
-        corpora=("hmcl", "neo"),
-        steps=(("ircheck", "{jar}", "--limit", "2"),),
-        metrics=(
-            _rx("classes", r"classes\s+: (\d+)"),
-            _rx("unreadable", r"classes\s+: \d+ \((\d+) unreadable\)"),
-            _rx("cls_ok", r"class\s+: (\d+)/\d+ byte-identical"),
-            _rx("cls_total", r"class\s+: \d+/(\d+) byte-identical"),
-            _rx("code_ok", r"method\s+: (\d+)/\d+ Code arrays byte-identical"),
-            _rx("code_total", r"method\s+: \d+/(\d+) Code arrays byte-identical"),
-        ),
-        rules=(Rule("all_zero_rc"), Rule("min", "cls_ok", 1),
-               Rule("pair_equal", "cls_ok/cls_total"),
-               Rule("pair_equal", "code_ok/code_total")),
-        rule_text="退出 0；result=PASS；类与 Code 数组的相等数等于总数",
-    ),
-    MechanismSpec(
-        id="M3", name="invokedynamic / BootstrapMethods 站点枚举",
-        support="枚举真实 jar 的 BootstrapMethods 与 indy 站点，按 bootstrap owner "
-                "与站点名归类，为字符串/调用目标编码提供站点清单",
-        not_covered="不执行 bootstrap；不解密 recipe 之外的自定义引导逻辑",
-        corpora=("hmcl", "neo"),
-        steps=(("indy", "{jar}"),),
-        metrics=(_rx("sites", r"(?m)^indy sites\s+: (\d+)"),),
-        rules=(Rule("all_zero_rc"), Rule("min", "sites", 1)),
-        rule_text="退出 0；两个语料都枚举出 > 0 个 indy 站点",
-    ),
-    MechanismSpec(
-        id="M4", name="混淆器结构指纹归因",
-        support="基于结构阈值与关键词对真实 jar 做混淆器归因并给出置信度，"
-                "36 项指纹各自有门控，命中必须带证据",
-        not_covered="归因词表不等于支持该混淆器的全部机制；不承诺还原",
-        corpora=("hmcl", "neo"),
-        steps=(("probe", "{jar}"),),
-        metrics=(_rx("score", r"obfuscation\s+: (\d+)/100"),
-                 _rx("signature", r"signatures\s+: (.+)"),
-                 _rx("structure", r"structure\s+: (.+)")),
-        rules=(Rule("all_zero_rc"),
-               Rule("contains", "signature", equals="ProGuard / R8", scope="any"),
-               Rule("absent", "signature", equals="ZKM 27 enhanced", scope="any")),
-        rule_text="退出 0；HMCL 命中 ProGuard/R8；两语料均不得误报 ZKM 27 "
-                  "（独立金标准确认常量池无 DESKeySpec / DES-CBC / zelix）",
-    ),
-    MechanismSpec(
-        id="M5", name="字符串常量抽取与加密/威胁标签",
-        support="从真实 jar 的常量池抽取字符串并按 url/path/credential/"
-                "encrypted-blob/machine-id/class-loading 分类标注，输出 TSV+JSON",
-        not_covered="标签是启发式；抽取不等于解密字符串池；两语料经独立金标准"
-                    "确认无 DES 密文，encrypted-blob = 0 是正确结果，不是能力证明",
-        corpora=("hmcl", "neo"),
-        steps=(("strings", "{jar}", "-o", "{out}/{key}_strings"),),
-        metrics=(_rx("strings", r"strings\s+: (\d+) total"),
-                 _rx("tagged", r"tagged\s+: (\d+) literal"),
-                 _rx("encrypted_blob", r"encrypted-blob: (\d+)")),
-        rules=(Rule("all_zero_rc"), Rule("min", "strings", 1),
-               Rule("min", "tagged", 1),
-               Rule("max", "encrypted_blob", 0, scope="any")),
-        rule_text="退出 0；字符串数与标签数 > 0；独立金标准确认无 DES 密文的语料"
-                  "不得标出 encrypted-blob（旧规则的 8 个全是内部类名假阳性）",
-    ),
-    MechanismSpec(
-        id="M6", name="native 分诊与 PE/JNI 库提取",
-        support="从自解压 PE/ELF 与 jar 资源中提取 native 库，解析导出表与"
-                "JNINativeMethod，报告 Java 侧声明的 native 方法与匹配情况",
-        not_covered="不反编译 native 函数体；不承诺 RegisterNatives 动态绑定还原",
-        corpora=("hmcl",),
-        steps=(("natives", "{jar}", "-o", "{out}/{key}_natives"),
-               ("analyze", "{jar}", "-o", "{out}/{key}_analyze")),
-        metrics=(_rx("libs", r"libs\s+: (\d+) extracted"),
-                 _rx("exports", r"exports=(\d+)"),
-                 _rx("native_methods", r"(\d+) native method\(s\) in \d+ class")),
-        rules=(Rule("all_zero_rc"), Rule("min", "libs", 1),
-               Rule("min", "exports", 1), Rule("min", "native_methods", 1)),
-        rule_text="退出 0；HMCL 提取出 PE 库、导出表项与 Java 侧 native 方法",
-    ),
-    MechanismSpec(
-        id="M7", name="Minecraft 元数据与 Mixin hook 识别",
-        support="识别真实客户端的 MC 版本/加载器、Mixin 配置或注解 hook，"
-                "并在无映射时如实保留 hook 目标名",
-        not_covered="映射表本身外置；无映射时不解析 hook 目标的最终符号",
-        corpora=("neo",),
-        steps=(("probe", "{jar}"),
-               ("analyze", "{jar}", "-o", "{out}/{key}_analyze")),
-        metrics=(_rx("minecraft", r"minecraft\s+: (.+)"),
-                 _rx("mixin_note", r"(no mixin config[^\n]*|mixin[^\n]*)")),
-        rules=(Rule("all_zero_rc"),
-               Rule("contains", "minecraft", equals="1.8.9"),
-               Rule("contains", "minecraft", equals="Forge")),
-        rule_text="退出 0；NeoRaven 识别为 1.8.9 / Forge，且 analyze 输出 Mixin 说明",
-    ),
-    MechanismSpec(
-        id="M8", name="容器分类与多版本/截断类隔离",
-        support="按 magic 识别 MZ stub + zip 自解压容器、普通 jar 与目录；"
-                "ircheck 对不可读类隔离而不是把整批判为失败",
-        not_covered="不处理加密容器；multi-release 条目按同一基类的备选排除",
-        corpora=("hmcl", "neo"),
-        steps=(("probe", "{jar}"),),
-        metrics=(_rx("entries", r"entries\s+: (\d+)"),
-                 _rx("classes", r"classes (\d+)"),
-                 _rx("file", r"file\s+: (.+)")),
-        rules=(Rule("all_zero_rc"), Rule("min", "entries", 1),
-               Rule("min", "classes", 1),
-               Rule("magic", "magic_hmcl", equals="4d5a", scope="any"),
-               Rule("magic", "magic_neo", equals="504b", scope="any")),
-        rule_text="退出 0；按 magic 区分 MZ 自解压 stub (4d5a) 与普通 PK jar (504b)，"
-                  "两者都能读出条目与类数",
-    ),
+        id=m.id, name=m.name, support=m.support, not_covered=m.not_covered,
+        corpora=m.diag_corpora, steps=m.diag_steps,
+        metrics=tuple(m.patterns.items()),
+        rules=_RULES[m.id][0], rule_text=_RULES[m.id][1],
+    )
+    for m in MECH
 )
+
 
 
 def _capture(argv: list[str]) -> tuple[int, str]:
