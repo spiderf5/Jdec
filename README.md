@@ -9,16 +9,27 @@ CFR / Vineflower / Procyon 各自跑，按“成员名命中率”（对照 clas
 ## 文档
 
 本页是短概览，同时也是 PyPI 的项目说明。**完整手册与路线图在仓库的 `docs/`
-目录**，以下链接均可直接打开（`HEAD` 跟随默认分支，改名也不会失效）：
+目录**：本地检出或 GitHub 上可直接点下表的相对链接；PyPI 会把相对链接解析到
+自身域名而 404，请用表格后的「在线阅读」入口（`HEAD` 跟随默认分支，改名也不会失效）。
 
 | 文档 | 内容 |
 | --- | --- |
-| **[完整手册](https://github.com/spiderf5/Jdec/blob/HEAD/docs/README.md)** | 全部能力、实测数据与设计取舍（约 50 KB 长文） |
-| **[路线图](https://github.com/spiderf5/Jdec/blob/HEAD/docs/ROADMAP.md)** | 01–04 阶段状态、未达成的边界与硬门槛 |
-| [04 支持矩阵](https://github.com/spiderf5/Jdec/blob/HEAD/docs/SUPPORT_MATRIX.md) | 8 类机制、87 项交叉检查与保留边界 |
-| [复现说明](https://github.com/spiderf5/Jdec/blob/HEAD/docs/REPRODUCE.md) | 头条数字的逐字口径、内置生成式基准与 83.0% 口径 |
-| [02 可达性](https://github.com/spiderf5/Jdec/blob/HEAD/docs/REACHABILITY_02.md) | 剩余 195 个 inconclusive 的 API 级归因 |
-| [离线交付](https://github.com/spiderf5/Jdec/blob/HEAD/docs/OFFLINE.md) | 离线引擎包与断网 CI 门禁 |
+| **[完整手册](docs/README.md)** | 全部能力、实测数据与设计取舍（约 50 KB 长文） |
+| **[路线图](docs/ROADMAP.md)** | 01–04 阶段状态、未达成的边界与硬门槛 |
+| [04 支持矩阵](docs/SUPPORT_MATRIX.md) | 8 类机制、87 项交叉检查与保留边界 |
+| [复现说明](docs/REPRODUCE.md) | 头条数字的逐字口径、内置生成式基准与 83.0% 口径 |
+| [02 可达性](docs/REACHABILITY_02.md) | 剩余 195 个 inconclusive 的 API 级归因 |
+| [离线交付](docs/OFFLINE.md) | 离线引擎包与断网 CI 门禁 |
+| [独立研究线立项书](docs/RESEARCH_LINE.md) | 深挖范围、红线、优先级与逐 case 验收判据 |
+
+在线阅读（GitHub / PyPI）：
+[完整手册](https://github.com/spiderf5/Jdec/blob/HEAD/docs/README.md) ·
+[路线图](https://github.com/spiderf5/Jdec/blob/HEAD/docs/ROADMAP.md) ·
+[04 支持矩阵](https://github.com/spiderf5/Jdec/blob/HEAD/docs/SUPPORT_MATRIX.md) ·
+[复现说明](https://github.com/spiderf5/Jdec/blob/HEAD/docs/REPRODUCE.md) ·
+[02 可达性](https://github.com/spiderf5/Jdec/blob/HEAD/docs/REACHABILITY_02.md) ·
+[离线交付](https://github.com/spiderf5/Jdec/blob/HEAD/docs/OFFLINE.md) ·
+[独立研究线立项书](https://github.com/spiderf5/Jdec/blob/HEAD/docs/RESEARCH_LINE.md)
 
 ## 快速开始
 
@@ -50,8 +61,10 @@ python jdec.py verify client.jar        # JVM 门禁：每个类都要过 -Xveri
 验收链产出的是检查结论，**不是阶段判定**：04 的状态由 `docs/ROADMAP.md` 记录，
 运行器不自称门槛达成。完整验收需自备外置授权语料；`--selfcheck` 是仓库内模式。
 
-当前状态：alpha，核心回归 **1302 条断言 / 152 个用例**全绿
-（`python src/tests/run_tests.py`）。测试素材与回归套件仅存在于源码仓库。
+当前状态：alpha，核心回归全绿。**断言数与用例数以
+`python src/tests/run_tests.py` 的实际输出为准**——数字随用例增删变化，
+历次实测只记在 `docs/RESEARCH_LINE.md` 的带日期时点快照里，本页不维护。
+测试素材与回归套件仅存在于源码仓库。
 
 ---
 

@@ -2,7 +2,9 @@
 
 **结论：04 达成。** `docs/ROADMAP.md:19` 的状态列按修订纪律推进为
 「✅ 已达成」，依据是本文件、`docs/STAGE04_REPORT.json` 的 87 项交叉检查与
-`run_tests.py` 的 1302 条断言 / 152 个用例。
+`run_tests.py` 的 1302 条断言 / 152 个用例（**04 达成时点基线**；当前值以
+`python src/tests/run_tests.py` 的实际输出为准，历史复验数字见
+`RESEARCH_LINE.md` §10.4 / §11 / §12）。
 
 本版与 11-05 两版的关键区别：**先补了 `src/jdec` 的机制代码，再谈验收**。
 
